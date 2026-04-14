@@ -1,2 +1,2 @@
-// Parser module — wraps web-ifc for IFC parsing
-// Will be implemented in Phase 2
+export { IfcParser } from './IfcParser';
+export type { ParsedMesh, ParsedModel } from './IfcParser';
