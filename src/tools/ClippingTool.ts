@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Tool } from './Tool';
+import { raycastVisible } from '../utils/raycast';
 
 export interface ClippingToolDeps {
   renderer: THREE.WebGLRenderer;
@@ -10,8 +11,9 @@ export interface ClippingToolDeps {
 
 /**
  * States:
- *   PLACING  — tool is active, waiting for user to click a surface
- *   CLIPPING — a clip plane exists, user can drag to move it or flip direction
+ *   IDLE     — tool is not active
+ *   PLACING  — tool is active, crosshair cursor, waiting for mousedown on a surface
+ *   CLIPPING — a clip plane exists, user can drag handle but must press C/✂ to re-place
  */
 
 export class ClippingTool implements Tool {
@@ -22,6 +24,7 @@ export class ClippingTool implements Tool {
   private mouse = new THREE.Vector2();
 
   // Clipping state
+  private placing = false;
   private clipPlane: THREE.Plane | null = null;
   private planeNormal = new THREE.Vector3();
   private planePoint = new THREE.Vector3();
@@ -31,42 +34,54 @@ export class ClippingTool implements Tool {
   private dragging = false;
   private dragPrevY = 0;
 
-  // Constant screen-size factor: desired pixel size / reference distance
+  // Constant screen-size factor
   private readonly HANDLE_SCREEN_SIZE = 0.03;
 
   // Bound handlers
-  private boundOnClick: (e: MouseEvent) => void;
+  private boundOnPlaceDown: (e: MouseEvent) => void;
   private boundOnPointerDown: (e: PointerEvent) => void;
   private boundOnPointerMove: (e: PointerEvent) => void;
   private boundOnPointerUp: (e: PointerEvent) => void;
 
   constructor(deps: ClippingToolDeps) {
     this.deps = deps;
-    this.boundOnClick = this.onClick.bind(this);
+    this.boundOnPlaceDown = this.onPlaceDown.bind(this);
     this.boundOnPointerDown = this.onPointerDown.bind(this);
     this.boundOnPointerMove = this.onPointerMove.bind(this);
     this.boundOnPointerUp = this.onPointerUp.bind(this);
   }
 
   activate(): void {
-    this.deps.canvas.style.cursor = 'crosshair';
-    this.deps.canvas.addEventListener('click', this.boundOnClick);
+    this.enterPlacingMode();
   }
 
   deactivate(): void {
-    this.deps.canvas.style.cursor = '';
-    this.deps.canvas.removeEventListener('click', this.boundOnClick);
+    this.exitPlacingMode();
     this.removeDragListeners();
     this.removeClipPlane();
+    this.deps.canvas.style.cursor = '';
+  }
+
+  /**
+   * Enter placement mode. Called on first activate, and again when
+   * user presses C/✂ while a clip plane already exists.
+   */
+  enterPlacingMode(): void {
+    this.placing = true;
+    this.deps.canvas.style.cursor = 'crosshair';
+    this.deps.canvas.addEventListener('mousedown', this.boundOnPlaceDown);
+  }
+
+  private exitPlacingMode(): void {
+    this.placing = false;
+    this.deps.canvas.removeEventListener('mousedown', this.boundOnPlaceDown);
   }
 
   /** Call every frame to keep handle at constant screen size */
   update(): void {
     if (!this.handleGroup) return;
 
-    const handleWorldPos = this.handleGroup.children[0]?.getWorldPosition(new THREE.Vector3());
-    if (!handleWorldPos) return;
-
+    const handleWorldPos = this.handleGroup.getWorldPosition(new THREE.Vector3());
     const distance = this.deps.camera.position.distanceTo(handleWorldPos);
     const scale = distance * this.HANDLE_SCREEN_SIZE;
     this.handleGroup.scale.setScalar(scale);
@@ -76,7 +91,7 @@ export class ClippingTool implements Tool {
     this.deactivate();
   }
 
-  // ── Placing phase ──────────────────────────────────────────
+  // ── Placing (mousedown) ────────────────────────────────────
 
   private updateMouse(e: MouseEvent): void {
     const rect = this.deps.canvas.getBoundingClientRect();
@@ -84,32 +99,30 @@ export class ClippingTool implements Tool {
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
-  private onClick(e: MouseEvent): void {
-    if (this.clipPlane) return;
+  private onPlaceDown(e: MouseEvent): void {
+    if (e.button !== 0) return;
 
     this.updateMouse(e);
-    this.raycaster.setFromCamera(this.mouse, this.deps.camera);
 
-    const meshes: THREE.Mesh[] = [];
-    this.deps.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && !obj.userData.isClipHelper) {
-        meshes.push(obj);
-      }
-    });
+    const visibleHit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
+    if (!visibleHit || !visibleHit.face) return;
 
-    const intersects = this.raycaster.intersectObjects(meshes, false);
-    if (intersects.length === 0) return;
+    // World-space normal, negated so clipping removes the camera-facing side
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(visibleHit.object.matrixWorld);
+    this.planeNormal.copy(visibleHit.face.normal).applyMatrix3(normalMatrix).normalize().negate();
+    this.planePoint.copy(visibleHit.point);
 
-    const hit = intersects[0];
-    if (!hit.face) return;
+    // Remove old plane if re-placing
+    this.removeDragListeners();
+    this.removeClipPlane();
 
-    // World-space normal of the hit face, negated so clipping removes the
-    // outside (the side the camera is looking at), keeping the interior visible
-    const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
-    this.planeNormal.copy(hit.face.normal).applyMatrix3(normalMatrix).normalize().negate();
-    this.planePoint.copy(hit.point);
-
+    // Create new plane and exit placing mode
     this.createClipPlane();
+    this.exitPlacingMode();
+    this.deps.canvas.style.cursor = '';
+
+    // Prevent this mousedown from triggering orbit controls
+    e.stopPropagation();
   }
 
   // ── Clipping phase ─────────────────────────────────────────
@@ -122,10 +135,6 @@ export class ClippingTool implements Tool {
     this.deps.renderer.localClippingEnabled = true;
 
     this.createHandle();
-
-    // Switch to drag mode
-    this.deps.canvas.removeEventListener('click', this.boundOnClick);
-    this.deps.canvas.style.cursor = '';
     this.addDragListeners();
   }
 
@@ -156,7 +165,7 @@ export class ClippingTool implements Tool {
     this.handleGroup.userData.isClipHelper = true;
     this.handleGroup.position.copy(this.planePoint);
 
-    // 1. Ring to mark the clip location (unit-sized, scaled by update())
+    // Ring to mark the clip location (unit-sized, scaled by update())
     const ringGeom = new THREE.RingGeometry(0.6, 1.0, 24);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x3b82f6,
@@ -169,13 +178,12 @@ export class ClippingTool implements Tool {
     ring.renderOrder = 999;
     ring.userData.isClipHelper = true;
 
-    // Orient ring to face along the plane normal
     const target = new THREE.Vector3().copy(this.planePoint).add(this.planeNormal);
     ring.lookAt(target);
 
     this.handleGroup.add(ring);
 
-    // 2. Arrow showing clip direction (unit-sized)
+    // Arrow showing clip direction (unit-sized)
     const arrowHelper = new THREE.ArrowHelper(
       this.planeNormal.clone(),
       new THREE.Vector3(0, 0, 0),
@@ -200,7 +208,6 @@ export class ClippingTool implements Tool {
   private updateHandlePosition(): void {
     if (!this.handleGroup || !this.clipPlane) return;
 
-    // Move handle group along normal to match new plane position
     const offset = this.clipPlane.distanceToPoint(this.planePoint);
     this.handleGroup.position.copy(this.planePoint).addScaledVector(this.planeNormal, -offset);
   }
@@ -221,14 +228,12 @@ export class ClippingTool implements Tool {
 
   private onPointerDown(e: PointerEvent): void {
     if (!this.handleGroup || !this.clipPlane) return;
-
-    // Only start drag on left-click on the handle area
     if (e.button !== 0) return;
+    if (this.placing) return;
 
     this.updateMouse(e);
     this.raycaster.setFromCamera(this.mouse, this.deps.camera);
 
-    // Check if clicking near the handle — generous hit sphere scaled with camera distance
     const handlePos = this.handleGroup.getWorldPosition(new THREE.Vector3());
     const dist = this.deps.camera.position.distanceTo(handlePos);
     const hitRadius = dist * this.HANDLE_SCREEN_SIZE * 1.5;
@@ -248,13 +253,12 @@ export class ClippingTool implements Tool {
 
   private onPointerMove(e: PointerEvent): void {
     if (!this.clipPlane || !this.handleGroup) return;
+    if (this.placing) return;
 
     if (this.dragging) {
-      // Map vertical mouse movement to plane movement along normal
       const deltaY = e.clientY - this.dragPrevY;
       this.dragPrevY = e.clientY;
 
-      // Scale: bigger model = bigger movement per pixel
       const speed = this.getModelSize() * 0.002;
       const movement = -deltaY * speed;
 
