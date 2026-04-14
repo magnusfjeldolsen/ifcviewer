@@ -1,2 +1,2 @@
-// UI module — DOM-based UI components (toolbar, panels, overlays)
-// Will be implemented in Phase 2+
+export { Toolbar } from './Toolbar';
+export type { ToolButton } from './Toolbar';

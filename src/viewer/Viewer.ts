@@ -7,6 +7,7 @@ export class Viewer {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private animationId: number | null = null;
+  private updateCallbacks: Array<() => void> = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -41,9 +42,22 @@ export class Viewer {
     return this.camera;
   }
 
+  getRenderer(): THREE.WebGLRenderer {
+    return this.renderer;
+  }
+
+  getCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  onUpdate(callback: () => void): void {
+    this.updateCallbacks.push(callback);
+  }
+
   animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
     this.controls.update();
+    for (const cb of this.updateCallbacks) cb();
     this.renderer.render(this.scene, this.camera);
   };
 

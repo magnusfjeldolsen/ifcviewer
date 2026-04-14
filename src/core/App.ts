@@ -2,6 +2,9 @@ import { Viewer } from '../viewer/Viewer';
 import { ModelManager } from '../viewer/ModelManager';
 import { FileLoader } from '../loader/FileLoader';
 import { IfcParser } from '../parser/IfcParser';
+import { ToolManager } from '../tools/Tool';
+import { ClippingTool } from '../tools/ClippingTool';
+import { Toolbar } from '../ui/Toolbar';
 import type { LoadedFile } from '../loader/FileLoader';
 
 export class App {
@@ -9,6 +12,8 @@ export class App {
   private modelManager: ModelManager;
   private fileLoader: FileLoader;
   private parser: IfcParser;
+  private toolManager: ToolManager;
+  private toolbar: Toolbar;
   private statusEl: HTMLElement | null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -17,6 +22,28 @@ export class App {
     this.fileLoader = new FileLoader();
     this.parser = new IfcParser();
     this.statusEl = document.getElementById('status');
+
+    // Tools
+    this.toolManager = new ToolManager();
+
+    const clippingTool = new ClippingTool({
+      renderer: this.viewer.getRenderer(),
+      scene: this.viewer.getScene(),
+      camera: this.viewer.getCamera(),
+      canvas: this.viewer.getCanvas(),
+    });
+    this.toolManager.register(clippingTool);
+
+    // Keep clipping handle at constant screen size
+    this.viewer.onUpdate(() => clippingTool.update());
+
+    // Toolbar UI
+    const appEl = document.getElementById('app')!;
+    this.toolbar = new Toolbar(appEl, this.toolManager);
+    this.toolbar.addButton({ name: 'clipping', icon: '✂', title: 'Section Cut' });
+    this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
+    this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', disabled: true });
+    this.toolbar.finalize();
   }
 
   async start(): Promise<void> {
@@ -65,6 +92,8 @@ export class App {
   }
 
   dispose(): void {
+    this.toolbar.dispose();
+    this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();
     this.parser.dispose();
