@@ -1,0 +1,28 @@
+{
+  "name": "ifcviewer",
+  "version": "1.0.0",
+  "description": "Browser-based IFC viewer",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/three": "^0.183.1",
+    "eslint": "^10.2.0",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.58.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4"
+  },
+  "dependencies": {
+    "three": "^0.183.2",
+    "web-ifc": "^0.0.77"
+  }
+}
