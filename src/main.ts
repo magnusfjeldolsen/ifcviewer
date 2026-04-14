@@ -7,3 +7,7 @@ if (!canvas) {
 
 const app = new App(canvas);
 app.start();
+
+// Enable drag-drop on the full page
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
