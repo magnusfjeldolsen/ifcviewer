@@ -6,6 +6,7 @@ declare global {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function gtag(..._args: unknown[]): void {
   // Must use `arguments` (not rest params) — gtag.js only recognises
   // Arguments objects in the dataLayer queue, not plain Arrays.
