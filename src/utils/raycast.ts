@@ -18,7 +18,8 @@ export function raycastVisible(
     if (
       obj instanceof THREE.Mesh &&
       !obj.userData.isClipHelper &&
-      !obj.userData.isPivotMarker
+      !obj.userData.isPivotMarker &&
+      !obj.userData.isMeasurement
     ) {
       meshes.push(obj);
     }
