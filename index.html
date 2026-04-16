@@ -3,11 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>IFC Viewer</title>
+    <title>IFC Viewer — Free Online BIM File Viewer | Tømmerdal Consult AS</title>
+
+    <!-- SEO -->
+    <meta name="description" content="Free open-source IFC viewer. View and inspect BIM models directly in your browser — no upload, no server, no data leaves your device." />
+    <meta name="keywords" content="IFC viewer, BIM viewer, free, open-source, browser, local, no upload, Industry Foundation Classes, 3D model viewer" />
+    <meta name="author" content="Tømmerdal Consult AS" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://magnusfjeldolsen.github.io/ifcviewer/" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="IFC Viewer — Free Online BIM File Viewer" />
+    <meta property="og:description" content="Free open-source IFC viewer. 100% client-side — no upload, no server, no data leaves your device. No account required." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://magnusfjeldolsen.github.io/ifcviewer/" />
+    <meta property="og:image" content="https://magnusfjeldolsen.github.io/ifcviewer/assets/logo/logo.png" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="IFC Viewer — Free Online BIM File Viewer" />
+    <meta name="twitter:description" content="Free open-source IFC viewer. 100% client-side — your files never leave your browser." />
+    <meta name="twitter:image" content="https://magnusfjeldolsen.github.io/ifcviewer/assets/logo/logo.png" />
+
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="app">
+    <main id="app">
       <canvas id="viewer-canvas"></canvas>
 
       <div id="drop-zone">
@@ -22,7 +43,8 @@
       </div>
 
       <div id="status"></div>
-    </div>
+    </main>
+    <footer id="app-footer"></footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

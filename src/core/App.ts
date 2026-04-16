@@ -8,6 +8,10 @@ import { MeasurementTool } from '../tools/MeasurementTool';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
+import { Footer } from '../ui/Footer';
+import { CookieBanner } from '../ui/CookieBanner';
+import { CookieConsent } from '../services/CookieConsent';
+import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -24,6 +28,8 @@ export class App {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private clippingTool: ClippingTool;
   private measurementTool: MeasurementTool;
+  private footer: Footer;
+  private cookieBanner: CookieBanner;
   private loadedFiles = new Map<string, ArrayBuffer>();
   private statusEl: HTMLElement | null;
 
@@ -108,6 +114,15 @@ export class App {
         }
       }
     });
+
+    // Footer branding + cookie consent
+    const footerEl = document.getElementById('app-footer')!;
+    this.footer = new Footer(footerEl);
+    this.cookieBanner = new CookieBanner(footerEl);
+    this.cookieBanner.onAccept(() => Analytics.load());
+    if (CookieConsent.getStatus() === 'accepted') {
+      Analytics.load();
+    }
 
     this.setupKeyboardShortcuts();
   }
@@ -277,6 +292,8 @@ export class App {
   dispose(): void {
     window.removeEventListener('beforeunload', this.boundBeforeUnload);
     if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.cookieBanner.dispose();
+    this.footer.dispose();
     this.memoryToggle.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();

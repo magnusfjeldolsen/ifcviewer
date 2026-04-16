@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://magnusfjeldolsen.github.io/ifcviewer/sitemap.xml
