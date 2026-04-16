@@ -93,6 +93,10 @@ export class ModelManager {
     return Array.from(this.models.values());
   }
 
+  getModelIds(): string[] {
+    return Array.from(this.models.keys());
+  }
+
   getBoundingBox(id?: string): THREE.Box3 {
     const box = new THREE.Box3();
 
