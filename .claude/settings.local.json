@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(node -e \"const w = require\\('web-ifc'\\); console.log\\(Object.keys\\(w\\).filter\\(k => typeof w[k] === 'function' || k === 'IfcAPI'\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e ':*)",
+      "Bash(ls \"c:/Python/ifcviewer/dist/\"*.wasm)",
+      "Bash(rm -rf dist)",
+      "Bash(ls dist/*.wasm)",
+      "Bash(grep -l \"TransformControls\" c:/Python/ifcviewer/node_modules/@types/three/examples/jsm/controls/*.d.ts)",
+      "Bash(grep -l \"clipping\\\\|Plane\" c:/Python/ifcviewer/node_modules/@types/three/src/*.d.ts)",
+      "Bash(grep -l \"transparent\\\\|opacity\" c:/Python/ifcviewer/node_modules/@types/three/src/materials/*.d.ts)",
+      "Bash(git checkout *)",
+      "Bash(git push *)",
+      "Bash(git pull *)"
+    ]
+  }
+}

@@ -6,6 +6,7 @@ import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
 import { Toolbar } from '../ui/Toolbar';
+import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
 import { SessionStore } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
@@ -17,6 +18,7 @@ export class App {
   private parser: IfcParser;
   private toolManager: ToolManager;
   private toolbar: Toolbar;
+  private modelTreePanel: ModelTreePanel;
   private sessionStore: SessionStore;
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -71,6 +73,21 @@ export class App {
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', disabled: true });
     this.toolbar.finalize();
+
+    // Model tree panel
+    this.modelTreePanel = new ModelTreePanel(appEl, {
+      onVisibilityToggle: (id, visible) => {
+        this.modelManager.setVisible(id, visible);
+      },
+      onRemoveModel: (id) => {
+        this.modelManager.removeModel(id);
+        this.modelTreePanel.removeModel(id);
+      },
+      onAddModel: () => {
+        const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
+        if (fileInput) fileInput.click();
+      },
+    });
 
     // Session persistence
     this.sessionStore = new SessionStore();
@@ -165,6 +182,7 @@ export class App {
           this.setStatus(`Restoring ${file.name}...`);
           const parsed = await this.parser.parse(file.buffer, file.name);
           this.modelManager.addModel(parsed);
+          this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
         } catch {
           // skip files that fail to parse on restore
         }
@@ -187,6 +205,7 @@ export class App {
 
       const parsed = await this.parser.parse(file.buffer, file.name);
       this.modelManager.addModel(parsed);
+      this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
 
       const box = this.modelManager.getBoundingBox();
       this.viewer.fitToBox(box);
@@ -218,6 +237,7 @@ export class App {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.memoryToggle.dispose();
     this.toolbar.dispose();
+    this.modelTreePanel.dispose();
     this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();
