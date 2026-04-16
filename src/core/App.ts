@@ -22,6 +22,7 @@ export class App {
   private sessionStore: SessionStore;
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private loadedFiles = new Map<string, ArrayBuffer>();
   private statusEl: HTMLElement | null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -92,10 +93,17 @@ export class App {
     // Session persistence
     this.sessionStore = new SessionStore();
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
-    this.memoryToggle.onChange((enabled) => {
-      if (!enabled && this.saveTimer) {
-        clearTimeout(this.saveTimer);
-        this.saveTimer = null;
+    this.memoryToggle.onChange(async (enabled) => {
+      if (enabled) {
+        // Flush all in-memory files to IndexedDB
+        for (const [name, buffer] of this.loadedFiles) {
+          await this.sessionStore.saveFile(name, buffer);
+        }
+      } else {
+        if (this.saveTimer) {
+          clearTimeout(this.saveTimer);
+          this.saveTimer = null;
+        }
       }
     });
 
@@ -183,6 +191,7 @@ export class App {
           const parsed = await this.parser.parse(file.buffer, file.name);
           this.modelManager.addModel(parsed);
           this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
+          this.loadedFiles.set(file.name, file.buffer);
         } catch {
           // skip files that fail to parse on restore
         }
@@ -206,6 +215,7 @@ export class App {
       const parsed = await this.parser.parse(file.buffer, file.name);
       this.modelManager.addModel(parsed);
       this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
+      this.loadedFiles.set(file.name, file.buffer);
 
       const box = this.modelManager.getBoundingBox();
       this.viewer.fitToBox(box);
