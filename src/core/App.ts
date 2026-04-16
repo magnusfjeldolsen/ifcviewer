@@ -22,6 +22,8 @@ export class App {
   private sessionStore: SessionStore;
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private clippingTool: ClippingTool;
+  private measurementTool: MeasurementTool;
   private loadedFiles = new Map<string, ArrayBuffer>();
   private statusEl: HTMLElement | null;
 
@@ -35,26 +37,26 @@ export class App {
     // Tools
     this.toolManager = new ToolManager();
 
-    const clippingTool = new ClippingTool({
+    this.clippingTool = new ClippingTool({
       renderer: this.viewer.getRenderer(),
       scene: this.viewer.getScene(),
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
     });
-    this.toolManager.register(clippingTool);
+    this.toolManager.register(this.clippingTool);
 
-    const measurementTool = new MeasurementTool({
+    this.measurementTool = new MeasurementTool({
       renderer: this.viewer.getRenderer(),
       scene: this.viewer.getScene(),
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
     });
-    this.toolManager.register(measurementTool);
+    this.toolManager.register(this.measurementTool);
 
     // Keep clipping handle and measurement markers at constant screen size
     this.viewer.onUpdate(() => {
-      clippingTool.update();
-      measurementTool.update();
+      this.clippingTool.update();
+      this.measurementTool.update();
     });
 
     // Toolbar UI
@@ -64,7 +66,7 @@ export class App {
       name: 'clipping',
       icon: '✂',
       title: 'Section Cut (C)',
-      onReactivate: () => clippingTool.enterPlacingMode(),
+      onReactivate: () => this.clippingTool.enterPlacingMode(),
     });
     this.toolbar.addButton({
       name: 'measurement',
@@ -72,7 +74,7 @@ export class App {
       title: 'Measure (M)',
     });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
-    this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', disabled: true });
+    this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', onClick: () => this.resetView() });
     this.toolbar.finalize();
 
     // Model tree panel
@@ -231,6 +233,36 @@ export class App {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
     }
+  }
+
+  private async resetView(): Promise<void> {
+    // Tear down all view state
+    this.toolManager.abort();
+    this.clippingTool.clearClipPlane();
+    this.measurementTool.clearMeasurements();
+    this.viewer.clearPivot();
+
+    // Remove all models and UI rows
+    for (const id of this.modelManager.getModelIds()) {
+      this.modelManager.removeModel(id);
+      this.modelTreePanel.removeModel(id);
+    }
+
+    // Re-parse and re-add every loaded file from memory
+    for (const [name, buffer] of this.loadedFiles) {
+      try {
+        this.setStatus(`Reloading ${name}...`);
+        const parsed = await this.parser.parse(buffer, name);
+        this.modelManager.addModel(parsed);
+        this.modelTreePanel.addModel(parsed.id, name, parsed.meshes.length);
+      } catch {
+        // skip files that fail to re-parse
+      }
+    }
+
+    const box = this.modelManager.getBoundingBox();
+    this.viewer.fitToBox(box);
+    this.setStatus('');
   }
 
   private setStatus(text: string): void {

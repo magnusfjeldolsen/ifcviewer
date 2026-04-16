@@ -7,6 +7,8 @@ export interface ToolButton {
   disabled?: boolean;
   /** Called when clicking the button while this tool is already active */
   onReactivate?: () => void;
+  /** If provided, button fires this action instead of toggling a tool */
+  onClick?: () => void;
 }
 
 export class Toolbar {
@@ -57,15 +59,23 @@ export class Toolbar {
     }
 
     if (!config.disabled) {
-      btn.addEventListener('click', () => {
-        if (this.toolManager.isActive(config.name)) {
-          // Already active — call reactivate handler instead of toggling off
-          const handler = this.reactivateHandlers.get(config.name);
-          if (handler) handler();
-        } else {
-          this.toolManager.activate(config.name);
-        }
-      });
+      if (config.onClick) {
+        const action = config.onClick;
+        btn.addEventListener('click', () => {
+          this.toolManager.abort();
+          action();
+        });
+      } else {
+        btn.addEventListener('click', () => {
+          if (this.toolManager.isActive(config.name)) {
+            // Already active — call reactivate handler instead of toggling off
+            const handler = this.reactivateHandlers.get(config.name);
+            if (handler) handler();
+          } else {
+            this.toolManager.activate(config.name);
+          }
+        });
+      }
     }
 
     this.buttons.set(config.name, btn);
