@@ -4,7 +4,6 @@ import { FileLoader } from '../loader/FileLoader';
 import { IfcParser } from '../parser/IfcParser';
 import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
-import { MeasurementTool } from '../tools/MeasurementTool';
 import { Toolbar } from '../ui/Toolbar';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -35,19 +34,8 @@ export class App {
     });
     this.toolManager.register(clippingTool);
 
-    const measurementTool = new MeasurementTool({
-      renderer: this.viewer.getRenderer(),
-      scene: this.viewer.getScene(),
-      camera: this.viewer.getCamera(),
-      canvas: this.viewer.getCanvas(),
-    });
-    this.toolManager.register(measurementTool);
-
-    // Keep clipping handle and measurement markers at constant screen size
-    this.viewer.onUpdate(() => {
-      clippingTool.update();
-      measurementTool.update();
-    });
+    // Keep clipping handle at constant screen size
+    this.viewer.onUpdate(() => clippingTool.update());
 
     // Toolbar UI
     const appEl = document.getElementById('app')!;
@@ -57,11 +45,6 @@ export class App {
       icon: '✂',
       title: 'Section Cut (C)',
       onReactivate: () => clippingTool.enterPlacingMode(),
-    });
-    this.toolbar.addButton({
-      name: 'measurement',
-      icon: '📏',
-      title: 'Measure (M)',
     });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', disabled: true });
@@ -79,12 +62,6 @@ export class App {
           tool.enterPlacingMode();
         } else {
           this.toolManager.activate('clipping');
-        }
-      }
-
-      if (e.key === 'm' || e.key === 'M') {
-        if (!this.toolManager.isActive('measurement')) {
-          this.toolManager.activate('measurement');
         }
       }
     });
