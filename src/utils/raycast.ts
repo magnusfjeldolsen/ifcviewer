@@ -14,7 +14,7 @@ export function raycastVisible(
   raycaster.setFromCamera(mouse, camera);
 
   const meshes: THREE.Mesh[] = [];
-  scene.traverse((obj) => {
+  scene.traverseVisible((obj) => {
     if (
       obj instanceof THREE.Mesh &&
       !obj.userData.isClipHelper &&
