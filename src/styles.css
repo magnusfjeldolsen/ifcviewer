@@ -350,3 +350,109 @@ html, body {
 .memory-toggle-switch input:checked + .memory-toggle-slider::before {
   transform: translateX(16px);
 }
+
+/* Footer / branding */
+#app-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 6px 16px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.app-footer-credit {
+  font-size: 11px;
+  color: rgba(100, 100, 100, 0.6);
+  pointer-events: auto;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.app-footer-credit a {
+  color: rgba(80, 80, 80, 0.7);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.app-footer-credit a:hover {
+  color: rgba(0, 0, 0, 0.8);
+  text-decoration: underline;
+}
+
+/* Cookie consent banner */
+.cookie-banner {
+  position: fixed;
+  bottom: 8px;
+  left: 8px;
+  z-index: 100;
+  pointer-events: auto;
+}
+
+.cookie-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 18px;
+  transition: background 0.2s;
+}
+
+.cookie-icon:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.cookie-expanded {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.cookie-buttons {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cookie-expanded button {
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: rgba(0, 0, 0, 0.05);
+  color: #374151;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.2s;
+}
+
+.cookie-expanded button:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.cookie-expanded button.accept {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+}
+
+.cookie-expanded button.accept:hover {
+  background: #2563eb;
+}
