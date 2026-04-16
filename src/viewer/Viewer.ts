@@ -6,19 +6,10 @@ export class Viewer {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
-  private canvas: HTMLCanvasElement;
   private animationId: number | null = null;
   private updateCallbacks: Array<() => void> = [];
 
-  // Pivot picking state
-  private pickingPivot = false;
-  private raycaster = new THREE.Raycaster();
-  private mouse = new THREE.Vector2();
-  private pivotMarker: THREE.Mesh | null = null;
-  private defaultTarget = new THREE.Vector3();
-
   constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -39,7 +30,6 @@ export class Viewer {
 
     this.setupLights();
     this.setupGrid();
-    this.setupPivotPicking();
 
     window.addEventListener('resize', this.onResize);
   }
@@ -90,15 +80,6 @@ export class Viewer {
 
     this.controls.target.copy(center);
     this.controls.update();
-
-    // Store as default for reset
-    this.defaultTarget.copy(center);
-  }
-
-  resetPivot(): void {
-    this.controls.target.copy(this.defaultTarget);
-    this.controls.update();
-    this.removePivotMarker();
   }
 
   dispose(): void {
@@ -129,107 +110,4 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   };
-
-  // ── Pivot picking ────────────────────────────────────────
-
-  private setupPivotPicking(): void {
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'v' || e.key === 'V') {
-        if (this.pickingPivot) {
-          this.cancelPivotPicking();
-        } else {
-          this.startPivotPicking();
-        }
-      }
-      if (e.key === 'Escape' && this.pickingPivot) {
-        this.cancelPivotPicking();
-      }
-    });
-
-    this.canvas.addEventListener('click', (e) => {
-      if (!this.pickingPivot) return;
-      this.placePivot(e);
-    });
-  }
-
-  private startPivotPicking(): void {
-    this.pickingPivot = true;
-    this.canvas.style.cursor = 'crosshair';
-  }
-
-  private cancelPivotPicking(): void {
-    this.pickingPivot = false;
-    this.canvas.style.cursor = '';
-  }
-
-  private placePivot(e: MouseEvent): void {
-    const rect = this.canvas.getBoundingClientRect();
-    this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-    this.raycaster.setFromCamera(this.mouse, this.camera);
-
-    const meshes: THREE.Mesh[] = [];
-    this.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && !obj.userData.isClipHelper && !obj.userData.isPivotMarker) {
-        meshes.push(obj);
-      }
-    });
-
-    const intersects = this.raycaster.intersectObjects(meshes, false);
-
-    // Filter out hits on the clipped side of any active clipping plane
-    const clippingPlanes = this.renderer.clippingPlanes;
-    const visibleHit = intersects.find((hit) =>
-      clippingPlanes.every((plane) => plane.distanceToPoint(hit.point) >= 0),
-    );
-
-    if (!visibleHit) {
-      this.cancelPivotPicking();
-      return;
-    }
-
-    const point = visibleHit.point;
-    this.controls.target.copy(point);
-    this.controls.update();
-
-    this.showPivotMarker(point);
-    this.cancelPivotPicking();
-  }
-
-  private showPivotMarker(point: THREE.Vector3): void {
-    this.removePivotMarker();
-
-    const geom = new THREE.SphereGeometry(1, 12, 12);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xef4444,
-      depthTest: false,
-      transparent: true,
-      opacity: 0.6,
-    });
-    this.pivotMarker = new THREE.Mesh(geom, mat);
-    this.pivotMarker.position.copy(point);
-    this.pivotMarker.renderOrder = 998;
-    this.pivotMarker.userData.isPivotMarker = true;
-    this.scene.add(this.pivotMarker);
-
-    // Scale marker to constant screen size
-    this.onUpdate(() => this.updatePivotMarkerScale());
-  }
-
-  private updatePivotMarkerScale = (): void => {
-    if (!this.pivotMarker) return;
-    const dist = this.camera.position.distanceTo(this.pivotMarker.position);
-    const scale = dist * 0.008;
-    this.pivotMarker.scale.setScalar(scale);
-  };
-
-  private removePivotMarker(): void {
-    if (this.pivotMarker) {
-      this.scene.remove(this.pivotMarker);
-      this.pivotMarker.geometry.dispose();
-      (this.pivotMarker.material as THREE.Material).dispose();
-      this.pivotMarker = null;
-    }
-  }
 }
