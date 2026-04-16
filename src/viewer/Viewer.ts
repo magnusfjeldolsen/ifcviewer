@@ -47,27 +47,6 @@ export class Viewer {
     this.renderer.render(this.scene, this.camera);
   };
 
-  fitToBox(box: THREE.Box3): void {
-    if (box.isEmpty()) return;
-
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const distance = maxDim * 1.5;
-
-    this.camera.position.set(
-      center.x + distance,
-      center.y + distance * 0.7,
-      center.z + distance,
-    );
-    this.camera.near = distance * 0.01;
-    this.camera.far = distance * 100;
-    this.camera.updateProjectionMatrix();
-
-    this.controls.target.copy(center);
-    this.controls.update();
-  }
-
   dispose(): void {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
