@@ -12,6 +12,26 @@ Construction teams often store IFC models in cloud platforms (GitHub, SharePoint
 
 ---
 
+## Key principle: Shared framework, thin provider configs
+
+Cloud providers differ in URL patterns, auth flows, and APIs — but the underlying mechanics are largely the same. Rather than building N separate loader implementations that each duplicate fetch logic, error handling, and auth plumbing, we use a **layered architecture**:
+
+1. **`RemoteLoader`** — generic fetch engine. Handles any CORS-friendly URL with optional bearer token. This alone covers the 80% case (GitHub, GitLab, presigned S3/Azure/GCS URLs, Dropbox).
+
+2. **`urlNormalizer`** — config-driven rewrite table. Maps user-facing URLs to direct download URLs. Adding a new provider is just adding a regex + replacement string. No auth, no API logic.
+
+3. **`OAuthProvider`** — generic OAuth2/PKCE handler. The auth dance (redirect, code exchange, token refresh) is the same across Microsoft, Google, etc. Provider differences are captured in a config object, not separate implementations.
+
+4. **Provider configs** — each OAuth-requiring provider (SharePoint, Google Drive, etc.) is a small config object + one `resolveDownloadUrl()` function. This is the only provider-specific code.
+
+**What this means in practice:**
+- Adding a new CORS-friendly provider = one entry in the URL rewrite table
+- Adding a new OAuth provider = one config object (~20 lines) + one URL resolver function
+- If a provider changes an endpoint, you update one string in the config
+- The fetch engine, error handling, progress tracking, and UI are shared and tested once
+
+---
+
 ## Design
 
 ### User-facing flow
@@ -36,22 +56,25 @@ The URL input appears alongside the existing upload prompt. Submitting a URL tri
 
 ```
 User submits URL
-  → Validate URL format (must be https://, end with .ifc or known pattern)
+  → urlNormalizer rewrites to direct download URL (if pattern matches)
+  → Is this an OAuth provider? (detect by domain pattern)
+      → Yes: check for existing token → if missing, trigger OAuth flow → get token
+      → No: proceed without auth
   → HEAD request (lightweight pre-check)
       → Check Content-Length (reject if > 500 MB)
       → Check status code
   → GET request with progress tracking
       → 200 → validate IFC header (ISO-10303-21) → parse & render ✓
-      → 401/403 → show "Requires authentication" message + token input
+      → 401/403 (non-OAuth URL) → show "Requires authentication" + token input
       → 404 → "File not found at this URL"
       → CORS error → "Server doesn't allow browser access — download and upload instead"
       → Timeout → "Download timed out"
       → Not IFC → "This doesn't appear to be an IFC file"
 ```
 
-### URL normalization (smart rewrites)
+### URL normalization (config-driven rewrite table)
 
-Detect common URL patterns and rewrite to raw/direct download URLs:
+A list of `{ pattern, rewrite }` rules. Detect common URL patterns and rewrite to raw/direct download URLs:
 
 | Input pattern | Rewrite to |
 |---------------|-----------|
@@ -59,11 +82,11 @@ Detect common URL patterns and rewrite to raw/direct download URLs:
 | `gitlab.com/<user>/<repo>/-/blob/<ref>/<path>.ifc` | `gitlab.com/<user>/<repo>/-/raw/<ref>/<path>.ifc` |
 | `dropbox.com/...?dl=0` | Same URL with `dl=1` |
 
-Additional providers can be added later as simple pattern → rewrite rules.
+Adding a new provider = adding one entry to this table. No code changes required.
 
 ### Bearer token auth (Phase 1.5)
 
-When a fetch returns 401/403:
+For non-OAuth URLs that return 401/403:
 
 1. Show a secondary input: "This file requires authentication. Paste an access token:"
 2. Retry the fetch with `Authorization: Bearer <token>` header
@@ -85,9 +108,9 @@ On page load, if `?url=` is present, auto-trigger the fetch flow. Show a confirm
 
 ## Architecture
 
-### New module: `src/loader/RemoteLoader.ts`
+### Layer 1: `src/loader/RemoteLoader.ts`
 
-Single-responsibility module for fetching remote files. Returns the same `LoadedFile` interface that `FileLoader` uses, so `App.ts` can feed it through the identical parse → render pipeline.
+Generic fetch engine. Handles any URL. Returns the same `LoadedFile` interface that `FileLoader` uses.
 
 ```ts
 interface RemoteFetchResult {
@@ -102,30 +125,110 @@ class RemoteLoader {
 }
 ```
 
-### New UI component: `src/ui/UrlInput.ts`
+This is the only module that calls `fetch()`. Everything else resolves URLs and tokens, then delegates to `RemoteLoader`.
+
+### Layer 2: `src/loader/urlNormalizer.ts`
+
+Pure function with a config-driven rewrite table:
+
+```ts
+interface RewriteRule {
+  name: string;                          // e.g. "GitHub"
+  pattern: RegExp;                       // match user-facing URL
+  rewrite: (match: RegExpMatchArray) => string;  // produce direct download URL
+}
+
+const rules: RewriteRule[] = [
+  { name: 'GitHub', pattern: /.../, rewrite: (m) => `https://raw.githubusercontent.com/...` },
+  { name: 'GitLab', pattern: /.../, rewrite: (m) => `...` },
+  { name: 'Dropbox', pattern: /.../, rewrite: (m) => `...` },
+];
+
+function normalizeUrl(url: string): { url: string; provider?: string };
+```
+
+### Layer 3: `src/services/OAuthProvider.ts` (Phase 2)
+
+Generic OAuth2/PKCE handler. The flow (redirect → code exchange → token cache → silent refresh) is the same across providers. Differences are captured in config:
+
+```ts
+interface OAuthProviderConfig {
+  name: string;                         // e.g. "SharePoint", "Google Drive"
+  clientId: string;
+  authorizeUrl: string;                 // e.g. "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  tokenUrl: string;                     // e.g. "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  scopes: string[];                     // e.g. ["Files.Read"]
+  domainPattern: RegExp;                // e.g. /\.sharepoint\.com/
+  resolveDownloadUrl: (url: string, token: string) => Promise<string>;
+}
+```
+
+The `resolveDownloadUrl` function is the only truly provider-specific logic. Everything else (PKCE challenge generation, token exchange, caching, refresh) is shared.
+
+**Example: SharePoint config**
+```ts
+const sharepoint: OAuthProviderConfig = {
+  name: 'SharePoint',
+  clientId: '<azure-app-id>',
+  authorizeUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+  tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+  scopes: ['Files.Read', 'Sites.Read.All'],
+  domainPattern: /\.sharepoint\.com/,
+  resolveDownloadUrl: async (url, token) => {
+    // Encode sharing URL per Graph API spec
+    const encoded = btoa(url).replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+    return `https://graph.microsoft.com/v1.0/shares/u!${encoded}/driveItem/content`;
+  },
+};
+```
+
+**Example: Google Drive config (future)**
+```ts
+const googleDrive: OAuthProviderConfig = {
+  name: 'Google Drive',
+  clientId: '<google-client-id>',
+  authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+  tokenUrl: 'https://oauth2.googleapis.com/token',
+  scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+  domainPattern: /drive\.google\.com/,
+  resolveDownloadUrl: async (url, token) => {
+    const fileId = url.match(/\/d\/([^/]+)/)?.[1];
+    return `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  },
+};
+```
+
+Adding a new OAuth provider = writing one of these config objects. No new classes, no new modules.
+
+### Layer 4: Provider registry
+
+A simple array of `OAuthProviderConfig` objects. When a URL is submitted:
+
+1. Check `urlNormalizer` for a direct rewrite → if matched, `RemoteLoader.fetch()` directly
+2. Check provider registry by `domainPattern` → if matched, run OAuth flow → resolve download URL → `RemoteLoader.fetch()` with token
+3. No match → `RemoteLoader.fetch()` directly (optimistic try)
+
+### UI: `src/ui/UrlInput.ts`
 
 Input field + Load button, rendered inside the upload prompt area. Manages:
 - URL validation (client-side format check)
 - Progress display during download
 - Error messages from `RemoteFetchResult`
-- Token input (shown on auth failure)
-
-### URL normalizer: `src/loader/urlNormalizer.ts`
-
-Pure function: takes a URL string, returns a normalized URL. Contains the rewrite rules for GitHub, GitLab, Dropbox, etc. Easy to test in isolation.
+- Token input (shown on auth failure for non-OAuth URLs)
+- OAuth sign-in prompt (shown when an OAuth provider is detected)
 
 ### Integration in App.ts
 
-Minimal changes — `App.ts` creates a `RemoteLoader` and `UrlInput`, wires them together with the same `handleFile()` callback that `FileLoader` uses.
+Minimal changes — `App.ts` creates the loader stack and `UrlInput`, wires them together with the same `handleFile()` callback that `FileLoader` uses.
 
 ```
 Existing:  FileLoader.onLoad → handleFile → parser → modelManager
-New:       UrlInput.onSubmit → RemoteLoader.fetch → handleFile → parser → modelManager
+New:       UrlInput.onSubmit → urlNormalizer → [OAuthProvider?] → RemoteLoader.fetch → handleFile
 ```
 
 ### Query parameter handling in `main.ts`
 
-On startup, check `URLSearchParams` for `url=`. If present, show confirmation, then trigger `RemoteLoader.fetch`.
+On startup, check `URLSearchParams` for `url=`. If present, show confirmation, then trigger the fetch flow.
 
 ---
 
@@ -136,11 +239,12 @@ On startup, check `URLSearchParams` for `url=`. If present, show confirmation, t
 | Malicious IFC (parser exploits) | web-ifc runs in WASM sandbox inside browser sandbox — double isolation. Validate `ISO-10303-21` header before parsing. |
 | Decompression bombs (.ifczip) | Not supported in Phase 1. When added, cap decompression ratio. |
 | Memory exhaustion (huge files) | HEAD pre-check rejects files > 500 MB. Progress bar lets user cancel. |
-| Token leakage | Tokens held in memory only, never persisted. Cleared on page unload. |
+| Token leakage | Bearer tokens held in memory only, never persisted. OAuth tokens managed by OAuthProvider in sessionStorage (standard practice), scoped to read-only. Cleared on page unload. |
 | URL injection via `?url=` | Confirmation dialog before fetching. Sanitize display of URL (no HTML injection). Only allow `https://` URLs. |
 | IP disclosure | Fetching a URL reveals user's IP to the remote server. The confirmation dialog implicitly informs the user they're connecting to that domain. |
 | Polyglot files | Never interpret fetched content as HTML/JS. Always treat as binary `ArrayBuffer`. |
 | XSS via error messages | Never use `innerHTML` for error/status messages — always `textContent`. |
+| OAuth redirect attacks | Use PKCE (prevents auth code interception). Validate `state` parameter on redirect. Only accept redirects to registered URIs. |
 
 ---
 
@@ -150,11 +254,15 @@ On startup, check `URLSearchParams` for `url=`. If present, show confirmation, t
 src/
 ├── loader/
 │   ├── FileLoader.ts          (existing, unchanged)
-│   ├── RemoteLoader.ts        (NEW)
-│   ├── urlNormalizer.ts        (NEW)
+│   ├── RemoteLoader.ts        (NEW — generic fetch engine)
+│   ├── urlNormalizer.ts        (NEW — config-driven URL rewrite table)
+│   ├── providerRegistry.ts    (NEW, Phase 2 — array of OAuthProviderConfig objects)
 │   └── index.ts               (update exports)
+├── services/
+│   ├── OAuthProvider.ts       (NEW, Phase 2 — generic OAuth2/PKCE handler)
+│   └── ...
 ├── ui/
-│   ├── UrlInput.ts            (NEW)
+│   ├── UrlInput.ts            (NEW — shared URL input + progress + errors)
 │   └── index.ts               (update exports)
 ├── core/
 │   └── App.ts                 (wire up RemoteLoader + UrlInput)
@@ -163,7 +271,10 @@ src/
 tests/
 ├── loader/
 │   ├── RemoteLoader.test.ts   (NEW)
-│   └── urlNormalizer.test.ts  (NEW)
+│   ├── urlNormalizer.test.ts  (NEW)
+│   └── providerRegistry.test.ts (NEW, Phase 2)
+├── services/
+│   └── OAuthProvider.test.ts  (NEW, Phase 2)
 ├── ui/
 │   └── UrlInput.test.ts       (NEW)
 ```
@@ -173,7 +284,7 @@ tests/
 ## Implementation checklist
 
 ### Phase 1: Public URL loading
-- [ ] Create `urlNormalizer.ts` with GitHub/GitLab/Dropbox rewrite rules
+- [ ] Create `urlNormalizer.ts` with rewrite table (GitHub, GitLab, Dropbox rules)
 - [ ] Create `RemoteLoader.ts` with HEAD pre-check + GET fetch + error classification
 - [ ] Create `UrlInput.ts` UI component (input + button + progress + error display)
 - [ ] Wire into `App.ts` using existing `handleFile()` pipeline
@@ -190,10 +301,29 @@ tests/
 - [ ] Retry fetch with `Authorization: Bearer <token>` header
 - [ ] Test with private GitHub repo + personal access token
 
-### Phase 2: Provider-specific enhancements (future)
-- [ ] SharePoint / OneDrive integration (see SharePoint section below)
-- [ ] Google Drive support
-- [ ] Presigned URL detection (S3, GCS, Azure SAS)
+### Phase 2: Generic OAuth framework + SharePoint
+- [ ] Create `OAuthProvider.ts` — generic OAuth2/PKCE handler (authorize, exchange, cache, refresh)
+- [ ] Create `providerRegistry.ts` — array of provider configs
+- [ ] Add SharePoint config (clientId, endpoints, scopes, `resolveDownloadUrl`)
+- [ ] Register Azure AD app (free, ~5 min) and configure redirect URI
+- [ ] Detect SharePoint URLs by domain pattern → trigger OAuth → resolve via Graph API
+- [ ] Add lazy-loading for OAuth dependencies (only loaded when an OAuth provider is triggered)
+- [ ] Write tests for `OAuthProvider` (mock OAuth flow, token refresh)
+- [ ] Write tests for SharePoint URL resolution
+- [ ] Manual testing with SharePoint-hosted IFC files
+
+### Phase 2+: Additional OAuth providers (future, as needed)
+Each new provider = one config object added to `providerRegistry.ts`:
+- [ ] **Google Drive** — Google Identity Services, `drive.readonly` scope
+- [ ] **Box** — Box OAuth2, Content API
+- [ ] **Autodesk BIM 360 / ACC** — Autodesk Forge OAuth2, Data Management API
+
+### Not provider-specific (handled by Phase 1 already)
+These work out of the box with `RemoteLoader` + `urlNormalizer`, no special integration needed:
+- AWS S3 presigned URLs
+- Azure Blob Storage SAS URLs
+- Google Cloud Storage signed URLs
+- Any server that serves files with CORS headers
 
 ---
 
@@ -201,118 +331,58 @@ tests/
 
 | Test | Type | What it validates |
 |------|------|-------------------|
-| URL normalizer rules | Unit (Vitest) | GitHub, GitLab, Dropbox URL rewrites |
+| URL normalizer rules | Unit (Vitest) | Rewrite table: GitHub, GitLab, Dropbox, unknown URLs pass through |
 | RemoteLoader error handling | Unit (Vitest, mock fetch) | Correct status classification for all error types |
-| UrlInput rendering | Unit (Vitest, DOM) | Input validation, error display, token prompt |
+| OAuthProvider flow | Unit (Vitest, mock) | PKCE challenge, token exchange, cache hit, refresh |
+| Provider configs | Unit (Vitest) | Each `resolveDownloadUrl` produces correct API URL |
+| UrlInput rendering | Unit (Vitest, DOM) | Input validation, error display, token prompt, OAuth prompt |
 | End-to-end public URL | Manual | Load a real IFC from GitHub, verify render |
 | End-to-end CORS rejection | Manual | Try a URL without CORS headers, verify graceful message |
-| End-to-end auth flow | Manual | Try a private repo URL, enter token, verify load |
+| End-to-end bearer token | Manual | Try a private repo URL, enter token, verify load |
+| End-to-end SharePoint | Manual | Paste SharePoint link, sign in, verify load |
 | Query parameter | Manual | Open viewer with `?url=...`, verify confirmation + load |
 
 ---
 
 ---
 
-# SharePoint / OneDrive Integration
+# Appendix: SharePoint / OneDrive Details
 
-## The challenge
-
-SharePoint does **not** serve files with CORS headers for direct browser `fetch`. Unlike GitHub's `raw.githubusercontent.com`, there's no public raw URL you can hit from client-side JS. This means the standard `fetch(url)` approach won't work.
+This section provides additional context for the SharePoint provider config in Phase 2. The actual implementation is just a config object in `providerRegistry.ts` + the `resolveDownloadUrl` function — the OAuth plumbing is handled by the generic `OAuthProvider`.
 
 ## How SharePoint file access works
 
 SharePoint/OneDrive files are accessed via the **Microsoft Graph API**:
 
 ```
-GET https://graph.microsoft.com/v1.0/sites/{site-id}/drives/{drive-id}/items/{item-id}/content
+GET https://graph.microsoft.com/v1.0/shares/{encoded-sharing-url}/driveItem/content
 ```
 
-This API **does support CORS** — but requires an OAuth2 access token from Azure AD (Entra ID).
+This API **supports CORS** but requires an OAuth2 access token from Azure AD (Entra ID).
 
-## Authentication flow
-
-SharePoint uses **OAuth 2.0 Authorization Code flow with PKCE** (suitable for SPAs with no backend):
-
-```
-1. User clicks "Load from SharePoint"
-2. App redirects to Microsoft login:
-   https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
-   ?client_id=<app-id>
-   &response_type=code
-   &redirect_uri=<viewer-url>
-   &scope=Files.Read Sites.Read.All
-   &code_challenge=<PKCE-challenge>
-
-3. User signs in with their Microsoft account → redirected back with auth code
-4. App exchanges code for access token (client-side, PKCE makes this safe)
-5. App calls Graph API with token to download the IFC file
-6. Token expires after ~1 hour; refresh token can extend the session
-```
-
-### What's needed to make this work
+## What's needed (one-time setup)
 
 | Requirement | Detail |
 |------------|--------|
-| **Azure AD App Registration** | Register the viewer as an app in Azure portal. This is free and takes ~5 minutes. Gives you a `client_id`. |
-| **MSAL.js library** | Microsoft's official auth library for SPAs. Handles the OAuth/PKCE flow, token caching, silent refresh. ~30KB gzipped. |
-| **Redirect URI** | The viewer's GitHub Pages URL must be registered as a redirect URI in the Azure app. |
-| **API permissions** | `Files.Read` (user's OneDrive) and/or `Sites.Read.All` (SharePoint sites). These are delegated permissions — the app acts as the signed-in user, not as itself. |
-| **Tenant configuration** | For multi-tenant use (any Microsoft org), the app must be registered as multi-tenant. For a single org, single-tenant is simpler. |
+| **Azure AD App Registration** | Register the viewer as an app in Azure portal. Free, ~5 minutes. Gives you a `client_id`. |
+| **Redirect URI** | The viewer's GitHub Pages URL must be registered as a redirect URI. |
+| **API permissions** | `Files.Read` (user's OneDrive) and/or `Sites.Read.All` (SharePoint sites). Delegated permissions — the app acts as the signed-in user. |
+| **Tenant configuration** | Multi-tenant for public use (any Microsoft org). Single-tenant for one org. |
 
-### User experience for SharePoint
+## User experience
 
-Two possible UX flows:
-
-**Option A: Paste SharePoint URL**
 1. User pastes a SharePoint link like `https://company.sharepoint.com/sites/Project/Documents/model.ifc`
-2. Viewer detects the SharePoint domain pattern
-3. Prompts Microsoft sign-in (if not already authenticated)
-4. Resolves the URL to a Graph API path using SharePoint's `shares` API:
-   ```
-   GET https://graph.microsoft.com/v1.0/shares/{encoded-sharing-url}/driveItem/content
-   ```
-5. Downloads and renders
+2. Viewer detects the `.sharepoint.com` domain pattern
+3. `OAuthProvider` checks for cached token → if missing, prompts Microsoft sign-in
+4. `resolveDownloadUrl` encodes the sharing URL per Graph API spec
+5. `RemoteLoader.fetch()` downloads with the OAuth token
+6. Normal parse → render flow
 
-**Option B: SharePoint file picker**
-1. User clicks "Load from SharePoint"
-2. Opens Microsoft's built-in file picker component
-3. User browses their SharePoint/OneDrive and selects an IFC file
-4. Picker returns a download URL + token
-5. Viewer fetches and renders
-
-Option A is more natural for users who already have a link. Option B is better for browsing. Both can coexist.
-
-### Practical considerations
+## Practical considerations
 
 | Aspect | Impact |
 |--------|--------|
-| **Still no backend** | MSAL.js + PKCE is designed for pure client-side apps. The "no backend" principle is preserved. |
-| **App registration is a one-time step** | You do it once in Azure portal, then it works for all users. |
-| **Multi-tenant vs single-tenant** | Multi-tenant lets anyone with a Microsoft account use it. Single-tenant locks it to one org. For a public viewer, multi-tenant makes sense. |
-| **Admin consent** | Some orgs require an admin to approve `Sites.Read.All`. `Files.Read` usually doesn't need admin consent. |
-| **Token security** | MSAL.js handles storage (sessionStorage by default). Tokens are scoped to read-only file access. |
-| **Dependency** | Adds `@azure/msal-browser` as a dependency (~30KB gzipped). Only loaded when user initiates SharePoint auth. |
-| **Complexity** | Significantly more complex than the public URL flow. The OAuth dance, token refresh, and Graph API resolution add substantial code. Worth it if SharePoint is a primary use case for your users. |
-
-### SharePoint implementation outline
-
-```
-src/
-├── loader/
-│   └── SharePointLoader.ts    (NEW — Graph API integration)
-├── services/
-│   └── MsalAuth.ts            (NEW — MSAL.js wrapper, token management)
-├── ui/
-│   └── SharePointButton.ts    (NEW — "Load from SharePoint" button + picker)
-```
-
-### Recommendation
-
-**Don't build SharePoint support in Phase 1.** Start with public URLs (GitHub, presigned cloud links). If SharePoint is a confirmed need for your users:
-
-1. Register an Azure AD app (free, 5 minutes)
-2. Add MSAL.js + the SharePoint loader as a Phase 2 feature
-3. Start with Option A (paste URL) since it reuses the existing URL input UX
-4. Add Option B (file picker) later if users want to browse
-
-The Graph API sharing URL approach (`/shares/{encoded-url}/driveItem/content`) is particularly elegant because users just paste their normal SharePoint link — no need to understand Graph API paths.
+| **Still no backend** | OAuth2 PKCE is designed for pure client-side apps. |
+| **Admin consent** | Some orgs require admin approval for `Sites.Read.All`. `Files.Read` usually doesn't. |
+| **Token security** | Managed by `OAuthProvider` in sessionStorage. Scoped to read-only. |
+| **Lazy loading** | OAuth library only loaded when a SharePoint URL is detected — no impact on initial bundle size. |
