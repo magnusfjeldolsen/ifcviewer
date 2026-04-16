@@ -66,6 +66,19 @@ export class Viewer {
     this.updateCallbacks.push(callback);
   }
 
+  getCameraState(): { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } {
+    return {
+      position: { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z },
+      target: { x: this.controls.target.x, y: this.controls.target.y, z: this.controls.target.z },
+    };
+  }
+
+  restoreCameraState(state: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } }): void {
+    this.camera.position.set(state.position.x, state.position.y, state.position.z);
+    this.controls.target.set(state.target.x, state.target.y, state.target.z);
+    this.controls.update();
+  }
+
   animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
     this.controls.update();

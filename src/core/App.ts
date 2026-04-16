@@ -7,6 +7,8 @@ import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
+import { MemoryToggle } from '../ui/MemoryToggle';
+import { SessionStore } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
 export class App {
@@ -17,6 +19,9 @@ export class App {
   private toolManager: ToolManager;
   private toolbar: Toolbar;
   private modelTreePanel: ModelTreePanel;
+  private sessionStore: SessionStore;
+  private memoryToggle: MemoryToggle;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private statusEl: HTMLElement | null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -84,6 +89,16 @@ export class App {
       },
     });
 
+    // Session persistence
+    this.sessionStore = new SessionStore();
+    this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
+    this.memoryToggle.onChange((enabled) => {
+      if (!enabled && this.saveTimer) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
+    });
+
     this.setupKeyboardShortcuts();
   }
 
@@ -122,6 +137,65 @@ export class App {
 
     this.viewer.animate();
     this.showUploadPrompt(true);
+
+    // Restore session if memory is enabled
+    if (this.sessionStore.isMemoryEnabled()) {
+      await this.restoreSession();
+    }
+
+    // Auto-save camera state on changes (throttled to 1s)
+    this.viewer.onUpdate(() => this.scheduleSave());
+
+    // Final save on page unload
+    window.addEventListener('beforeunload', this.boundBeforeUnload);
+  }
+
+  private boundBeforeUnload = (): void => {
+    if (this.sessionStore.isMemoryEnabled()) {
+      this.sessionStore.saveSession({
+        camera: this.viewer.getCameraState(),
+        fileNames: this.modelManager.getModelIds(),
+      });
+    }
+  };
+
+  private scheduleSave(): void {
+    if (!this.sessionStore.isMemoryEnabled()) return;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.sessionStore.saveSession({
+        camera: this.viewer.getCameraState(),
+        fileNames: this.modelManager.getModelIds(),
+      });
+    }, 1000);
+  }
+
+  private async restoreSession(): Promise<void> {
+    const session = this.sessionStore.getSession();
+    const files = await this.sessionStore.getFiles();
+
+    if (files.length > 0) {
+      this.showUploadPrompt(false);
+      for (const file of files) {
+        try {
+          this.setStatus(`Restoring ${file.name}...`);
+          const parsed = await this.parser.parse(file.buffer, file.name);
+          this.modelManager.addModel(parsed);
+          this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
+        } catch {
+          // skip files that fail to parse on restore
+        }
+      }
+      const box = this.modelManager.getBoundingBox();
+      this.viewer.fitToBox(box);
+      this.setStatus('');
+    }
+
+    // Restore camera after fitToBox so it overrides the auto-fit
+    if (session?.camera) {
+      this.viewer.restoreCameraState(session.camera);
+    }
   }
 
   private async handleFile(file: LoadedFile): Promise<void> {
@@ -135,6 +209,11 @@ export class App {
 
       const box = this.modelManager.getBoundingBox();
       this.viewer.fitToBox(box);
+
+      // Persist file to IndexedDB if memory is enabled
+      if (this.sessionStore.isMemoryEnabled()) {
+        await this.sessionStore.saveFile(file.name, file.buffer);
+      }
 
       this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
       setTimeout(() => this.setStatus(''), 3000);
@@ -154,6 +233,9 @@ export class App {
   }
 
   dispose(): void {
+    window.removeEventListener('beforeunload', this.boundBeforeUnload);
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.memoryToggle.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     this.toolManager.dispose();
