@@ -117,6 +117,11 @@ export class Viewer {
     this.removePivotMarker();
   }
 
+  clearPivot(): void {
+    if (this.pickingPivot) this.cancelPivotPicking();
+    this.removePivotMarker();
+  }
+
   dispose(): void {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);

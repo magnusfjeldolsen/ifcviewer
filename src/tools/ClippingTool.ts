@@ -52,14 +52,19 @@ export class ClippingTool implements Tool {
   }
 
   activate(): void {
-    this.enterPlacingMode();
+    if (this.clipPlane) {
+      // Clip plane already exists — resume drag interaction
+      this.addDragListeners();
+    } else {
+      this.enterPlacingMode();
+    }
   }
 
   deactivate(): void {
     this.exitPlacingMode();
     this.removeDragListeners();
-    this.removeClipPlane();
     this.deps.canvas.style.cursor = '';
+    // Clip plane and handle persist — only clearClipPlane() removes them
   }
 
   /**
@@ -87,8 +92,15 @@ export class ClippingTool implements Tool {
     this.handleGroup.scale.setScalar(scale);
   }
 
+  /** Remove the clip plane, handle, and all state. Used by Reset View. */
+  clearClipPlane(): void {
+    this.removeDragListeners();
+    this.removeClipPlane();
+  }
+
   dispose(): void {
     this.deactivate();
+    this.clearClipPlane();
   }
 
   // ── Placing (mousedown) ────────────────────────────────────
