@@ -6,8 +6,11 @@ declare global {
   }
 }
 
-function gtag(...args: unknown[]): void {
-  window.dataLayer.push(args);
+function gtag(..._args: unknown[]): void {
+  // Must use `arguments` (not rest params) — gtag.js only recognises
+  // Arguments objects in the dataLayer queue, not plain Arrays.
+  // eslint-disable-next-line prefer-rest-params
+  window.dataLayer.push(arguments);
 }
 
 export class Analytics {
