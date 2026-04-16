@@ -40,31 +40,10 @@ export class App {
     // Toolbar UI
     const appEl = document.getElementById('app')!;
     this.toolbar = new Toolbar(appEl, this.toolManager);
-    this.toolbar.addButton({
-      name: 'clipping',
-      icon: '✂',
-      title: 'Section Cut (C)',
-      onReactivate: () => clippingTool.enterPlacingMode(),
-    });
+    this.toolbar.addButton({ name: 'clipping', icon: '✂', title: 'Section Cut' });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', disabled: true });
     this.toolbar.finalize();
-
-    this.setupKeyboardShortcuts();
-  }
-
-  private setupKeyboardShortcuts(): void {
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'c' || e.key === 'C') {
-        if (this.toolManager.isActive('clipping')) {
-          // Already active — re-enter placement mode for a new clip
-          const tool = this.toolManager.getActiveTool() as ClippingTool;
-          tool.enterPlacingMode();
-        } else {
-          this.toolManager.activate('clipping');
-        }
-      }
-    });
   }
 
   async start(): Promise<void> {

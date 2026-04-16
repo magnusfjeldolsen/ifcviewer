@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { raycastVisible } from '../utils/raycast';
 
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
@@ -13,11 +12,10 @@ export class Viewer {
 
   // Pivot picking state
   private pickingPivot = false;
+  private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private defaultTarget = new THREE.Vector3();
-  private boundPivotKeydown!: (e: KeyboardEvent) => void;
-  private boundPivotClick!: (e: MouseEvent) => void;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -70,7 +68,6 @@ export class Viewer {
     this.animationId = requestAnimationFrame(this.animate);
     this.controls.update();
     for (const cb of this.updateCallbacks) cb();
-    this.updatePivotMarkerScale();
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -109,9 +106,6 @@ export class Viewer {
       cancelAnimationFrame(this.animationId);
     }
     window.removeEventListener('resize', this.onResize);
-    document.removeEventListener('keydown', this.boundPivotKeydown);
-    this.canvas.removeEventListener('click', this.boundPivotClick);
-    this.removePivotMarker();
     this.controls.dispose();
     this.renderer.dispose();
   }
@@ -139,7 +133,7 @@ export class Viewer {
   // ── Pivot picking ────────────────────────────────────────
 
   private setupPivotPicking(): void {
-    this.boundPivotKeydown = (e: KeyboardEvent) => {
+    document.addEventListener('keydown', (e) => {
       if (e.key === 'v' || e.key === 'V') {
         if (this.pickingPivot) {
           this.cancelPivotPicking();
@@ -150,15 +144,12 @@ export class Viewer {
       if (e.key === 'Escape' && this.pickingPivot) {
         this.cancelPivotPicking();
       }
-    };
+    });
 
-    this.boundPivotClick = (e: MouseEvent) => {
+    this.canvas.addEventListener('click', (e) => {
       if (!this.pickingPivot) return;
       this.placePivot(e);
-    };
-
-    document.addEventListener('keydown', this.boundPivotKeydown);
-    this.canvas.addEventListener('click', this.boundPivotClick);
+    });
   }
 
   private startPivotPicking(): void {
@@ -176,13 +167,29 @@ export class Viewer {
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    const hit = raycastVisible(this.mouse, this.camera, this.scene, this.renderer);
-    if (!hit) {
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    const meshes: THREE.Mesh[] = [];
+    this.scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && !obj.userData.isClipHelper && !obj.userData.isPivotMarker) {
+        meshes.push(obj);
+      }
+    });
+
+    const intersects = this.raycaster.intersectObjects(meshes, false);
+
+    // Filter out hits on the clipped side of any active clipping plane
+    const clippingPlanes = this.renderer.clippingPlanes;
+    const visibleHit = intersects.find((hit) =>
+      clippingPlanes.every((plane) => plane.distanceToPoint(hit.point) >= 0),
+    );
+
+    if (!visibleHit) {
       this.cancelPivotPicking();
       return;
     }
 
-    const point = hit.point;
+    const point = visibleHit.point;
     this.controls.target.copy(point);
     this.controls.update();
 
@@ -205,6 +212,9 @@ export class Viewer {
     this.pivotMarker.renderOrder = 998;
     this.pivotMarker.userData.isPivotMarker = true;
     this.scene.add(this.pivotMarker);
+
+    // Scale marker to constant screen size
+    this.onUpdate(() => this.updatePivotMarkerScale());
   }
 
   private updatePivotMarkerScale = (): void => {

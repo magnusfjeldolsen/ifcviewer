@@ -5,15 +5,12 @@ export interface ToolButton {
   icon: string;
   title: string;
   disabled?: boolean;
-  /** Called when clicking the button while this tool is already active */
-  onReactivate?: () => void;
 }
 
 export class Toolbar {
   private container: HTMLElement;
   private toolManager: ToolManager;
   private buttons = new Map<string, HTMLButtonElement>();
-  private reactivateHandlers = new Map<string, () => void>();
   private abortButton: HTMLButtonElement;
 
   constructor(parent: HTMLElement, toolManager: ToolManager) {
@@ -52,20 +49,8 @@ export class Toolbar {
     btn.textContent = config.icon;
     btn.disabled = config.disabled ?? false;
 
-    if (config.onReactivate) {
-      this.reactivateHandlers.set(config.name, config.onReactivate);
-    }
-
     if (!config.disabled) {
-      btn.addEventListener('click', () => {
-        if (this.toolManager.isActive(config.name)) {
-          // Already active — call reactivate handler instead of toggling off
-          const handler = this.reactivateHandlers.get(config.name);
-          if (handler) handler();
-        } else {
-          this.toolManager.activate(config.name);
-        }
-      });
+      btn.addEventListener('click', () => this.toolManager.activate(config.name));
     }
 
     this.buttons.set(config.name, btn);
