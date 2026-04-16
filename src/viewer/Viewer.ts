@@ -37,7 +37,7 @@ export class Viewer {
     this.camera.position.set(10, 10, 10);
 
     this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.enableDamping = true;
+    this.controls.enableDamping = false;
 
     this.setupLights();
     this.setupGrid();
