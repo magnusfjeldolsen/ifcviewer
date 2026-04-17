@@ -2,6 +2,8 @@ import { Viewer } from '../viewer/Viewer';
 import { ModelManager } from '../viewer/ModelManager';
 import { FileLoader } from '../loader/FileLoader';
 import { IfcParser } from '../parser/IfcParser';
+import { UrlInput } from '../ui/UrlInput';
+import { RemoteLoader } from '../loader/RemoteLoader';
 import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
@@ -30,6 +32,8 @@ export class App {
   private measurementTool: MeasurementTool;
   private footer: Footer;
   private cookieBanner: CookieBanner;
+  private urlInput: UrlInput;
+  private remoteLoader: RemoteLoader;
   private loadedFiles = new Map<string, ArrayBuffer>();
   private statusEl: HTMLElement | null;
 
@@ -96,6 +100,10 @@ export class App {
         const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
         if (fileInput) fileInput.click();
       },
+      onAddRemoteModel: () => {
+        const url = window.prompt('Enter URL to a remote .ifc file:');
+        if (url) this.loadFromUrl(url);
+      },
     });
 
     // Session persistence
@@ -114,6 +122,15 @@ export class App {
         }
       }
     });
+
+    // Remote loader
+    this.remoteLoader = new RemoteLoader();
+
+    // URL input for remote loading
+    const urlMount = document.getElementById('url-input-mount')!;
+    this.urlInput = new UrlInput(urlMount);
+    this.urlInput.onSubmit((event) => this.handleRemoteLoad(event.normalizedUrl));
+    this.urlInput.onTokenRetry((url, token) => this.handleRemoteLoad(url, token));
 
     // Footer branding + cookie consent
     const footerEl = document.getElementById('app-footer')!;
@@ -289,12 +306,51 @@ export class App {
     if (prompt) prompt.style.display = show ? 'flex' : 'none';
   }
 
+  async loadFromUrl(url: string): Promise<void> {
+    const { normalizeUrl } = await import('../loader/urlNormalizer');
+    const { url: normalized } = normalizeUrl(url);
+    await this.handleRemoteLoad(normalized);
+  }
+
+  private async handleRemoteLoad(url: string, token?: string): Promise<void> {
+    // Extract filename for the loading row
+    let name = 'model.ifc';
+    try {
+      const pathname = new URL(url).pathname;
+      name = decodeURIComponent(pathname.split('/').pop() || 'model.ifc');
+    } catch { /* use default */ }
+
+    const loadingId = `loading-${Date.now()}`;
+    this.showUploadPrompt(false);
+    this.modelTreePanel.addLoadingModel(loadingId, name);
+
+    const result = await this.remoteLoader.fetch(url, token, (loaded, total) => {
+      this.modelTreePanel.updateLoadingProgress(loadingId, loaded, total);
+    });
+
+    this.modelTreePanel.removeLoadingModel(loadingId);
+
+    if (result.status === 'ok' && result.file) {
+      this.urlInput.clearInput();
+      await this.handleFile(result.file);
+      return;
+    }
+
+    if (result.status === 'auth') {
+      this.urlInput.showAuthPrompt(url);
+      return;
+    }
+
+    this.urlInput.showMessage(result.message, 'error');
+  }
+
   dispose(): void {
     window.removeEventListener('beforeunload', this.boundBeforeUnload);
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.cookieBanner.dispose();
     this.footer.dispose();
     this.memoryToggle.dispose();
+    this.urlInput.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     this.toolManager.dispose();
