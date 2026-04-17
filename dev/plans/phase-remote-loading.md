@@ -383,6 +383,193 @@ These work out of the box with `RemoteLoader` + `urlNormalizer`, no special inte
 
 ---
 
+# Save / Open Project
+
+## Goal
+
+Let users save the current viewer state as a portable `.ifcproject` JSON file, and reopen it later — even after working in a different project. This complements the "remember" toggle (which persists one session in IndexedDB) by enabling multiple named projects and cross-session workflows.
+
+## How it relates to remote loading
+
+Remote loading makes project files powerful. Without it, a project file can only say "you had a file called `building.ifc`" — the user has to re-upload. With remote loading, the project file stores URLs and the viewer can **automatically re-fetch everything** on open.
+
+## Project file format
+
+```json
+{
+  "version": 1,
+  "name": "Office Tower Phase 2",
+  "savedAt": "2026-04-17T14:30:00Z",
+  "models": [
+    {
+      "name": "architecture.ifc",
+      "source": {
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/team/project/main/architecture.ifc",
+        "provider": "github"
+      }
+    },
+    {
+      "name": "structure.ifc",
+      "source": {
+        "type": "remote",
+        "url": "https://company.sharepoint.com/sites/Project/Documents/structure.ifc",
+        "provider": "sharepoint"
+      }
+    },
+    {
+      "name": "mep-local.ifc",
+      "source": {
+        "type": "local"
+      }
+    }
+  ],
+  "camera": {
+    "position": [10.5, 8.2, 15.0],
+    "target": [0, 0, 0],
+    "up": [0, 1, 0]
+  }
+}
+```
+
+Key design decisions:
+- **`source.type: "remote"`** — the viewer can re-fetch automatically. The URL is the source of truth.
+- **`source.type: "local"`** — the file was uploaded from disk. The project file only stores the name as a hint. On open, the viewer prompts: *"mep-local.ifc was loaded from your computer — please re-upload it to restore."*
+- **`source.provider`** — optional hint for which OAuth provider to use. The viewer can also detect this from the URL domain, but storing it makes the intent explicit.
+- **`version`** — for future format changes.
+- **No IFC data in the project file.** It stores references, not content. This keeps project files tiny (< 1KB) and avoids duplicating large binary data.
+
+## User-facing flow
+
+### Save Project
+
+```
+User clicks "Save Project" (toolbar or menu)
+  → If no project name set, prompt for one
+  → Serialize current state to JSON
+  → Browser downloads `<project-name>.ifcproject`
+```
+
+### Open Project
+
+```
+User drops / browses a .ifcproject file
+  → Parse JSON, validate version
+  → For each model in models[]:
+      → source.type === "remote": trigger RemoteLoader.fetch(url)
+          → may trigger OAuth if provider requires it
+          → show progress per model
+      → source.type === "local": show "please re-upload <name>" in model tree
+  → Restore camera state after all models loaded
+  → Show status: "Loaded 2/3 models — 1 requires local re-upload"
+```
+
+### Open via query parameter
+
+Extend the existing `?url=` parameter to also support project files:
+
+```
+?project=https://raw.githubusercontent.com/.../office-tower.ifcproject
+```
+
+This enables shareable "open this project" links. The viewer fetches the project file, then fetches all the models listed in it.
+
+## Relationship to the "remember" toggle
+
+| Feature | Remember toggle | Project file |
+|---------|----------------|-------------|
+| Storage | IndexedDB (browser-local) | JSON file (portable) |
+| Scope | Last session only | Named, multiple projects |
+| IFC data | Stores actual buffers | Stores URLs/references only |
+| Shareable | No | Yes (if models are remote) |
+| Survives browser clear | No | Yes (it's a file on disk) |
+| Works offline | Yes (data is cached) | Only for local-source models |
+
+They coexist: the remember toggle is for "pick up where I left off", project files are for "switch between projects" and "share a project setup with a colleague".
+
+## Architecture
+
+### New module: `src/project/ProjectFile.ts`
+
+Handles serialization and deserialization of the project format:
+
+```ts
+interface ProjectFile {
+  version: number;
+  name: string;
+  savedAt: string;
+  models: ProjectModel[];
+  camera?: CameraState;
+}
+
+interface ProjectModel {
+  name: string;
+  source: { type: 'remote'; url: string; provider?: string }
+        | { type: 'local' };
+}
+
+function serializeProject(state: AppState): ProjectFile;
+function deserializeProject(json: unknown): ProjectFile;  // validates + type-checks
+```
+
+### New UI: Save/Open buttons
+
+- **Save**: button in toolbar or alongside the memory toggle. Downloads `.ifcproject` file via `<a download>` trick (no backend needed).
+- **Open**: the existing drop zone and file input accept `.ifcproject` in addition to `.ifc`. Detected by extension.
+
+### Integration in App.ts
+
+- `saveProject()`: gathers current model list (with source URLs for remote models), camera state, and project name → `serializeProject()` → download
+- `openProject()`: reads `.ifcproject` file → `deserializeProject()` → for each remote model, calls the same fetch pipeline → for local models, marks as "needs re-upload" in the model tree
+
+The model tree panel gains a status indicator per model: loaded, loading, needs re-upload, failed.
+
+## File structure (new/modified)
+
+```
+src/
+├── project/
+│   ├── ProjectFile.ts         (NEW — serialize/deserialize project JSON)
+│   └── index.ts
+├── core/
+│   └── App.ts                 (add saveProject/openProject methods)
+├── ui/
+│   └── Toolbar.ts             (add Save Project button)
+├── loader/
+│   └── FileLoader.ts          (accept .ifcproject extension in drop zone + file input)
+
+tests/
+├── project/
+│   └── ProjectFile.test.ts    (NEW — serialization, validation, edge cases)
+```
+
+## Implementation checklist
+
+- [ ] Define `ProjectFile` interface and version 1 schema
+- [ ] Create `ProjectFile.ts` with `serializeProject()` and `deserializeProject()` (with validation)
+- [ ] Track model source (remote URL or local) in `App.ts` when models are loaded
+- [ ] Add "Save Project" button — serialize state → download as `.ifcproject`
+- [ ] Extend drop zone and file input to accept `.ifcproject` files
+- [ ] Implement `openProject()` — parse JSON → fetch remote models → flag local models for re-upload
+- [ ] Add per-model status in model tree (loading / loaded / needs re-upload / failed)
+- [ ] Add `?project=` query parameter support
+- [ ] Write tests for serialization/deserialization (valid, invalid, missing fields, version mismatch)
+- [ ] Write tests for open flow (mix of remote + local sources)
+- [ ] Manual testing: save project with remote models → close tab → open project file → verify re-fetch
+
+## Security considerations
+
+| Concern | Mitigation |
+|---------|-----------|
+| Malicious project file with crafted URLs | Same protections as direct URL input — HTTPS only, confirmation before fetching, `textContent` for display |
+| Project file from untrusted source | Show models list and domains before fetching: "This project will load files from github.com and company.sharepoint.com. Continue?" |
+| Storing auth tokens in project file | Never. Project files store URLs only. Auth is handled at fetch time by the OAuth/token flow. |
+| Large model list (DoS) | Cap at a reasonable limit (e.g. 50 models). Show total count before loading. |
+
+---
+
+---
+
 # Appendix: SharePoint / OneDrive Details
 
 This section provides additional context for the SharePoint provider config in Phase 2. The actual implementation is just a config object in `providerRegistry.ts` + the `resolveDownloadUrl` function — the OAuth plumbing is handled by the generic `OAuthProvider`.
