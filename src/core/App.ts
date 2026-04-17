@@ -87,6 +87,7 @@ export class App {
       icon: '📏',
       title: 'Measure (M)',
     });
+    this.toolbar.addButton({ name: 'fit', icon: '⊡', title: 'Fit View (F)', onClick: () => this.fitSmart() });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', onClick: () => this.resetView() });
     this.toolbar.finalize();
@@ -178,6 +179,12 @@ export class App {
       key: 'v',
       label: 'Pick Pivot',
       action: () => this.viewer.togglePivotPicking(),
+    });
+
+    this.keyboardShortcuts.register({
+      key: 'f',
+      label: 'Fit View',
+      action: () => this.fitSmart(),
     });
 
     this.keyboardShortcuts.register({
@@ -304,6 +311,12 @@ export class App {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
     }
+  }
+
+  private fitSmart(): void {
+    // Future: if selection exists, fly to selection bounding box
+    const box = this.modelManager.getBoundingBox();
+    this.viewer.flyToBox(box);
   }
 
   private async resetView(): Promise<void> {
