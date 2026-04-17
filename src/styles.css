@@ -496,6 +496,94 @@ html, body {
   background: #2563eb;
 }
 
+/* Help button + overlay */
+.help-button {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  font-size: 16px;
+  font-weight: 600;
+  color: #6b7280;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  pointer-events: auto;
+  transition: background 0.15s, color 0.15s;
+}
+
+.help-button:hover {
+  background: rgba(255, 255, 255, 1);
+  color: #374151;
+}
+
+.help-button.active {
+  background: #3b82f6;
+  color: white;
+}
+
+.help-overlay {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  width: 220px;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+  pointer-events: auto;
+  padding: 14px 16px;
+}
+
+.help-overlay-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 10px;
+}
+
+.help-overlay-section {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 10px;
+  margin-bottom: 6px;
+}
+
+.help-overlay-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+
+.help-overlay-key {
+  display: inline-block;
+  min-width: 28px;
+  padding: 2px 6px;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #374151;
+  text-align: center;
+}
+
+.help-overlay-label {
+  font-size: 13px;
+  color: #4b5563;
+}
+
 /* URL input */
 .url-input-container {
   display: flex;

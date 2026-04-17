@@ -41,10 +41,6 @@ export class Toolbar {
       }
     });
 
-    // Escape key aborts
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.toolManager.abort();
-    });
   }
 
   addButton(config: ToolButton): void {
