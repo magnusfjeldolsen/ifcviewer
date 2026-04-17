@@ -105,7 +105,7 @@ export class Viewer {
   };
 
   fitToBox(box: THREE.Box3): void {
-    const fit = computeFitPosition(box, this.camera.fov);
+    const fit = computeFitPosition(box);
     if (!fit) return;
 
     this.camera.position.copy(fit.position);
@@ -120,7 +120,7 @@ export class Viewer {
   }
 
   flyToBox(box: THREE.Box3): Promise<void> {
-    const fit = computeFitPosition(box, this.camera.fov);
+    const fit = computeFitPosition(box);
     if (!fit) return Promise.resolve();
 
     return this.animator.flyTo({

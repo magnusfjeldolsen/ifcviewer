@@ -11,7 +11,7 @@ export interface FitResult {
  * Compute the camera position and clipping planes needed to frame a bounding box.
  * Pure function — no side effects on camera or controls.
  */
-export function computeFitPosition(box: THREE.Box3, fovDeg: number): FitResult | null {
+export function computeFitPosition(box: THREE.Box3): FitResult | null {
   if (box.isEmpty()) return null;
 
   const center = box.getCenter(new THREE.Vector3());
