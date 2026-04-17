@@ -40,6 +40,14 @@ This ensures main is always deployable and new features can't break the live sit
 2. **Yellow (intermediate)**: Object selection, highlighting, tree view, property inspection
 3. **Red (advanced)**: Large model performance, streaming, clash detection, section cuts, measurement
 
+## Deferred State Application
+
+When a tool or interaction changes internal state (e.g., setting a new orbit pivot, placing a measurement anchor), don't apply the visual consequence immediately. Instead, defer the render-loop update until the user's next interaction. This prevents jarring view snaps when the user activates a tool, sets state, and then may do something else before acting on it.
+
+Pattern: set the state, raise a transitioning flag to skip the render-loop update, and clear the flag when the user begins their next interaction (e.g., via the OrbitControls `'start'` event). Any method that resets or overrides the deferred state (reset, clear, restore) must also clear the flag to avoid freezing the controls.
+
+See `pivotTransitioning` in `src/viewer/Viewer.ts` for the reference implementation.
+
 ## Implementation Procedure
 
 Every new feature follows this workflow:
