@@ -400,6 +400,7 @@ Remote loading makes project files powerful. Without it, a project file can only
   "version": 1,
   "name": "Office Tower Phase 2",
   "savedAt": "2026-04-17T14:30:00Z",
+  "thumbnail": "data:image/png;base64,iVBOR...",
   "models": [
     {
       "name": "architecture.ifc",
@@ -436,8 +437,10 @@ Key design decisions:
 - **`source.type: "remote"`** — the viewer can re-fetch automatically. The URL is the source of truth.
 - **`source.type: "local"`** — the file was uploaded from disk. The project file only stores the name as a hint. On open, the viewer prompts: *"mep-local.ifc was loaded from your computer — please re-upload it to restore."*
 - **`source.provider`** — optional hint for which OAuth provider to use. The viewer can also detect this from the URL domain, but storing it makes the intent explicit.
+- **`thumbnail`** — small base64-encoded screenshot of the 3D view at save time. Used for the recent projects list and as a visual preview when opening shared project files.
 - **`version`** — for future format changes.
-- **No IFC data in the project file.** It stores references, not content. This keeps project files tiny (< 1KB) and avoids duplicating large binary data.
+- **No IFC data in the project file.** It stores references, not content. This keeps project files tiny (a few KB with thumbnail) and avoids duplicating large binary data.
+- **Relative URLs** — if the project file lives alongside the IFCs (e.g. same GitHub repo or same SharePoint folder), model URLs can be relative. This means moving the entire folder doesn't break links. The viewer resolves relative URLs against the project file's own URL when loaded via `?project=`.
 
 ## User-facing flow
 
@@ -545,14 +548,15 @@ tests/
 
 ## Implementation checklist
 
-- [ ] Define `ProjectFile` interface and version 1 schema
+- [ ] Define `ProjectFile` interface and version 1 schema (including thumbnail + relative URL support)
 - [ ] Create `ProjectFile.ts` with `serializeProject()` and `deserializeProject()` (with validation)
 - [ ] Track model source (remote URL or local) in `App.ts` when models are loaded
+- [ ] Capture canvas thumbnail on save (`canvas.toDataURL()`, resized to ~200px)
 - [ ] Add "Save Project" button — serialize state → download as `.ifcproject`
 - [ ] Extend drop zone and file input to accept `.ifcproject` files
 - [ ] Implement `openProject()` — parse JSON → fetch remote models → flag local models for re-upload
 - [ ] Add per-model status in model tree (loading / loaded / needs re-upload / failed)
-- [ ] Add `?project=` query parameter support
+- [ ] Add `?project=` query parameter support (resolve relative model URLs against project file URL)
 - [ ] Write tests for serialization/deserialization (valid, invalid, missing fields, version mismatch)
 - [ ] Write tests for open flow (mix of remote + local sources)
 - [ ] Manual testing: save project with remote models → close tab → open project file → verify re-fetch
@@ -565,6 +569,349 @@ tests/
 | Project file from untrusted source | Show models list and domains before fetching: "This project will load files from github.com and company.sharepoint.com. Continue?" |
 | Storing auth tokens in project file | Never. Project files store URLs only. Auth is handled at fetch time by the OAuth/token flow. |
 | Large model list (DoS) | Cap at a reasonable limit (e.g. 50 models). Show total count before loading. |
+
+---
+
+---
+
+# Project Sharing
+
+## The vision
+
+A user sets up a project (loads IFCs from various sources, positions the camera, names it). They should be able to share that exact setup with a colleague in one step — no instructions needed, no "download these 4 files and upload them in this order".
+
+## Sharing models
+
+### Scenario 1: All models are remote
+
+The project file contains only URLs. Sharing is trivial:
+
+**Option A: Share a link**
+```
+https://magnusfjeldolsen.github.io/ifcviewer/?project=https://raw.githubusercontent.com/team/repo/main/project.ifcproject
+```
+Colleague clicks the link → viewer opens → fetches the project file → fetches all models → restores camera. Done.
+
+**Option B: Send the project file**
+Email/Slack the `.ifcproject` file (a few KB). Colleague drops it on the viewer. Same result.
+
+### Scenario 2: Mixed remote + local models
+
+The project file contains some remote URLs and some local-only references. When a colleague opens it:
+- Remote models load automatically
+- Local models show in the model tree as "needs re-upload" with the filename as a hint
+- The colleague uploads the missing files from their own disk
+
+This is the realistic scenario for teams that keep some files on a shared network drive and some in the cloud.
+
+### Scenario 3: Project file hosted alongside IFCs
+
+The most seamless setup. The `.ifcproject` file lives in the same location as the IFC files (same GitHub repo, same SharePoint folder):
+
+```
+SharePoint: /sites/Project/BIM/
+├── project.ifcproject
+├── architecture.ifc
+├── structure.ifc
+└── mep.ifc
+```
+
+The project file uses **relative URLs**:
+```json
+{
+  "models": [
+    { "name": "architecture.ifc", "source": { "type": "remote", "url": "./architecture.ifc" } },
+    { "name": "structure.ifc", "source": { "type": "remote", "url": "./structure.ifc" } },
+    { "name": "mep.ifc", "source": { "type": "remote", "url": "./mep.ifc" } }
+  ]
+}
+```
+
+The viewer resolves relative URLs against the project file's own URL. Moving the entire folder to a different location doesn't break anything. This is the recommended setup for teams.
+
+## "Copy shareable link" button
+
+After loading models, the toolbar shows a share icon. Clicking it:
+
+1. If the current state can be represented as a URL (all models are remote):
+   - Generate a `?project=` link if a hosted project file exists
+   - Or generate a `?url=` link if it's a single model
+   - Copy to clipboard with a toast: "Link copied"
+
+2. If some models are local (can't be represented as a URL):
+   - Offer to download the `.ifcproject` file instead
+   - Show a hint: "Some models are local — your colleague will need access to those files"
+
+## Deep linking to specific views
+
+Extend the URL to encode view state beyond just "which models":
+
+```
+?project=<url>&camera=10.5,8.2,15.0,0,0,0
+```
+
+This lets users share a link that opens a specific angle on the model. The camera parameter encodes `position.x,y,z,target.x,y,z`.
+
+Future: encode active clipping planes, selected objects, visibility toggles. This turns a link into "look at exactly this" rather than "open this project".
+
+## Security for shared projects
+
+| Concern | Mitigation |
+|---------|-----------|
+| Crafted project link with malicious URLs | Confirmation dialog listing all domains before fetching |
+| Phishing via `?project=` on a look-alike domain | Show the actual domains being fetched, not just the project name |
+| Sharing exposes file locations | The project file reveals where IFCs are stored. This is inherent to the sharing model — users should be aware their file paths/URLs are visible to recipients |
+
+---
+
+---
+
+# UX Improvements
+
+## 1. Recent Projects (localStorage)
+
+### What it does
+
+Cache project metadata in localStorage whenever a project is opened or saved. Show a "Recent Projects" list on the landing page so returning users can reopen without finding the `.ifcproject` file on disk.
+
+### Landing page with recent projects
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                                                          │
+│     Drop an .ifc or .ifcproject file here                │
+│                    or                                     │
+│               [ Browse ]                                  │
+│                    or                                     │
+│   ┌────────────────────────────────┐  ┌──────┐           │
+│   │ Paste a URL to an .ifc ...     │  │ Load │           │
+│   └────────────────────────────────┘  └──────┘           │
+│                                                          │
+│   Recent projects                                        │
+│   ┌────────────────────────────────────────────────────┐ │
+│   │ ┌──────┐  Office Tower Phase 2                     │ │
+│   │ │thumb │  3 models · github.com, sharepoint.com    │ │
+│   │ │ nail │  Last opened 2 hours ago                  │ │
+│   │ └──────┘                                           │ │
+│   ├────────────────────────────────────────────────────┤ │
+│   │ ┌──────┐  Hospital Wing B                          │ │
+│   │ │thumb │  5 models · sharepoint.com                │ │
+│   │ │ nail │  Last opened yesterday                    │ │
+│   │ └──────┘                                           │ │
+│   └────────────────────────────────────────────────────┘ │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### What's stored in localStorage
+
+```ts
+interface RecentProject {
+  name: string;
+  thumbnail?: string;          // base64, from project file or captured on save
+  modelCount: number;
+  domains: string[];           // unique domains of remote models, for context
+  lastOpened: string;          // ISO date
+  project: ProjectFile;        // the full project definition (tiny — just URLs)
+}
+```
+
+Clicking a recent project = deserializing the stored `ProjectFile` and running the same `openProject()` flow. No file needed.
+
+**Limit**: keep the 10 most recent. Prune on each open.
+
+### Implementation checklist
+
+- [ ] Create `RecentProjects` service (localStorage read/write, prune to 10)
+- [ ] Record project in recent list on save and on open
+- [ ] Create `RecentProjectsList` UI component for landing page
+- [ ] Show thumbnail, name, model count, domains, relative time
+- [ ] Click to reopen → `openProject()` with stored `ProjectFile`
+- [ ] "Clear recent" option
+- [ ] Graceful fallback if localStorage is unavailable (private browsing)
+
+---
+
+## 2. Multi-file drop and multi-select
+
+### What it does
+
+Accept multiple `.ifc` files in a single drop or browse action. Currently only `files[0]` is read.
+
+### Changes
+
+- Drop zone: iterate all `dataTransfer.files`, filter for `.ifc` and `.ifcproject`
+- File input: add `multiple` attribute, iterate all `input.files`
+- If a `.ifcproject` is included alongside `.ifc` files, the project file takes precedence (it defines the project structure)
+- Show aggregate progress: "Loading 3 of 5 models..."
+
+### Implementation checklist
+
+- [ ] Update `FileLoader.setupDropZone()` to iterate all dropped files
+- [ ] Update `FileLoader.setupFileInput()` — add `multiple` attribute, iterate all files
+- [ ] Handle mixed `.ifc` + `.ifcproject` drops (project file wins)
+- [ ] Update status display for multi-file progress
+- [ ] Update file input `accept` attribute to include `.ifcproject`
+
+---
+
+## 3. Clipboard URL detection
+
+### What it does
+
+When the user presses `Ctrl+V` / `Cmd+V` anywhere on the page (and no text input is focused), check the clipboard for an HTTPS URL. If found, auto-populate the URL input field and focus it. The user just presses Enter or clicks Load.
+
+### Flow
+
+```
+User copies a URL from Slack/email/browser
+  → Switches to viewer tab
+  → Ctrl+V
+  → URL input auto-fills, cursor ready
+  → Enter → fetch begins
+```
+
+### Implementation checklist
+
+- [ ] Add global `paste` event listener (when no input element is focused)
+- [ ] Check clipboard text against HTTPS URL pattern
+- [ ] If match, populate URL input and focus it
+- [ ] If URL input already has content, don't overwrite (avoid accidental replacement)
+
+---
+
+## 4. Canvas thumbnail
+
+### What it does
+
+Capture a screenshot of the current 3D view when saving a project. Stored as a small base64 PNG in the project file and in the recent projects list.
+
+### Implementation
+
+```ts
+function captureThumb(canvas: HTMLCanvasElement, maxSize = 200): string {
+  // Three.js requires preserveDrawingBuffer or render-then-capture in same frame
+  // Create offscreen canvas, drawImage scaled down, toDataURL
+}
+```
+
+Note: Three.js canvases need `preserveDrawingBuffer: true` on the renderer, OR the thumbnail must be captured in the same frame as a render call. The latter is better (no performance penalty from preserveDrawingBuffer).
+
+### Implementation checklist
+
+- [ ] Add `captureThumb()` utility — scale canvas to ~200px, return base64 PNG
+- [ ] Capture in the render loop (after next frame) to avoid preserveDrawingBuffer
+- [ ] Include thumbnail in `serializeProject()` output
+- [ ] Display thumbnails in recent projects list
+
+---
+
+## 5. "Copy shareable link" button
+
+(Detailed in the Project Sharing section above.)
+
+### Implementation checklist
+
+- [ ] Add share button to toolbar (shown when models are loaded)
+- [ ] Generate `?url=` link for single remote model
+- [ ] Generate `?project=` link if a hosted project file URL is known
+- [ ] Copy to clipboard + toast notification
+- [ ] Fallback: offer `.ifcproject` download if models include local sources
+- [ ] Support `&camera=` parameter for deep linking to specific views
+
+---
+
+## 6. Parallel model fetching with progress overview
+
+### What it does
+
+When opening a project with multiple remote models, fetch them in parallel (not sequentially). Show a per-model progress view:
+
+```
+┌────────────────────────────────────────┐
+│  Opening "Office Tower Phase 2"        │
+│                                        │
+│  ✓ architecture.ifc     (42 MB)        │
+│  ◻ structure.ifc        (18 MB) 67%    │
+│  ◻ mep.ifc              (95 MB) 12%    │
+│  ⚠ electrical.ifc       needs upload   │
+│                                        │
+│              [ Cancel ]                │
+└────────────────────────────────────────┘
+```
+
+### Implementation
+
+- Use `Promise.allSettled()` to fetch all remote models in parallel
+- Track per-model progress via `ReadableStream` from `fetch` response
+- Render a loading overlay with per-model status
+- Parse and render models as they arrive (don't wait for all to finish)
+- Cancel button aborts all in-flight fetches via `AbortController`
+
+### Implementation checklist
+
+- [ ] Parallel fetch with `Promise.allSettled()` + per-model `AbortController`
+- [ ] Track download progress per model via response stream
+- [ ] Create loading overlay UI with per-model status (done / progress % / needs upload / failed)
+- [ ] Parse and add models to scene incrementally as they complete
+- [ ] Cancel button to abort all fetches
+- [ ] Camera fit after all models loaded (or after timeout)
+
+---
+
+---
+
+# Additional UX ideas (for review — not yet in plan)
+
+These are higher-effort or more speculative ideas. Including them here for consideration before committing to the plan.
+
+## A. Embed mode (iframe-friendly)
+
+Add a `?embed=true` parameter that strips the toolbar, upload prompt, and footer — leaving just the 3D viewport with orbit controls. This lets teams embed a live model view in:
+- SharePoint wiki pages
+- Confluence/Notion docs
+- Project dashboards
+- Internal portals
+
+Combined with `?project=` and `&camera=`, an iframe embed becomes:
+```html
+<iframe src="https://magnusfjeldolsen.github.io/ifcviewer/?project=...&embed=true&camera=10,8,15,0,0,0"
+        width="800" height="600"></iframe>
+```
+
+Relatively simple to implement (conditionally hide UI), high shareability impact.
+
+## B. QR code generation for on-site use
+
+Construction sites. People have tablets. Generate a QR code for the project/model link that can be printed on drawings or displayed on signage. Workers scan it → viewer opens on their device with the model loaded.
+
+This is just a QR encoding of the shareable link — a small library (`qrcode` npm, ~10KB) renders it in a modal. Low effort, high value for the construction use case.
+
+## C. "Watch for changes" on remote models
+
+If the project references remote IFCs that may be updated (e.g. a designer pushes a new version), the viewer can periodically check if the file has changed:
+- `HEAD` request to compare `ETag` or `Last-Modified` header
+- If changed, show a notification: "architecture.ifc has been updated. Reload?"
+- User clicks reload → re-fetch just that model, keep everything else
+
+Useful for teams where models are actively being revised. Polling interval configurable (e.g. every 5 minutes), only while the tab is active.
+
+## D. Offline project caching (Service Worker)
+
+Register a service worker that caches fetched IFC files. When a project is opened and all models are fetched, cache them. Next time the same project is opened — even offline — the cached versions load instantly.
+
+This bridges the gap between "remember toggle" (IndexedDB, one session) and "project file" (portable, no data). The service worker cache gives you: portable project definition + fast/offline reopening.
+
+More complex to implement, but makes the "reopen a project" flow instant rather than re-downloading hundreds of MB.
+
+## E. Model version pinning
+
+Project files can reference specific versions of IFC files, not just "latest":
+- GitHub: `https://raw.githubusercontent.com/team/repo/<commit-sha>/model.ifc` instead of `main`
+- SharePoint: version history API
+- S3: object versioning
+
+This is critical for audit/compliance contexts where you need to know exactly which model version was reviewed. The project file becomes a snapshot of a point in time.
 
 ---
 
