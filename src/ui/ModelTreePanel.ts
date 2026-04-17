@@ -56,13 +56,17 @@ export class ModelTreePanel {
     addBtn.className = 'model-panel-add-btn';
     addBtn.title = 'Add local model';
     addBtn.textContent = '+';
-    addBtn.addEventListener('click', () => this.callbacks.onAddModel());
+    addBtn.addEventListener('click', () => {
+      try { this.callbacks.onAddModel(); } catch (err) { console.warn('ModelTreePanel: add model failed', err); }
+    });
 
     const addRemoteBtn = document.createElement('button');
     addRemoteBtn.className = 'model-panel-add-btn';
     addRemoteBtn.title = 'Add remote model';
     addRemoteBtn.textContent = '\u2601'; // cloud symbol ☁
-    addRemoteBtn.addEventListener('click', () => this.callbacks.onAddRemoteModel?.());
+    addRemoteBtn.addEventListener('click', () => {
+      try { this.callbacks.onAddRemoteModel?.(); } catch (err) { console.warn('ModelTreePanel: add remote model failed', err); }
+    });
 
     this.collapseBtn = document.createElement('button');
     this.collapseBtn.className = 'model-panel-collapse-btn';
@@ -83,7 +87,7 @@ export class ModelTreePanel {
     this.container.appendChild(this.list);
   }
 
-  addModel(id: string, name: string, objectCount: number): void {
+  addModel(id: string, name: string, objectCount: number, sourceType?: 'local' | 'remote'): void {
     if (this.rows.has(id)) return;
 
     const el = document.createElement('div');
@@ -95,10 +99,14 @@ export class ModelTreePanel {
     checkbox.className = 'model-row-checkbox';
     checkbox.title = 'Toggle visibility';
     checkbox.addEventListener('change', () => {
-      const visible = checkbox.checked;
-      row.visible = visible;
-      el.classList.toggle('model-row-hidden', !visible);
-      this.callbacks.onVisibilityToggle(id, visible);
+      try {
+        const visible = checkbox.checked;
+        row.visible = visible;
+        el.classList.toggle('model-row-hidden', !visible);
+        this.callbacks.onVisibilityToggle(id, visible);
+      } catch (err) {
+        console.warn('ModelTreePanel: visibility toggle failed', err);
+      }
     });
 
     const info = document.createElement('div');
@@ -106,12 +114,21 @@ export class ModelTreePanel {
 
     const nameEl = document.createElement('span');
     nameEl.className = 'model-row-name';
-    nameEl.textContent = name;
+    if (sourceType === 'remote') {
+      const badge = document.createElement('span');
+      badge.className = 'model-row-badge';
+      badge.textContent = '\u2601'; // ☁
+      badge.title = 'Remote model';
+      nameEl.appendChild(badge);
+      nameEl.appendChild(document.createTextNode(' ' + name));
+    } else {
+      nameEl.textContent = name;
+    }
     nameEl.title = name;
 
     const countEl = document.createElement('span');
     countEl.className = 'model-row-count';
-    countEl.textContent = `${objectCount} objects`;
+    countEl.textContent = objectCount > 0 ? `${objectCount} objects` : '';
 
     info.appendChild(nameEl);
     info.appendChild(countEl);
@@ -121,7 +138,11 @@ export class ModelTreePanel {
     removeBtn.title = 'Remove model';
     removeBtn.textContent = '×';
     removeBtn.addEventListener('click', () => {
-      this.callbacks.onRemoveModel(id);
+      try {
+        this.callbacks.onRemoveModel(id);
+      } catch (err) {
+        console.warn('ModelTreePanel: remove model failed', err);
+      }
     });
 
     el.appendChild(checkbox);
@@ -134,6 +155,19 @@ export class ModelTreePanel {
 
     // Auto-expand when a model is added
     if (this.collapsed) this.toggleCollapse();
+  }
+
+  setModelWarning(id: string, message: string): void {
+    const row = this.rows.get(id);
+    if (!row) return;
+    row.element.classList.add('model-row-warning');
+    row.checkbox.disabled = true;
+    row.checkbox.checked = false;
+    const countEl = row.element.querySelector('.model-row-count');
+    if (countEl) {
+      countEl.textContent = message;
+      countEl.classList.add('model-row-warning-text');
+    }
   }
 
   removeModel(id: string): void {

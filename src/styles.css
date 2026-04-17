@@ -286,6 +286,20 @@ html, body {
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* Source badge and warning states */
+.model-row-badge {
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+
+.model-row-warning {
+  opacity: 0.55;
+}
+
+.model-row-warning-text {
+  color: #f59e0b;
+}
+
 /* Loading row inline spinner */
 .model-row-loading {
   opacity: 0.8;
