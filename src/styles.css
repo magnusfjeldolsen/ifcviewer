@@ -286,6 +286,45 @@ html, body {
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* Loading row inline spinner */
+.model-row-loading {
+  opacity: 0.8;
+}
+
+.model-row-spinner {
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.model-row-spinner-track {
+  fill: none;
+  stroke: #e5e7eb;
+  stroke-width: 3;
+}
+
+.model-row-spinner-fill {
+  fill: none;
+  stroke: #3b82f6;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+.model-row-spinner-text {
+  fill: #374151;
+  font-size: 8px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: central;
+  transform-origin: center;
+  transform: rotate(90deg);
+}
+
+.model-row-status {
+  color: #3b82f6;
+}
+
 /* Memory toggle */
 .memory-toggle {
   position: absolute;
@@ -456,3 +495,104 @@ html, body {
 .cookie-expanded button.accept:hover {
   background: #2563eb;
 }
+
+/* URL input */
+.url-input-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.url-input-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+
+.url-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.url-input:focus {
+  border-color: #3b82f6;
+}
+
+.url-input:disabled {
+  opacity: 0.5;
+}
+
+.url-load-button {
+  padding: 8px 16px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.url-load-button:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.url-load-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.url-progress {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.url-message {
+  font-size: 12px;
+  min-height: 16px;
+}
+
+.url-message-info {
+  color: #3b82f6;
+}
+
+.url-message-error {
+  color: #ef4444;
+}
+
+.url-token-container {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  align-items: center;
+}
+
+.url-token-label {
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.url-token-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: none;
+}
+
+.url-token-input:focus {
+  border-color: #3b82f6;
+}
+
+
