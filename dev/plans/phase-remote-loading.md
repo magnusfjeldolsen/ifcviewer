@@ -861,13 +861,17 @@ When opening a project with multiple remote models, fetch them in parallel (not 
 
 ---
 
-# Additional UX ideas (for review — not yet in plan)
+# Future Features
 
-These are higher-effort or more speculative ideas. Including them here for consideration before committing to the plan.
+Higher-effort features that build on the remote loading and project sharing foundation. Each is independent and can be prioritized based on user demand.
 
-## A. Embed mode (iframe-friendly)
+---
 
-Add a `?embed=true` parameter that strips the toolbar, upload prompt, and footer — leaving just the 3D viewport with orbit controls. This lets teams embed a live model view in:
+## Embed mode (iframe-friendly)
+
+### What it does
+
+A `?embed=true` query parameter strips the toolbar, upload prompt, and footer — leaving just the 3D viewport with orbit controls. Teams can embed a live model view in:
 - SharePoint wiki pages
 - Confluence/Notion docs
 - Project dashboards
@@ -879,39 +883,155 @@ Combined with `?project=` and `&camera=`, an iframe embed becomes:
         width="800" height="600"></iframe>
 ```
 
-Relatively simple to implement (conditionally hide UI), high shareability impact.
+Relatively simple to implement (conditionally hide UI elements), high shareability impact.
 
-## B. QR code generation for on-site use
+### Implementation checklist
 
-Construction sites. People have tablets. Generate a QR code for the project/model link that can be printed on drawings or displayed on signage. Workers scan it → viewer opens on their device with the model loaded.
+- [ ] Parse `?embed=true` query parameter on startup
+- [ ] Conditionally hide toolbar, upload prompt, footer, memory toggle, cookie banner
+- [ ] Keep orbit controls, model tree (collapsed by default), and status bar
+- [ ] Ensure canvas resizes correctly in iframe context
+- [ ] Optional: add a small "Open in full viewer" link in the corner (links to the same URL without `?embed=true`)
+- [ ] Test in iframe on different origins (X-Frame-Options / CSP headers)
+- [ ] Document embed usage with example HTML snippet
 
-This is just a QR encoding of the shareable link — a small library (`qrcode` npm, ~10KB) renders it in a modal. Low effort, high value for the construction use case.
+---
 
-## C. "Watch for changes" on remote models
+## QR code generation for on-site use
 
-If the project references remote IFCs that may be updated (e.g. a designer pushes a new version), the viewer can periodically check if the file has changed:
-- `HEAD` request to compare `ETag` or `Last-Modified` header
-- If changed, show a notification: "architecture.ifc has been updated. Reload?"
-- User clicks reload → re-fetch just that model, keep everything else
+### What it does
 
-Useful for teams where models are actively being revised. Polling interval configurable (e.g. every 5 minutes), only while the tab is active.
+Generate a QR code for the project/model link that can be displayed on screen, printed on drawings, or posted on signage. Construction workers scan it on their phone/tablet and the viewer opens with the model loaded.
 
-## D. Offline project caching (Service Worker)
+### Implementation
 
-Register a service worker that caches fetched IFC files. When a project is opened and all models are fetched, cache them. Next time the same project is opened — even offline — the cached versions load instantly.
+A small library (`qrcode` npm, ~10KB) renders the QR in a modal. The QR encodes the same shareable link from the "Copy shareable link" feature. Lazy-loaded — only imported when the user clicks "Generate QR".
 
-This bridges the gap between "remember toggle" (IndexedDB, one session) and "project file" (portable, no data). The service worker cache gives you: portable project definition + fast/offline reopening.
+### Implementation checklist
 
-More complex to implement, but makes the "reopen a project" flow instant rather than re-downloading hundreds of MB.
+- [ ] Add `qrcode` (or similar lightweight library) as a dependency
+- [ ] Add "QR Code" button next to the share button (shown when a shareable link is available)
+- [ ] Render QR in a modal overlay with the URL displayed below it
+- [ ] Add "Download QR" button (saves as PNG for printing)
+- [ ] Add "Print QR" button (opens print dialog with just the QR + URL)
+- [ ] Lazy-load the QR library (only imported on button click)
 
-## E. Model version pinning
+---
 
-Project files can reference specific versions of IFC files, not just "latest":
-- GitHub: `https://raw.githubusercontent.com/team/repo/<commit-sha>/model.ifc` instead of `main`
-- SharePoint: version history API
-- S3: object versioning
+## Watch for changes on remote models
 
-This is critical for audit/compliance contexts where you need to know exactly which model version was reviewed. The project file becomes a snapshot of a point in time.
+### What it does
+
+When a project references remote IFCs that may be updated (e.g. a designer pushes a new revision), the viewer periodically checks if the file has changed and notifies the user.
+
+### Flow
+
+```
+Project loaded with remote models
+  → Viewer stores ETag / Last-Modified for each model
+  → Every N minutes (configurable, default 5), while tab is visible:
+      → HEAD request to each remote model URL
+      → Compare ETag / Last-Modified
+      → If changed: show notification "architecture.ifc has been updated. Reload?"
+      → User clicks "Reload" → re-fetch just that model, keep everything else in place
+      → User clicks "Ignore" → don't notify again until next change
+```
+
+Only polls while the tab is in the foreground (`document.visibilityState === 'visible'`).
+
+### Implementation checklist
+
+- [ ] Store `ETag` and `Last-Modified` headers after each successful model fetch
+- [ ] Create `ChangeWatcher` service — periodic HEAD requests to check for changes
+- [ ] Only poll while tab is visible (pause on `visibilitychange` event)
+- [ ] Configurable poll interval (default 5 minutes, adjustable in settings)
+- [ ] Show update notification per model (non-blocking toast or banner)
+- [ ] "Reload" action: re-fetch single model, re-parse, replace in scene without resetting camera
+- [ ] "Ignore" action: suppress notifications for that model until next actual change
+- [ ] Respect rate limits — back off if HEAD requests return 429
+- [ ] Disable watching for local-source models
+
+---
+
+## Offline project caching (Service Worker)
+
+### What it does
+
+Register a service worker that caches fetched IFC files. When a project is opened and all models are fetched, they're cached. Next time the same project is opened — even offline — the cached versions load instantly instead of re-downloading.
+
+### How it works
+
+```
+First open:   ?project=url → fetch project file → fetch all IFCs → cache in SW → render
+Second open:  ?project=url → SW serves from cache → instant render
+Offline:      ?project=url → SW serves from cache → works without network
+Update:       ChangeWatcher detects new version → re-fetch → update cache
+```
+
+This bridges the gap between:
+- "Remember toggle" (IndexedDB, stores raw buffers, one session only)
+- "Project file" (portable, stores URLs, always re-downloads)
+
+The service worker cache gives you: portable project definition + instant/offline reopening.
+
+### Implementation checklist
+
+- [ ] Create service worker with cache-first strategy for IFC files
+- [ ] Cache IFC responses keyed by URL after successful fetch
+- [ ] Serve from cache on subsequent requests to the same URL
+- [ ] Integrate with ChangeWatcher — invalidate cache entry when remote file changes
+- [ ] Add cache size management (e.g. max 1 GB, LRU eviction)
+- [ ] Show cache status in UI: "Cached" indicator per model in tree panel
+- [ ] "Clear cache" option in settings
+- [ ] Graceful degradation if service workers are unavailable
+- [ ] Handle cache versioning (invalidate on app update)
+
+---
+
+## Model version pinning
+
+### What it does
+
+Project files can reference specific versions of IFC files rather than "latest". This is critical for audit/compliance contexts where you need to know exactly which model version was reviewed.
+
+### How it works per provider
+
+| Provider | Versioning mechanism | URL pattern |
+|----------|---------------------|-------------|
+| GitHub | Commit SHA instead of branch name | `raw.githubusercontent.com/team/repo/<sha>/model.ifc` |
+| SharePoint | Version history via Graph API | `graph.microsoft.com/.../versions/<version-id>/content` |
+| S3 | Object versioning | `bucket.s3.amazonaws.com/model.ifc?versionId=<id>` |
+| GCS | Object versioning | `storage.googleapis.com/bucket/model.ifc?generation=<id>` |
+
+### Project file with pinned versions
+
+```json
+{
+  "models": [
+    {
+      "name": "architecture.ifc",
+      "source": {
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/team/repo/abc123def/architecture.ifc",
+        "provider": "github",
+        "pinnedVersion": "abc123def",
+        "pinnedAt": "2026-04-17T10:00:00Z",
+        "pinnedBy": "magnus"
+      }
+    }
+  ]
+}
+```
+
+### Implementation checklist
+
+- [ ] Add `pinnedVersion`, `pinnedAt`, `pinnedBy` optional fields to `ProjectModel` schema
+- [ ] "Pin current version" action per model in the model tree (resolves current version ID)
+- [ ] "Unpin" action to revert to tracking latest
+- [ ] Visual indicator in model tree: pinned (locked icon) vs. tracking latest
+- [ ] When ChangeWatcher detects updates on a pinned model, show "New version available" but don't auto-update
+- [ ] Provider-specific version resolution in `resolveDownloadUrl` (handle SHA, version ID, etc.)
+- [ ] Document version pinning in project file format spec
 
 ---
 
