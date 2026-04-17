@@ -78,6 +78,7 @@ export class Viewer {
   }
 
   restoreCameraState(state: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } }): void {
+    this.pivotTransitioning = false;
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
     this.controls.target.set(state.target.x, state.target.y, state.target.z);
     this.controls.update();
@@ -118,12 +119,14 @@ export class Viewer {
   }
 
   resetPivot(): void {
+    this.pivotTransitioning = false;
     this.controls.target.copy(this.defaultTarget);
     this.controls.update();
     this.removePivotMarker();
   }
 
   clearPivot(): void {
+    this.pivotTransitioning = false;
     if (this.pickingPivot) this.cancelPivotPicking();
     this.removePivotMarker();
   }
