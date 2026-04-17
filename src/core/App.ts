@@ -100,6 +100,9 @@ export class App {
       onRemoveModel: (id) => {
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
+        this.loadedFiles.delete(id);
+        this.sessionStore.removeFile(id);
+        this.scheduleSave();
       },
       onAddModel: () => {
         const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
@@ -252,6 +255,7 @@ export class App {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
+      if (!this.sessionStore.isMemoryEnabled()) return;
       this.sessionStore.saveSession({
         camera: this.viewer.getCameraState(),
         fileNames: this.modelManager.getModelIds(),
@@ -261,7 +265,13 @@ export class App {
 
   private async restoreSession(): Promise<void> {
     const session = this.sessionStore.getSession();
-    const files = await this.sessionStore.getFiles();
+    const allFiles = await this.sessionStore.getFiles();
+
+    // Filter IndexedDB files against session state to avoid restoring orphaned files
+    const validNames = new Set(session?.fileNames ?? []);
+    const files = validNames.size > 0
+      ? allFiles.filter(f => validNames.has(f.name))
+      : allFiles; // fallback for old sessions without fileNames
 
     if (files.length > 0) {
       this.showUploadPrompt(false);
