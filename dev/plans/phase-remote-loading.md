@@ -153,17 +153,22 @@ Generic OAuth2/PKCE handler. The flow (redirect → code exchange → token cach
 
 ```ts
 interface OAuthProviderConfig {
-  name: string;                         // e.g. "SharePoint", "Google Drive"
+  name: string;                         // e.g. "GitHub", "SharePoint", "Google Drive"
   clientId: string;
-  authorizeUrl: string;                 // e.g. "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-  tokenUrl: string;                     // e.g. "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-  scopes: string[];                     // e.g. ["Files.Read"]
-  domainPattern: RegExp;                // e.g. /\.sharepoint\.com/
+  authorizeUrl: string;                 // e.g. "https://github.com/login/oauth/authorize"
+  tokenUrl: string;                     // e.g. "https://github.com/login/oauth/access_token"
+  scopes: string[];                     // e.g. ["repo"]
+  domainPattern: RegExp;                // e.g. /github\.com/
+  flow: 'redirect' | 'device';         // redirect = OAuth2 PKCE popup; device = GitHub-style device flow
   resolveDownloadUrl: (url: string, token: string) => Promise<string>;
 }
 ```
 
-The `resolveDownloadUrl` function is the only truly provider-specific logic. Everything else (PKCE challenge generation, token exchange, caching, refresh) is shared.
+Two flow types:
+- **`redirect`** (SharePoint, Google): standard OAuth2 PKCE — popup/redirect to provider login, redirect back with code, exchange for token. Works when the provider's token endpoint supports CORS.
+- **`device`** (GitHub): user gets a code, enters it on github.com/login/device, app polls for the token. No redirect, no CORS proxy needed. Better UX for providers whose token endpoint doesn't support browser CORS.
+
+The `resolveDownloadUrl` function is the only truly provider-specific logic. Everything else (PKCE challenge generation, token exchange, device polling, caching, refresh) is shared.
 
 **Example: SharePoint config**
 ```ts
@@ -181,6 +186,33 @@ const sharepoint: OAuthProviderConfig = {
   },
 };
 ```
+
+**Example: GitHub config (private repos)**
+```ts
+const github: OAuthProviderConfig = {
+  name: 'GitHub',
+  clientId: '<github-oauth-app-id>',
+  authorizeUrl: 'https://github.com/login/oauth/authorize',
+  tokenUrl: 'https://github.com/login/oauth/access_token',
+  scopes: ['repo'],
+  domainPattern: /github\.com/,
+  resolveDownloadUrl: async (url, token) => {
+    // Rewrite github.com blob URL to raw URL (same as urlNormalizer, but now authed)
+    const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)/);
+    if (match) {
+      const [, user, repo, ref, path] = match;
+      return `https://raw.githubusercontent.com/${user}/${repo}/${ref}/${path}`;
+    }
+    return url;
+  },
+};
+```
+
+Note: GitHub OAuth has a quirk — the token exchange (`access_token` endpoint) does not support CORS from browsers. This means the token exchange step needs either:
+- A tiny serverless proxy (Cloudflare Worker / Netlify Function) to forward the code-for-token exchange, OR
+- Using GitHub's [Device Flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow) which avoids the redirect entirely — user gets a code, enters it on github.com, and the app polls for the token. This works fully client-side but is a slightly different UX.
+
+The `OAuthProvider` should support both redirect-based and device-based flows to accommodate providers like GitHub. The device flow is actually simpler for the user (no redirect, no popup) and avoids the CORS proxy requirement entirely.
 
 **Example: Google Drive config (future)**
 ```ts
@@ -205,8 +237,11 @@ Adding a new OAuth provider = writing one of these config objects. No new classe
 A simple array of `OAuthProviderConfig` objects. When a URL is submitted:
 
 1. Check `urlNormalizer` for a direct rewrite → if matched, `RemoteLoader.fetch()` directly
-2. Check provider registry by `domainPattern` → if matched, run OAuth flow → resolve download URL → `RemoteLoader.fetch()` with token
-3. No match → `RemoteLoader.fetch()` directly (optimistic try)
+2. If the direct fetch returns 401/403 AND the URL matches a provider in the registry by `domainPattern` → trigger OAuth flow → resolve download URL → `RemoteLoader.fetch()` with token
+3. If the direct fetch returns 401/403 and no provider matches → show manual token input (Phase 1.5 fallback)
+4. No match in normalizer → `RemoteLoader.fetch()` directly (optimistic try)
+
+This means GitHub URLs follow a natural escalation: public repos work in Phase 1 (url rewrite → direct fetch), private repos get the manual token prompt in Phase 1.5, and proper "Sign in with GitHub" arrives in Phase 2.
 
 ### UI: `src/ui/UrlInput.ts`
 
@@ -301,16 +336,17 @@ tests/
 - [ ] Retry fetch with `Authorization: Bearer <token>` header
 - [ ] Test with private GitHub repo + personal access token
 
-### Phase 2: Generic OAuth framework + SharePoint
+### Phase 2: Generic OAuth framework + first providers
 - [ ] Create `OAuthProvider.ts` — generic OAuth2/PKCE handler (authorize, exchange, cache, refresh)
+- [ ] Support both redirect-based flow (SharePoint, Google) and device flow (GitHub) in `OAuthProvider`
 - [ ] Create `providerRegistry.ts` — array of provider configs
-- [ ] Add SharePoint config (clientId, endpoints, scopes, `resolveDownloadUrl`)
-- [ ] Register Azure AD app (free, ~5 min) and configure redirect URI
-- [ ] Detect SharePoint URLs by domain pattern → trigger OAuth → resolve via Graph API
+- [ ] Add GitHub OAuth config — register GitHub OAuth App (free, ~2 min), implement device flow for token exchange
+- [ ] Add SharePoint config — register Azure AD app (free, ~5 min), configure redirect URI, `resolveDownloadUrl` via Graph API `/shares/` endpoint
+- [ ] Detect provider by domain pattern on 401/403 → trigger appropriate OAuth flow → resolve download URL → fetch with token
 - [ ] Add lazy-loading for OAuth dependencies (only loaded when an OAuth provider is triggered)
-- [ ] Write tests for `OAuthProvider` (mock OAuth flow, token refresh)
-- [ ] Write tests for SharePoint URL resolution
-- [ ] Manual testing with SharePoint-hosted IFC files
+- [ ] Write tests for `OAuthProvider` (mock redirect flow, mock device flow, token refresh)
+- [ ] Write tests for GitHub and SharePoint URL resolution
+- [ ] Manual testing with private GitHub repo + SharePoint-hosted IFC files
 
 ### Phase 2+: Additional OAuth providers (future, as needed)
 Each new provider = one config object added to `providerRegistry.ts`:
@@ -339,7 +375,8 @@ These work out of the box with `RemoteLoader` + `urlNormalizer`, no special inte
 | End-to-end public URL | Manual | Load a real IFC from GitHub, verify render |
 | End-to-end CORS rejection | Manual | Try a URL without CORS headers, verify graceful message |
 | End-to-end bearer token | Manual | Try a private repo URL, enter token, verify load |
-| End-to-end SharePoint | Manual | Paste SharePoint link, sign in, verify load |
+| End-to-end GitHub OAuth | Manual | Paste private repo URL, sign in with GitHub, verify load |
+| End-to-end SharePoint | Manual | Paste SharePoint link, sign in with Microsoft, verify load |
 | Query parameter | Manual | Open viewer with `?url=...`, verify confirmation + load |
 
 ---
