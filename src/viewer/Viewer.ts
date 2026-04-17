@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
+import { computeFitPosition } from './cameraUtils';
+import { CameraAnimator } from './CameraAnimator';
 
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
@@ -13,11 +15,12 @@ export class Viewer {
 
   // Pivot picking state
   private pickingPivot = false;
-  private pivotTransitioning = false;
+  private _controlsMode: 'user' | 'animating' | 'pivot-transition' = 'user';
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private defaultTarget = new THREE.Vector3();
   private boundPivotClick!: (e: MouseEvent) => void;
+  private animator = new CameraAnimator();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -39,7 +42,7 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = false;
     this.controls.addEventListener('start', () => {
-      this.pivotTransitioning = false;
+      this.setControlsMode('user');
     });
 
     this.setupLights();
@@ -76,8 +79,16 @@ export class Viewer {
     };
   }
 
+  setControlsMode(mode: 'user' | 'animating' | 'pivot-transition'): void {
+    this._controlsMode = mode;
+  }
+
+  getControlsMode(): 'user' | 'animating' | 'pivot-transition' {
+    return this._controlsMode;
+  }
+
   restoreCameraState(state: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } }): void {
-    this.pivotTransitioning = false;
+    this._controlsMode = 'user';
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
     this.controls.target.set(state.target.x, state.target.y, state.target.z);
     this.controls.update();
@@ -85,7 +96,7 @@ export class Viewer {
 
   animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
-    if (!this.pivotTransitioning) {
+    if (this._controlsMode === 'user') {
       this.controls.update();
     }
     for (const cb of this.updateCallbacks) cb();
@@ -94,38 +105,52 @@ export class Viewer {
   };
 
   fitToBox(box: THREE.Box3): void {
-    if (box.isEmpty()) return;
+    const fit = computeFitPosition(box, this.camera.fov);
+    if (!fit) return;
 
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const distance = maxDim * 1.5;
-
-    this.camera.position.set(
-      center.x + distance,
-      center.y + distance * 0.7,
-      center.z + distance,
-    );
-    this.camera.near = distance * 0.01;
-    this.camera.far = distance * 100;
+    this.camera.position.copy(fit.position);
+    this.camera.near = fit.near;
+    this.camera.far = fit.far;
     this.camera.updateProjectionMatrix();
 
-    this.controls.target.copy(center);
+    this.controls.target.copy(fit.center);
     this.controls.update();
 
-    // Store as default for reset
-    this.defaultTarget.copy(center);
+    this.defaultTarget.copy(fit.center);
+  }
+
+  flyToBox(box: THREE.Box3): Promise<void> {
+    const fit = computeFitPosition(box, this.camera.fov);
+    if (!fit) return Promise.resolve();
+
+    return this.animator.flyTo({
+      camera: this.camera,
+      controls: this.controls,
+      canvas: this.canvas,
+      targetPosition: fit.position,
+      targetLookAt: fit.center,
+      near: fit.near,
+      far: fit.far,
+      onStart: () => this.setControlsMode('animating'),
+      onComplete: () => {
+        this.setControlsMode('user');
+        this.defaultTarget.copy(fit.center);
+      },
+      onInterrupt: () => {
+        this.setControlsMode('user');
+      },
+    });
   }
 
   resetPivot(): void {
-    this.pivotTransitioning = false;
+    this._controlsMode = 'user';
     this.controls.target.copy(this.defaultTarget);
     this.controls.update();
     this.removePivotMarker();
   }
 
   clearPivot(): void {
-    this.pivotTransitioning = false;
+    this._controlsMode = 'user';
     if (this.pickingPivot) this.cancelPivotPicking();
     this.removePivotMarker();
   }
@@ -203,7 +228,7 @@ export class Viewer {
 
     const point = hit.point;
     this.controls.target.copy(point);
-    this.pivotTransitioning = true;
+    this._controlsMode = 'pivot-transition';
 
     this.showPivotMarker(point);
     this.cancelPivotPicking();
