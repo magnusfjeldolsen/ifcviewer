@@ -13,6 +13,7 @@ export class Viewer {
 
   // Pivot picking state
   private pickingPivot = false;
+  private pivotTransitioning = false;
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private defaultTarget = new THREE.Vector3();
@@ -38,6 +39,9 @@ export class Viewer {
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = false;
+    this.controls.addEventListener('start', () => {
+      this.pivotTransitioning = false;
+    });
 
     this.setupLights();
     this.setupGrid();
@@ -81,7 +85,9 @@ export class Viewer {
 
   animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
-    this.controls.update();
+    if (!this.pivotTransitioning) {
+      this.controls.update();
+    }
     for (const cb of this.updateCallbacks) cb();
     this.updatePivotMarkerScale();
     this.renderer.render(this.scene, this.camera);
@@ -202,7 +208,7 @@ export class Viewer {
 
     const point = hit.point;
     this.controls.target.copy(point);
-    this.controls.update();
+    this.pivotTransitioning = true;
 
     this.showPivotMarker(point);
     this.cancelPivotPicking();
