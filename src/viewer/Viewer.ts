@@ -17,7 +17,6 @@ export class Viewer {
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private defaultTarget = new THREE.Vector3();
-  private boundPivotKeydown!: (e: KeyboardEvent) => void;
   private boundPivotClick!: (e: MouseEvent) => void;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -45,7 +44,7 @@ export class Viewer {
 
     this.setupLights();
     this.setupGrid();
-    this.setupPivotPicking();
+    this.setupPivotClick();
 
     window.addEventListener('resize', this.onResize);
   }
@@ -136,7 +135,6 @@ export class Viewer {
       cancelAnimationFrame(this.animationId);
     }
     window.removeEventListener('resize', this.onResize);
-    document.removeEventListener('keydown', this.boundPivotKeydown);
     this.canvas.removeEventListener('click', this.boundPivotClick);
     this.removePivotMarker();
     this.controls.dispose();
@@ -163,39 +161,33 @@ export class Viewer {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   };
 
-  // ── Pivot picking ────────────────────────────────────────
+  // ── Pivot picking ───────────────���────────────────────────
 
-  private setupPivotPicking(): void {
-    this.boundPivotKeydown = (e: KeyboardEvent) => {
-      if (e.key === 'v' || e.key === 'V') {
-        if (this.pickingPivot) {
-          this.cancelPivotPicking();
-        } else {
-          this.startPivotPicking();
-        }
-      }
-      if (e.key === 'Escape' && this.pickingPivot) {
-        this.cancelPivotPicking();
-      }
-    };
-
+  private setupPivotClick(): void {
     this.boundPivotClick = (e: MouseEvent) => {
       if (!this.pickingPivot) return;
       this.placePivot(e);
     };
 
-    document.addEventListener('keydown', this.boundPivotKeydown);
     this.canvas.addEventListener('click', this.boundPivotClick);
   }
 
-  private startPivotPicking(): void {
-    this.pickingPivot = true;
-    this.canvas.style.cursor = 'crosshair';
+  togglePivotPicking(): void {
+    if (this.pickingPivot) {
+      this.cancelPivotPicking();
+    } else {
+      this.pickingPivot = true;
+      this.canvas.style.cursor = 'crosshair';
+    }
   }
 
-  private cancelPivotPicking(): void {
+  cancelPivotPicking(): void {
     this.pickingPivot = false;
     this.canvas.style.cursor = '';
+  }
+
+  isPivotPicking(): boolean {
+    return this.pickingPivot;
   }
 
   private placePivot(e: MouseEvent): void {

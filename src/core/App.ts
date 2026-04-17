@@ -12,6 +12,8 @@ import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
 import { Footer } from '../ui/Footer';
 import { CookieBanner } from '../ui/CookieBanner';
+import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
+import { HelpOverlay } from '../ui/HelpOverlay';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
@@ -34,6 +36,8 @@ export class App {
   private cookieBanner: CookieBanner;
   private urlInput: UrlInput;
   private remoteLoader: RemoteLoader;
+  private keyboardShortcuts!: KeyboardShortcuts;
+  private helpOverlay!: HelpOverlay;
   private loadedFiles = new Map<string, ArrayBuffer>();
   private statusEl: HTMLElement | null;
 
@@ -145,22 +149,57 @@ export class App {
   }
 
   private setupKeyboardShortcuts(): void {
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'c' || e.key === 'C') {
+    this.keyboardShortcuts = new KeyboardShortcuts();
+
+    this.keyboardShortcuts.register({
+      key: 'c',
+      label: 'Section Cut',
+      action: () => {
         if (this.toolManager.isActive('clipping')) {
-          // Already active — re-enter placement mode for a new clip
           const tool = this.toolManager.getActiveTool() as ClippingTool;
           tool.enterPlacingMode();
         } else {
           this.toolManager.activate('clipping');
         }
-      }
+      },
+    });
 
-      if (e.key === 'm' || e.key === 'M') {
+    this.keyboardShortcuts.register({
+      key: 'm',
+      label: 'Measure',
+      action: () => {
         if (!this.toolManager.isActive('measurement')) {
           this.toolManager.activate('measurement');
         }
-      }
+      },
+    });
+
+    this.keyboardShortcuts.register({
+      key: 'v',
+      label: 'Pick Pivot',
+      action: () => this.viewer.togglePivotPicking(),
+    });
+
+    this.keyboardShortcuts.register({
+      key: 'Escape',
+      label: 'Cancel',
+      action: () => {
+        if (this.viewer.isPivotPicking()) {
+          this.viewer.cancelPivotPicking();
+        } else {
+          this.toolManager.abort();
+        }
+      },
+    });
+
+    // Help overlay — ? button at top-left, also toggled by ? key
+    const appEl = document.getElementById('app')!;
+    this.helpOverlay = new HelpOverlay(appEl, this.keyboardShortcuts);
+
+    this.keyboardShortcuts.register({
+      key: '?',
+      label: 'Help',
+      action: () => this.helpOverlay.toggle(),
     });
   }
 
@@ -351,6 +390,8 @@ export class App {
     this.footer.dispose();
     this.memoryToggle.dispose();
     this.urlInput.dispose();
+    this.helpOverlay.dispose();
+    this.keyboardShortcuts.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     this.toolManager.dispose();
