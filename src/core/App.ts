@@ -17,6 +17,7 @@ import { HelpOverlay } from '../ui/HelpOverlay';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
+import type { ModelRecord, ModelSource } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
 export class App {
@@ -38,7 +39,9 @@ export class App {
   private remoteLoader: RemoteLoader;
   private keyboardShortcuts!: KeyboardShortcuts;
   private helpOverlay!: HelpOverlay;
-  private loadedFiles = new Map<string, ArrayBuffer>();
+  private modelRecords = new Map<string, ModelRecord>();
+  private bufferCache = new Map<string, ArrayBuffer>();
+  private parseQueue = Promise.resolve();
   private statusEl: HTMLElement | null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -100,8 +103,10 @@ export class App {
       onRemoveModel: (id) => {
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
-        this.loadedFiles.delete(id);
-        this.sessionStore.removeFile(id);
+        const record = this.modelRecords.get(id);
+        this.modelRecords.delete(id);
+        this.bufferCache.delete(id);
+        if (record) this.sessionStore.removeModel(record.id);
         this.scheduleSave();
       },
       onAddModel: () => {
@@ -119,10 +124,15 @@ export class App {
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
     this.memoryToggle.onChange(async (enabled) => {
       if (enabled) {
-        // Flush all in-memory files to IndexedDB
-        for (const [name, buffer] of this.loadedFiles) {
-          await this.sessionStore.saveFile(name, buffer);
+        // Flush all in-memory buffers to IndexedDB
+        for (const [id, buffer] of this.bufferCache) {
+          const record = this.modelRecords.get(id);
+          if (record) {
+            await this.sessionStore.saveModel(id, record.name, buffer);
+            record.hasCachedBuffer = true;
+          }
         }
+        this.scheduleSave();
       } else {
         if (this.saveTimer) {
           clearTimeout(this.saveTimer);
@@ -224,7 +234,7 @@ export class App {
     if (dropZone) this.fileLoader.setupDropZone(dropZone);
     if (fileInput) this.fileLoader.setupFileInput(fileInput);
 
-    this.fileLoader.onLoad((file) => this.handleFile(file));
+    this.fileLoader.onLoad((file) => this.enqueueLoad(file));
 
     this.viewer.animate();
     this.showUploadPrompt(true);
@@ -245,7 +255,7 @@ export class App {
     if (this.sessionStore.isMemoryEnabled()) {
       this.sessionStore.saveSession({
         camera: this.viewer.getCameraState(),
-        fileNames: this.modelManager.getModelIds(),
+        models: Array.from(this.modelRecords.values()),
       });
     }
   };
@@ -258,36 +268,102 @@ export class App {
       if (!this.sessionStore.isMemoryEnabled()) return;
       this.sessionStore.saveSession({
         camera: this.viewer.getCameraState(),
-        fileNames: this.modelManager.getModelIds(),
+        models: Array.from(this.modelRecords.values()),
       });
     }, 1000);
   }
 
   private async restoreSession(): Promise<void> {
     const session = this.sessionStore.getSession();
-    const allFiles = await this.sessionStore.getFiles();
 
-    // Filter IndexedDB files against session state to avoid restoring orphaned files
-    const validNames = new Set(session?.fileNames ?? []);
-    const files = validNames.size > 0
-      ? allFiles.filter(f => validNames.has(f.name))
-      : allFiles; // fallback for old sessions without fileNames
+    // Determine which models to restore from session state
+    const records = session?.models ?? [];
 
-    if (files.length > 0) {
+    // Fallback for v1 sessions that only have fileNames
+    if (records.length === 0 && session?.fileNames?.length) {
+      const allModels = await this.sessionStore.getAllModels();
+      const nameSet = new Set(session.fileNames);
+      const fallbackModels = allModels.filter(m => nameSet.has(m.name));
+      if (fallbackModels.length > 0) {
+        this.showUploadPrompt(false);
+        for (const stored of fallbackModels) {
+          try {
+            this.setStatus(`Restoring ${stored.name}...`);
+            const id = stored.id;
+            const parsed = await this.parser.parse(stored.buffer, id);
+            this.modelManager.addModel(parsed);
+            this.modelTreePanel.addModel(parsed.id, stored.name, parsed.meshes.length);
+            this.bufferCache.set(id, stored.buffer);
+            this.modelRecords.set(id, {
+              id,
+              name: stored.name,
+              source: { type: 'local', fileName: stored.name },
+              addedAt: Date.now(),
+              sizeBytes: stored.buffer.byteLength,
+              hasCachedBuffer: true,
+            });
+          } catch {
+            // skip files that fail to parse on restore
+          }
+        }
+        const box = this.modelManager.getBoundingBox();
+        this.viewer.fitToBox(box);
+        this.setStatus('');
+      }
+    } else if (records.length > 0) {
       this.showUploadPrompt(false);
-      for (const file of files) {
+      // Pre-fetch all stored models for fallback name-based lookup
+      const allStored = await this.sessionStore.getAllModels();
+      for (const record of records) {
         try {
-          this.setStatus(`Restoring ${file.name}...`);
-          const parsed = await this.parser.parse(file.buffer, file.name);
-          this.modelManager.addModel(parsed);
-          this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
-          this.loadedFiles.set(file.name, file.buffer);
+          this.setStatus(`Restoring ${record.name}...`);
+          let stored = await this.sessionStore.getModel(record.id);
+
+          // Fallback: UUID mismatch (e.g. after migration) — find by name
+          if (!stored) {
+            const byName = allStored.find(m => m.name === record.name);
+            if (byName) {
+              console.warn(`SessionStore: UUID miss for "${record.name}", found by name`);
+              stored = byName;
+            }
+          }
+
+          if (stored) {
+            // Buffer available in IndexedDB — parse and add
+            const parsed = await this.parser.parse(stored.buffer, record.id);
+            this.modelManager.addModel(parsed);
+            this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length);
+            this.bufferCache.set(record.id, stored.buffer);
+            this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+            // Fix the IndexedDB key to match the session UUID
+            if (stored.id !== record.id) {
+              await this.sessionStore.removeModel(stored.id);
+              await this.sessionStore.saveModel(record.id, record.name, stored.buffer);
+            }
+          } else if (record.source.type === 'remote') {
+            // No cached buffer — re-fetch from URL
+            this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
+            try {
+              await this.handleRemoteLoad(record.source.url);
+              // handleRemoteLoad creates its own record, remove the placeholder
+              this.modelRecords.delete(record.id);
+            } catch {
+              this.modelTreePanel.addModel(record.id, record.name, 0, 'remote');
+              this.modelTreePanel.setModelWarning(record.id, 'Failed to fetch — click to retry');
+            }
+          } else {
+            // Local model with missing buffer — show warning
+            console.warn(`SessionStore: no buffer for local model "${record.name}" (id: ${record.id})`);
+            this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
+            this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
+            this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
+          }
         } catch {
-          // skip files that fail to parse on restore
+          // skip models that fail to restore
         }
       }
       const box = this.modelManager.getBoundingBox();
-      this.viewer.fitToBox(box);
+      if (!box.isEmpty()) this.viewer.fitToBox(box);
       this.setStatus('');
     }
 
@@ -297,22 +373,59 @@ export class App {
     }
   }
 
-  private async handleFile(file: LoadedFile): Promise<void> {
+  private enqueueLoad(file: LoadedFile, source?: ModelSource): void {
+    this.parseQueue = this.parseQueue
+      .then(() => this.handleFile(file, source))
+      .catch(() => {}); // errors handled inside handleFile
+  }
+
+  private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
     try {
+      // Reject duplicate filenames
+      for (const existing of this.modelRecords.values()) {
+        if (existing.name === file.name) {
+          this.setStatus(`${file.name} is already loaded`);
+          setTimeout(() => this.setStatus(''), 3000);
+          return;
+        }
+      }
+
       this.showUploadPrompt(false);
       this.setStatus(`Loading ${file.name}...`);
 
-      const parsed = await this.parser.parse(file.buffer, file.name);
+      const id = crypto.randomUUID();
+      const parsed = await this.parser.parse(file.buffer, id);
       this.modelManager.addModel(parsed);
-      this.modelTreePanel.addModel(parsed.id, file.name, parsed.meshes.length);
-      this.loadedFiles.set(file.name, file.buffer);
+
+      const modelSource: ModelSource = source ?? { type: 'local', fileName: file.name };
+      const record: ModelRecord = {
+        id,
+        name: file.name,
+        source: modelSource,
+        addedAt: Date.now(),
+        sizeBytes: file.buffer.byteLength,
+        hasCachedBuffer: true,
+      };
+
+      this.modelRecords.set(id, record);
+      this.bufferCache.set(id, file.buffer);
+      this.modelTreePanel.addModel(
+        parsed.id, file.name, parsed.meshes.length,
+        modelSource.type,
+      );
 
       const box = this.modelManager.getBoundingBox();
       this.viewer.fitToBox(box);
 
-      // Persist file to IndexedDB if memory is enabled
+      // Persist to IndexedDB if memory is enabled
       if (this.sessionStore.isMemoryEnabled()) {
-        await this.sessionStore.saveFile(file.name, file.buffer);
+        await this.sessionStore.saveModel(id, file.name, file.buffer);
+        // Force an immediate session save (not debounced) so the record
+        // is in localStorage even if the user refreshes right away
+        this.sessionStore.saveSession({
+          camera: this.viewer.getCameraState(),
+          models: Array.from(this.modelRecords.values()),
+        });
       }
 
       this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
@@ -342,13 +455,15 @@ export class App {
       this.modelTreePanel.removeModel(id);
     }
 
-    // Re-parse and re-add every loaded file from memory
-    for (const [name, buffer] of this.loadedFiles) {
+    // Re-parse and re-add every loaded model from buffer cache
+    for (const [id, record] of this.modelRecords) {
+      const buffer = this.bufferCache.get(id);
+      if (!buffer) continue;
       try {
-        this.setStatus(`Reloading ${name}...`);
-        const parsed = await this.parser.parse(buffer, name);
+        this.setStatus(`Reloading ${record.name}...`);
+        const parsed = await this.parser.parse(buffer, id);
         this.modelManager.addModel(parsed);
-        this.modelTreePanel.addModel(parsed.id, name, parsed.meshes.length);
+        this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length, record.source.type);
       } catch {
         // skip files that fail to re-parse
       }
@@ -394,7 +509,8 @@ export class App {
 
     if (result.status === 'ok' && result.file) {
       this.urlInput.clearInput();
-      await this.handleFile(result.file);
+      const source: ModelSource = { type: 'remote', url, fileName: result.file.name };
+      await this.handleFile(result.file, source);
       return;
     }
 
