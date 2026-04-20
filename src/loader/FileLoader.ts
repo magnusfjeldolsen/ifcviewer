@@ -7,6 +7,7 @@ export class FileLoader {
   private dropZone: HTMLElement | null = null;
   private fileInput: HTMLInputElement | null = null;
   private onFileLoaded: ((file: LoadedFile) => void) | null = null;
+  private onProjectLoaded: ((file: File) => void) | null = null;
 
   setupDropZone(element: HTMLElement): void {
     this.dropZone = element;
@@ -29,7 +30,9 @@ export class FileLoader {
       element.classList.remove('drag-over');
 
       const file = e.dataTransfer?.files[0];
-      if (file && file.name.toLowerCase().endsWith('.ifc')) {
+      if (file && file.name.toLowerCase().endsWith('.ifcproject')) {
+        this.onProjectLoaded?.(file);
+      } else if (file && file.name.toLowerCase().endsWith('.ifc')) {
         this.readFile(file);
       }
     });
@@ -51,6 +54,10 @@ export class FileLoader {
     this.onFileLoaded = callback;
   }
 
+  onProjectLoad(callback: (file: File) => void): void {
+    this.onProjectLoaded = callback;
+  }
+
   private async readFile(file: File): Promise<void> {
     const buffer = await file.arrayBuffer();
     this.onFileLoaded?.({ name: file.name, buffer });
@@ -60,5 +67,6 @@ export class FileLoader {
     this.dropZone = null;
     this.fileInput = null;
     this.onFileLoaded = null;
+    this.onProjectLoaded = null;
   }
 }

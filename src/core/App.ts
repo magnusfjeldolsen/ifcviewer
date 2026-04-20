@@ -17,6 +17,7 @@ import { HelpOverlay } from '../ui/HelpOverlay';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
+import { ProjectExporter } from '../services/ProjectExporter';
 import type { ModelRecord, ModelSource } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -117,6 +118,8 @@ export class App {
         const url = window.prompt('Enter URL to a remote .ifc file:');
         if (url) this.loadFromUrl(url);
       },
+      onExportProject: () => this.exportProject(),
+      onImportProject: () => this.triggerProjectImport(),
     });
 
     // Session persistence
@@ -212,9 +215,9 @@ export class App {
       },
     });
 
-    // Help overlay — ? button at top-left, also toggled by ? key
-    const appEl = document.getElementById('app')!;
-    this.helpOverlay = new HelpOverlay(appEl, this.keyboardShortcuts);
+    // Help overlay — ? button at bottom-left next to cookie icon
+    const helpMount = document.getElementById('app')!;
+    this.helpOverlay = new HelpOverlay(helpMount, this.keyboardShortcuts);
 
     this.keyboardShortcuts.register({
       key: '?',
@@ -235,6 +238,7 @@ export class App {
     if (fileInput) this.fileLoader.setupFileInput(fileInput);
 
     this.fileLoader.onLoad((file) => this.enqueueLoad(file));
+    this.fileLoader.onProjectLoad((file) => this.importProject(file));
 
     this.viewer.animate();
     this.showUploadPrompt(true);
@@ -520,6 +524,115 @@ export class App {
     }
 
     this.urlInput.showMessage(result.message, 'error');
+  }
+
+  // ── Project export/import ───────────────────────────────
+
+  private async exportProject(): Promise<void> {
+    try {
+      this.setStatus('Exporting project...');
+      const exporter = new ProjectExporter();
+      const blob = await exporter.exportProject(
+        Array.from(this.modelRecords.values()),
+        this.viewer.getCameraState(),
+        async (id) => {
+          const cached = this.bufferCache.get(id);
+          if (cached) return cached;
+          const stored = await this.sessionStore.getModel(id);
+          return stored?.buffer ?? null;
+        },
+      );
+
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `project-${Date.now()}.ifcproject`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+
+      this.setStatus('Project exported');
+      setTimeout(() => this.setStatus(''), 3000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Export failed';
+      this.setStatus(`Error: ${msg}`);
+    }
+  }
+
+  private triggerProjectImport(): void {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.ifcproject';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) this.importProject(file);
+    });
+    input.click();
+  }
+
+  private async importProject(file: File): Promise<void> {
+    try {
+      this.setStatus('Importing project...');
+      const exporter = new ProjectExporter();
+      const blob = new Blob([await file.arrayBuffer()]);
+      const { manifest, buffers, warnings } = await exporter.importProject(blob);
+
+      for (const w of warnings) {
+        console.warn('Project import:', w);
+      }
+
+      // Clear current scene
+      for (const id of this.modelManager.getModelIds()) {
+        this.modelManager.removeModel(id);
+        this.modelTreePanel.removeModel(id);
+      }
+      this.modelRecords.clear();
+      this.bufferCache.clear();
+
+      this.showUploadPrompt(false);
+
+      // Load each model from the manifest
+      for (const record of manifest.models) {
+        try {
+          if (record.source.type === 'local') {
+            const buffer = buffers.get(record.id);
+            if (buffer) {
+              await this.handleFile(
+                { name: record.name, buffer },
+                record.source,
+              );
+            } else {
+              // Missing buffer — show warning row
+              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
+              this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
+              this.modelTreePanel.setModelWarning(record.id, 'File missing in project archive');
+            }
+          } else if (record.source.type === 'remote') {
+            try {
+              await this.handleRemoteLoad(record.source.url);
+            } catch {
+              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
+              this.modelTreePanel.addModel(record.id, record.name, 0, 'remote');
+              this.modelTreePanel.setModelWarning(record.id, 'Failed to fetch — click to retry');
+            }
+          }
+        } catch {
+          // skip individual model failures
+        }
+      }
+
+      // Restore camera
+      if (manifest.camera) {
+        this.viewer.restoreCameraState(manifest.camera);
+      }
+
+      const warnCount = warnings.length;
+      const modelCount = manifest.models.length;
+      const suffix = warnCount > 0 ? ` (${warnCount} warning${warnCount > 1 ? 's' : ''})` : '';
+      this.setStatus(`Imported ${modelCount} model${modelCount !== 1 ? 's' : ''}${suffix}`);
+      setTimeout(() => this.setStatus(''), 3000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Import failed';
+      this.setStatus(`Error: ${msg}`);
+    }
   }
 
   dispose(): void {

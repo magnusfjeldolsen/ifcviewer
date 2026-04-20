@@ -3,6 +3,8 @@ export interface ModelTreeCallbacks {
   onRemoveModel: (id: string) => void;
   onAddModel: () => void;
   onAddRemoteModel?: () => void;
+  onExportProject?: () => void;
+  onImportProject?: () => void;
 }
 
 interface ModelRow {
@@ -25,6 +27,8 @@ interface LoadingRow {
 
 export class ModelTreePanel {
   private container: HTMLElement;
+  private projectBar: HTMLElement;
+  private exportBtn: HTMLButtonElement;
   private header: HTMLElement;
   private list: HTMLElement;
   private collapseBtn: HTMLButtonElement;
@@ -40,6 +44,31 @@ export class ModelTreePanel {
     this.container = document.createElement('div');
     this.container.className = 'model-panel';
     parent.appendChild(this.container);
+
+    // Project action bar (above the model tree)
+    this.projectBar = document.createElement('div');
+    this.projectBar.className = 'project-bar';
+
+    const importBtn = document.createElement('button');
+    importBtn.className = 'project-bar-btn';
+    importBtn.title = 'Import project (.ifcproject)';
+    importBtn.innerHTML = '<span class="project-bar-icon">\u2191</span> Import';
+    importBtn.addEventListener('click', () => {
+      try { this.callbacks.onImportProject?.(); } catch (err) { console.warn('ModelTreePanel: import failed', err); }
+    });
+
+    this.exportBtn = document.createElement('button');
+    this.exportBtn.className = 'project-bar-btn';
+    this.exportBtn.title = 'Export project (.ifcproject)';
+    this.exportBtn.innerHTML = '<span class="project-bar-icon">\u2193</span> Export';
+    this.exportBtn.disabled = true;
+    this.exportBtn.addEventListener('click', () => {
+      try { this.callbacks.onExportProject?.(); } catch (err) { console.warn('ModelTreePanel: export failed', err); }
+    });
+
+    this.projectBar.appendChild(importBtn);
+    this.projectBar.appendChild(this.exportBtn);
+    this.container.appendChild(this.projectBar);
 
     // Header
     this.header = document.createElement('div');
@@ -155,6 +184,7 @@ export class ModelTreePanel {
 
     // Auto-expand when a model is added
     if (this.collapsed) this.toggleCollapse();
+    this.updateExportButton();
   }
 
   setModelWarning(id: string, message: string): void {
@@ -175,6 +205,7 @@ export class ModelTreePanel {
     if (!row) return;
     row.element.remove();
     this.rows.delete(id);
+    this.updateExportButton();
   }
 
   addLoadingModel(id: string, name: string): void {
@@ -279,6 +310,10 @@ export class ModelTreePanel {
     this.container.classList.toggle('collapsed', this.collapsed);
     this.collapseBtn.textContent = this.collapsed ? '▶' : '◀';
     this.collapseBtn.title = this.collapsed ? 'Expand panel' : 'Collapse panel';
+  }
+
+  private updateExportButton(): void {
+    this.exportBtn.disabled = this.rows.size === 0;
   }
 
   getContainer(): HTMLElement {
