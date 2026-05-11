@@ -18,6 +18,8 @@ import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
 import { SelectionManager } from '../inspector/SelectionManager';
+import { InspectorPanel } from '../inspector/InspectorPanel';
+import { WebIfcPropertyRepository } from '../inspector/repository/WebIfcPropertyRepository';
 import type { ModelRecord, ModelSource } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -52,6 +54,9 @@ export class App {
   // Element selection (Phase 2 of the Inspector). Owns canvas pointer
   // listeners; defers to active tools and pivot picking via deps.
   private selectionManager!: SelectionManager;
+  // Property repository + panel UI (Phase 3 of the Inspector).
+  private propertyRepository!: WebIfcPropertyRepository;
+  private inspectorPanel!: InspectorPanel;
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
@@ -96,6 +101,7 @@ export class App {
 
     // Toolbar UI
     const appEl = document.getElementById('app')!;
+
     this.toolbar = new Toolbar(appEl, this.toolManager);
     this.toolbar.addButton({
       name: 'clipping',
@@ -122,6 +128,8 @@ export class App {
         // Drop selection bookkeeping BEFORE ModelManager disposes the meshes,
         // so SelectionManager doesn't try to restore materials on dead meshes.
         this.selectionManager.onModelRemoved(id);
+        // Free memoized properties for this model before the web-ifc model is closed.
+        if (this.propertyRepository) this.propertyRepository.disposeModel(id);
         this.closeWebIfcModel(id);
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
@@ -252,6 +260,41 @@ export class App {
     this.setStatus('Initializing IFC engine...');
     await this.parser.init();
     this.setStatus('');
+
+    // Construct the property repository + inspector panel here (Phase 3):
+    // both depend on `parser.api` being initialized. The panel subscribes
+    // to selectionManager.onChange itself in its constructor.
+    const api = this.parser.api;
+    if (api) {
+      this.propertyRepository = new WebIfcPropertyRepository(
+        // PropertyApi is a structural subset of web-ifc's IfcAPI.
+        api as unknown as ConstructorParameters<typeof WebIfcPropertyRepository>[0],
+        (id: string) => this.modelIdMap.get(id),
+        (work) => {
+          // Chain property fetches onto the parse queue so they don't
+          // race against an in-flight parse on the same web-ifc model.
+          const chained = this.parseQueue.then(() => work());
+          this.parseQueue = chained.then(
+            () => undefined,
+            () => undefined,
+          );
+          return chained;
+        },
+      );
+      const appEl = document.getElementById('app')!;
+      this.inspectorPanel = new InspectorPanel(
+        appEl,
+        {
+          repository: this.propertyRepository,
+          getModelInfo: (modelId: string) => {
+            const record = this.modelRecords.get(modelId);
+            return record ? { name: record.name } : undefined;
+          },
+          getModelCount: () => this.modelRecords.size,
+        },
+        this.selectionManager,
+      );
+    }
 
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
@@ -482,6 +525,7 @@ export class App {
 
     // Remove all models and UI rows
     for (const id of this.modelManager.getModelIds()) {
+      if (this.propertyRepository) this.propertyRepository.disposeModel(id);
       this.closeWebIfcModel(id);
       this.modelManager.removeModel(id);
       this.modelTreePanel.removeModel(id);
@@ -567,6 +611,7 @@ export class App {
     this.keyboardShortcuts.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
+    if (this.inspectorPanel) this.inspectorPanel.dispose();
     this.selectionManager.dispose();
     this.toolManager.dispose();
     this.modelManager.dispose();
