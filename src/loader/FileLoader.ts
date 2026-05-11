@@ -7,32 +7,61 @@ export class FileLoader {
   private dropZone: HTMLElement | null = null;
   private fileInput: HTMLInputElement | null = null;
   private onFileLoaded: ((file: LoadedFile) => void) | null = null;
+  private dragCounter = 0;
+  private docDragEnter: ((e: DragEvent) => void) | null = null;
+  private docDragOver: ((e: DragEvent) => void) | null = null;
+  private docDragLeave: ((e: DragEvent) => void) | null = null;
+  private docDrop: ((e: DragEvent) => void) | null = null;
 
   setupDropZone(element: HTMLElement): void {
     this.dropZone = element;
 
-    element.addEventListener('dragover', (e) => {
+    const hasFiles = (e: DragEvent): boolean => {
+      const types = e.dataTransfer?.types;
+      if (!types) return false;
+      // types is DOMStringList in some browsers, array-like in jsdom
+      for (let i = 0; i < types.length; i++) {
+        if (types[i] === 'Files') return true;
+      }
+      return false;
+    };
+
+    this.docDragEnter = (e) => {
+      if (!hasFiles(e)) return;
       e.preventDefault();
-      e.stopPropagation();
+      this.dragCounter++;
       element.classList.add('drag-over');
-    });
+    };
 
-    element.addEventListener('dragleave', (e) => {
+    this.docDragOver = (e) => {
+      if (!hasFiles(e)) return;
       e.preventDefault();
-      e.stopPropagation();
-      element.classList.remove('drag-over');
-    });
+    };
 
-    element.addEventListener('drop', (e) => {
+    this.docDragLeave = (e) => {
+      if (!hasFiles(e)) return;
       e.preventDefault();
-      e.stopPropagation();
+      this.dragCounter = Math.max(0, this.dragCounter - 1);
+      if (this.dragCounter === 0) {
+        element.classList.remove('drag-over');
+      }
+    };
+
+    this.docDrop = (e) => {
+      e.preventDefault();
+      this.dragCounter = 0;
       element.classList.remove('drag-over');
 
       const file = e.dataTransfer?.files[0];
       if (file && file.name.toLowerCase().endsWith('.ifc')) {
         this.readFile(file);
       }
-    });
+    };
+
+    document.addEventListener('dragenter', this.docDragEnter);
+    document.addEventListener('dragover', this.docDragOver);
+    document.addEventListener('dragleave', this.docDragLeave);
+    document.addEventListener('drop', this.docDrop);
   }
 
   setupFileInput(input: HTMLInputElement): void {
@@ -57,6 +86,14 @@ export class FileLoader {
   }
 
   dispose(): void {
+    if (this.docDragEnter) document.removeEventListener('dragenter', this.docDragEnter);
+    if (this.docDragOver) document.removeEventListener('dragover', this.docDragOver);
+    if (this.docDragLeave) document.removeEventListener('dragleave', this.docDragLeave);
+    if (this.docDrop) document.removeEventListener('drop', this.docDrop);
+    this.docDragEnter = null;
+    this.docDragOver = null;
+    this.docDragLeave = null;
+    this.docDrop = null;
     this.dropZone = null;
     this.fileInput = null;
     this.onFileLoaded = null;
