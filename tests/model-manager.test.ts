@@ -15,7 +15,7 @@ function createMockParsedModel(id: string, meshCount = 2): ParsedModel {
     transform: IDENTITY,
     color: { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
   }));
-  return { id, meshes };
+  return { id, modelID: 1, meshes };
 }
 
 describe('ModelManager', () => {
