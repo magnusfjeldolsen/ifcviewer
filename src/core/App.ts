@@ -17,6 +17,7 @@ import { HelpOverlay } from '../ui/HelpOverlay';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
+import { SelectionManager } from '../inspector/SelectionManager';
 import type { ModelRecord, ModelSource } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -48,6 +49,9 @@ export class App {
   private modelIdMap = new Map<string, number>();
   private parseQueue = Promise.resolve();
   private statusEl: HTMLElement | null;
+  // Element selection (Phase 2 of the Inspector). Owns canvas pointer
+  // listeners; defers to active tools and pivot picking via deps.
+  private selectionManager!: SelectionManager;
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
@@ -81,6 +85,15 @@ export class App {
       this.measurementTool.update();
     });
 
+    // Element selection (Phase 2 — Inspector). Must be constructed after
+    // viewer / modelManager / toolManager exist; defers clicks to active
+    // tools and pivot picking via those dependencies.
+    this.selectionManager = new SelectionManager({
+      viewer: this.viewer,
+      modelManager: this.modelManager,
+      toolManager: this.toolManager,
+    });
+
     // Toolbar UI
     const appEl = document.getElementById('app')!;
     this.toolbar = new Toolbar(appEl, this.toolManager);
@@ -106,6 +119,9 @@ export class App {
         this.modelManager.setVisible(id, visible);
       },
       onRemoveModel: (id) => {
+        // Drop selection bookkeeping BEFORE ModelManager disposes the meshes,
+        // so SelectionManager doesn't try to restore materials on dead meshes.
+        this.selectionManager.onModelRemoved(id);
         this.closeWebIfcModel(id);
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
@@ -212,8 +228,11 @@ export class App {
       action: () => {
         if (this.viewer.isPivotPicking()) {
           this.viewer.cancelPivotPicking();
-        } else {
+        } else if (this.toolManager.getActiveTool() !== null) {
           this.toolManager.abort();
+        } else {
+          // No tool active, no pivot picking: clear the inspector selection.
+          this.selectionManager.clear();
         }
       },
     });
@@ -457,6 +476,9 @@ export class App {
     this.clippingTool.clearClipPlane();
     this.measurementTool.clearMeasurements();
     this.viewer.clearPivot();
+    // Clear inspector selection before disposing meshes — keeps the highlight
+    // bookkeeping from referencing materials we're about to dispose.
+    this.selectionManager.clear();
 
     // Remove all models and UI rows
     for (const id of this.modelManager.getModelIds()) {
@@ -545,6 +567,7 @@ export class App {
     this.keyboardShortcuts.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
+    this.selectionManager.dispose();
     this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();
