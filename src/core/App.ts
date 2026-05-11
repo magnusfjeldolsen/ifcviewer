@@ -41,6 +41,11 @@ export class App {
   private helpOverlay!: HelpOverlay;
   private modelRecords = new Map<string, ModelRecord>();
   private bufferCache = new Map<string, ArrayBuffer>();
+  // Maps App UUID → web-ifc internal modelID. Populated when a parse
+  // succeeds; entries are removed (and the web-ifc model closed) by
+  // removeModel / resetView / dispose. Used by the Element Property
+  // Repository to issue property queries to web-ifc.
+  private modelIdMap = new Map<string, number>();
   private parseQueue = Promise.resolve();
   private statusEl: HTMLElement | null;
 
@@ -101,6 +106,7 @@ export class App {
         this.modelManager.setVisible(id, visible);
       },
       onRemoveModel: (id) => {
+        this.closeWebIfcModel(id);
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
@@ -292,6 +298,7 @@ export class App {
             const id = stored.id;
             const parsed = await this.parser.parse(stored.buffer, id);
             this.modelManager.addModel(parsed);
+            this.modelIdMap.set(id, parsed.modelID);
             this.modelTreePanel.addModel(parsed.id, stored.name, parsed.meshes.length);
             this.bufferCache.set(id, stored.buffer);
             this.modelRecords.set(id, {
@@ -332,6 +339,7 @@ export class App {
             // Buffer available in IndexedDB — parse and add
             const parsed = await this.parser.parse(stored.buffer, record.id);
             this.modelManager.addModel(parsed);
+            this.modelIdMap.set(record.id, parsed.modelID);
             this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length);
             this.bufferCache.set(record.id, stored.buffer);
             this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
@@ -396,6 +404,7 @@ export class App {
       const id = crypto.randomUUID();
       const parsed = await this.parser.parse(file.buffer, id);
       this.modelManager.addModel(parsed);
+      this.modelIdMap.set(id, parsed.modelID);
 
       const modelSource: ModelSource = source ?? { type: 'local', fileName: file.name };
       const record: ModelRecord = {
@@ -451,11 +460,13 @@ export class App {
 
     // Remove all models and UI rows
     for (const id of this.modelManager.getModelIds()) {
+      this.closeWebIfcModel(id);
       this.modelManager.removeModel(id);
       this.modelTreePanel.removeModel(id);
     }
 
-    // Re-parse and re-add every loaded model from buffer cache
+    // Re-parse and re-add every loaded model from buffer cache.
+    // modelIdMap is rebuilt as re-parses complete (old IDs were cleared above).
     for (const [id, record] of this.modelRecords) {
       const buffer = this.bufferCache.get(id);
       if (!buffer) continue;
@@ -463,6 +474,7 @@ export class App {
         this.setStatus(`Reloading ${record.name}...`);
         const parsed = await this.parser.parse(buffer, id);
         this.modelManager.addModel(parsed);
+        this.modelIdMap.set(id, parsed.modelID);
         this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length, record.source.type);
       } catch {
         // skip files that fail to re-parse
@@ -536,7 +548,33 @@ export class App {
     this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();
+    // Close every still-open web-ifc model before the parser disposes its WASM heap
+    for (const id of Array.from(this.modelIdMap.keys())) {
+      this.closeWebIfcModel(id);
+    }
     this.parser.dispose();
     this.viewer.dispose();
+  }
+
+  /**
+   * Close the web-ifc model corresponding to the given App UUID and drop
+   * the entry from modelIdMap. Safe to call when no entry exists (no-op).
+   * Errors from CloseModel are swallowed — the WASM may already be down
+   * (e.g. dispose during teardown), and an upstream caller cannot recover.
+   */
+  private closeWebIfcModel(id: string): void {
+    const webIfcId = this.modelIdMap.get(id);
+    if (webIfcId === undefined) return;
+    this.modelIdMap.delete(id);
+    try {
+      this.parser.api?.CloseModel(webIfcId);
+    } catch {
+      // ignore — web-ifc may already be disposed
+    }
+  }
+
+  /** Test/inspector hook: snapshot of the current App UUID → web-ifc modelID map. */
+  getModelIdMap(): ReadonlyMap<string, number> {
+    return this.modelIdMap;
   }
 }

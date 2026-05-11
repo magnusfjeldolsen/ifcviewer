@@ -11,11 +11,14 @@ export interface ParsedMesh {
 
 export interface ParsedModel {
   id: string;
+  modelID: number;
   meshes: ParsedMesh[];
 }
 
 export class IfcParser {
-  private api: WebIFC.IfcAPI | null = null;
+  // Public so App can route the web-ifc modelID through the property repository.
+  // Kept open after parse; App owns CloseModel on remove / reset / dispose.
+  api: WebIFC.IfcAPI | null = null;
   private initialized = false;
 
   async init(): Promise<void> {
@@ -79,9 +82,12 @@ export class IfcParser {
       }
     });
 
-    this.api.CloseModel(modelID);
+    // NOTE: model is intentionally kept open after parse.
+    // The Element Properties Inspector (Phase 1+) needs the web-ifc heap
+    // for property queries. Lifetime is now owned by App: CloseModel is
+    // called from App.removeModel, App.resetView, and App.dispose.
 
-    return { id, meshes };
+    return { id, modelID, meshes };
   }
 
   dispose(): void {
