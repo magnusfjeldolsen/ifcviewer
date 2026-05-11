@@ -678,7 +678,7 @@ export function buildFlatRows(
   return rows;
 }
 
-function displayStringForValue(v: PropertyValue): string {
+export function displayStringForValue(v: PropertyValue): string {
   switch (v.kind) {
     case 'single':
       return formatRawValue(v.raw.typeCode, v.raw.value ?? v.value);
