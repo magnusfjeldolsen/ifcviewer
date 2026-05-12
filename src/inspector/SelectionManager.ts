@@ -266,11 +266,17 @@ export class SelectionManager {
    *   - `remove` with N → for each: if in selection, remove.
    *
    * Single-model-lock collapse: when `singleModelLock === true` and the
-   * batch references multiple `modelId`s, the batch is filtered to the
-   * **first model encountered** (iterating the input array). This collapses
-   * cross-model marquees while preserving in-batch order. Note: this is
-   * batch-level collapse only; `setSingleModelLock(true)` does its own
-   * collapse of the existing selection.
+   * batch references multiple `modelId`s, the batch is filtered to a
+   * single "locked" model.
+   *   - For `add`/`remove`: the locked model is the **existing selection's
+   *     model** (preserves user intent — they can keep building selection
+   *     in their current model regardless of marquee iteration order).
+   *     Falls back to the first identity in the batch if the selection is
+   *     empty.
+   *   - For `replace`: the existing selection is being cleared anyway, so
+   *     the locked model is the **first identity in the batch**.
+   * Note: this is batch-level collapse only; `setSingleModelLock(true)`
+   * does its own collapse of the existing selection.
    *
    * Emits `onChange` **once** per call, regardless of how many identities
    * mutated. No-op calls (e.g. `remove` with identities none of which are
@@ -279,12 +285,16 @@ export class SelectionManager {
    * Returns the post-call state for callers that want it synchronously.
    */
   applyMany(mode: SelectionMode, identities: readonly ElementIdentity[]): SelectionState {
-    // Single-model-lock collapse: keep only the first-encountered model.
+    // Single-model-lock collapse:
+    //   - For add/remove, preserve the existing selection's model so the
+    //     user's locked context wins regardless of marquee iteration order.
+    //   - For replace, the selection is cleared anyway → use batch[0].
     let batch = identities;
     if (this.singleModelLock && identities.length > 0) {
-      const firstModel = identities[0].modelId;
-      if (identities.some((id) => id.modelId !== firstModel)) {
-        batch = identities.filter((id) => id.modelId === firstModel);
+      const existingModel = mode !== 'replace' ? this.firstSelectedModelId() : null;
+      const lockedModel = existingModel ?? identities[0].modelId;
+      if (identities.some((id) => id.modelId !== lockedModel)) {
+        batch = identities.filter((id) => id.modelId === lockedModel);
       }
     }
 
