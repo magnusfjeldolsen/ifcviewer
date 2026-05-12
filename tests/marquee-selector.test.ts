@@ -57,8 +57,20 @@ function makeModelEntry(
 ): ModelEntry {
   const group = new THREE.Group();
   group.name = modelId;
-  for (const m of meshes) group.add(m);
-  return { id: modelId, group, visible };
+  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
+  for (const m of meshes) {
+    group.add(m);
+    const exp = m.userData.expressID;
+    if (typeof exp === 'number') {
+      let bucket = meshesByExpressId.get(exp);
+      if (!bucket) {
+        bucket = [];
+        meshesByExpressId.set(exp, bucket);
+      }
+      bucket.push(m);
+    }
+  }
+  return { id: modelId, group, visible, meshesByExpressId };
 }
 
 interface Env {

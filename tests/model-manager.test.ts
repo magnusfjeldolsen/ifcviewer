@@ -110,4 +110,58 @@ describe('ModelManager', () => {
 
     expect(manager.getAllModels()).toHaveLength(0);
   });
+
+  it('builds a meshesByExpressId index covering every mesh', () => {
+    const scene = new THREE.Scene();
+    const manager = new ModelManager(scene);
+    // createMockParsedModel uses sequential expressIDs starting at 1, so a
+    // 5-mesh model has IDs 1..5, each mapping to exactly one mesh.
+    const entry = manager.addModel(createMockParsedModel('m1', 5));
+
+    expect(entry.meshesByExpressId.size).toBe(5);
+    for (let id = 1; id <= 5; id++) {
+      const bucket = entry.meshesByExpressId.get(id);
+      expect(bucket).toBeDefined();
+      expect(bucket).toHaveLength(1);
+      // The bucketed mesh must be the same THREE.Mesh that's in the group.
+      expect(entry.group.children).toContain(bucket![0]);
+      expect(bucket![0].userData.expressID).toBe(id);
+    }
+  });
+
+  it('buckets multiple meshes that share an expressID under one key', () => {
+    // IFC elements can decompose into multiple geometries; the index must
+    // collect all of them so SelectionManager.highlightExpress hits every
+    // mesh that belongs to a given element.
+    const scene = new THREE.Scene();
+    const manager = new ModelManager(scene);
+    const sharedExpressId = 42;
+    const parsed: ParsedModel = {
+      id: 'shared',
+      modelID: 1,
+      meshes: [
+        {
+          expressID: sharedExpressId,
+          vertices: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+          normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+          indices: new Uint32Array([0, 1, 2]),
+          transform: IDENTITY,
+          color: { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+        },
+        {
+          expressID: sharedExpressId,
+          vertices: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+          normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+          indices: new Uint32Array([0, 1, 2]),
+          transform: IDENTITY,
+          color: { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+        },
+      ],
+    };
+    const entry = manager.addModel(parsed);
+
+    expect(entry.meshesByExpressId.size).toBe(1);
+    const bucket = entry.meshesByExpressId.get(sharedExpressId);
+    expect(bucket).toHaveLength(2);
+  });
 });

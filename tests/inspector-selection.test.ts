@@ -62,8 +62,17 @@ function makeMeshUnderGroup(group: THREE.Group, expressId: number): THREE.Mesh {
 function makeModelEntry(modelId: string, expressIds: number[]): ModelEntry {
   const group = new THREE.Group();
   group.name = modelId;
-  for (const id of expressIds) makeMeshUnderGroup(group, id);
-  return { id: modelId, group, visible: true };
+  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
+  for (const id of expressIds) {
+    const mesh = makeMeshUnderGroup(group, id);
+    let bucket = meshesByExpressId.get(id);
+    if (!bucket) {
+      bucket = [];
+      meshesByExpressId.set(id, bucket);
+    }
+    bucket.push(mesh);
+  }
+  return { id: modelId, group, visible: true, meshesByExpressId };
 }
 
 function identity(modelId: string, expressId: number): ElementIdentity {
@@ -252,10 +261,14 @@ describe('SelectionManager — highlight lifecycle', () => {
     // Two meshes in model A both carry expressID 7 (one element, two geoms).
     const group = new THREE.Group();
     group.name = 'A';
-    makeMeshUnderGroup(group, 7);
-    makeMeshUnderGroup(group, 7);
-    makeMeshUnderGroup(group, 8);
-    env.modelStore.set('A', { id: 'A', group, visible: true });
+    const m1 = makeMeshUnderGroup(group, 7);
+    const m2 = makeMeshUnderGroup(group, 7);
+    const m3 = makeMeshUnderGroup(group, 8);
+    const meshesByExpressId = new Map<number, THREE.Mesh[]>([
+      [7, [m1, m2]],
+      [8, [m3]],
+    ]);
+    env.modelStore.set('A', { id: 'A', group, visible: true, meshesByExpressId });
 
     const manager = new SelectionManager(env.deps);
     const before = group.children.map((c) => (c as THREE.Mesh).material);
@@ -296,18 +309,23 @@ describe('SelectionManager — highlight lifecycle', () => {
     expect(mesh.material).toBe(originalMat);
   });
 
-  it('disposes the cloned highlight material on deselect (no leak)', () => {
+  it('does NOT dispose the highlight variant on deselect (it is cache-shared)', () => {
+    // Variants are cached per-original-material across the entire selection
+    // (and across re-selections), so we cannot safely dispose them when one
+    // mesh deselects — another mesh may still be using the same variant,
+    // and a future reselect must reuse it. Variants release naturally when
+    // the original material is GC'd (model removal).
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     const manager = new SelectionManager(env.deps);
     const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
 
     manager.apply('replace', identity('A', 1));
-    const clone = mesh.material as THREE.Material;
-    const disposeSpy = vi.spyOn(clone, 'dispose');
+    const variant = mesh.material as THREE.Material;
+    const disposeSpy = vi.spyOn(variant, 'dispose');
 
     manager.clear();
-    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(disposeSpy).not.toHaveBeenCalled();
   });
 
   it('highlight idempotent: re-adding same element does not double-clone', () => {
@@ -849,5 +867,119 @@ describe('SelectionManager — applyMany (batch)', () => {
     expect(mesh.material).not.toBe(orig);
     manager.applyMany('replace', []);
     expect(mesh.material).toBe(orig);
+  });
+});
+
+// ── Highlight scaling (variant cache) ───────────────────────────
+
+describe('SelectionManager — highlight scaling', () => {
+  /**
+   * Construct a model whose meshes deliberately share material references
+   * so we can assert that the highlight variant cache reuses one variant
+   * across all sharing meshes. Each expressID gets its own mesh, but the
+   * caller controls which expressIDs share a material via `groups`.
+   *
+   * Example: `groups = [[1, 2, 3], [4, 5]]` produces 5 meshes; 1,2,3 share
+   * a MeshPhongMaterial and 4,5 share another, distinct one.
+   */
+  function makeSharedMaterialEntry(modelId: string, groups: number[][]): ModelEntry {
+    const group = new THREE.Group();
+    group.name = modelId;
+    const meshesByExpressId = new Map<number, THREE.Mesh[]>();
+    for (const ids of groups) {
+      const sharedMat = new THREE.MeshPhongMaterial({ color: 0x808080 });
+      for (const id of ids) {
+        const mesh = new THREE.Mesh(new THREE.BufferGeometry(), sharedMat);
+        mesh.userData.expressID = id;
+        group.add(mesh);
+        meshesByExpressId.set(id, [mesh]);
+      }
+    }
+    return { id: modelId, group, visible: true, meshesByExpressId };
+  }
+
+  it('selecting N elements that share M distinct original materials creates only M variants', () => {
+    // 6 elements split across 2 shared-material groups → expect 2 distinct
+    // highlight variants regardless of selection size.
+    const env = makeStubDeps();
+    env.modelStore.set(
+      'A',
+      makeSharedMaterialEntry('A', [
+        [1, 2, 3, 4],
+        [5, 6],
+      ]),
+    );
+    const manager = new SelectionManager(env.deps);
+    manager.setSingleModelLock(false);
+
+    manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+      identity('A', 3),
+      identity('A', 4),
+      identity('A', 5),
+      identity('A', 6),
+    ]);
+
+    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
+    const uniqueVariants = new Set(meshes.map((m) => m.material));
+    expect(uniqueVariants.size).toBe(2);
+  });
+
+  it('two meshes that share an original material share the SAME variant reference', () => {
+    const env = makeStubDeps();
+    env.modelStore.set('A', makeSharedMaterialEntry('A', [[1, 2]]));
+    const manager = new SelectionManager(env.deps);
+
+    manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
+
+    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
+    expect(meshes[0].material).toBe(meshes[1].material);
+  });
+
+  it('reselecting the same element after deselect reuses the cached variant', () => {
+    const env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1]));
+    const manager = new SelectionManager(env.deps);
+    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
+    const original = mesh.material;
+
+    manager.apply('replace', identity('A', 1));
+    const firstVariant = mesh.material;
+    expect(firstVariant).not.toBe(original);
+
+    manager.clear();
+    expect(mesh.material).toBe(original);
+
+    manager.apply('replace', identity('A', 1));
+    const secondVariant = mesh.material;
+    // Cache hit: same variant reference as the first selection.
+    expect(secondVariant).toBe(firstVariant);
+  });
+
+  it('removing a model releases highlight bookkeeping for that model only', () => {
+    // We can't directly observe WeakMap entries getting GC'd, but we CAN
+    // verify the manager drops its highlight refs for the removed model.
+    // The variant cache itself is keyed by the original material, which
+    // ModelManager.removeModel disposes — once that material is GC'd, its
+    // WeakMap entry releases automatically.
+    const env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1, 2]));
+    env.modelStore.set('B', makeModelEntry('B', [10]));
+    const manager = new SelectionManager(env.deps);
+    manager.setSingleModelLock(false);
+
+    manager.applyMany('add', [identity('A', 1), identity('A', 2), identity('B', 10)]);
+    expect(manager.getState().kind).toBe('multi');
+
+    manager.onModelRemoved('A');
+    env.modelStore.delete('A');
+
+    // Only B's selection survives; A's highlight refs are gone.
+    const state = manager.getState();
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].modelId).toBe('B');
+    }
   });
 });
