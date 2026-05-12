@@ -733,13 +733,69 @@ describe('SelectionManager — applyMany (batch)', () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
-  it('singleModelLock=true + multi-model batch keeps only the first model', () => {
+  it('singleModelLock=true + replace + multi-model batch keeps only the first model in batch', () => {
     manager.setSingleModelLock(true);
     const state = manager.applyMany('replace', [
       identity('A', 1),
       identity('B', 10),
       identity('A', 2),
       identity('B', 20),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      const modelIds = state.identities.map((i) => i.modelId);
+      expect(new Set(modelIds)).toEqual(new Set(['A']));
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2]);
+    }
+  });
+
+  it('singleModelLock=true + add + existing selection in B keeps B regardless of batch order', () => {
+    // Regression for the bug where applyMany picked the first model in the
+    // batch (which depends on marquee iteration order = ModelManager
+    // insertion order). For add/remove the lock must preserve the existing
+    // selection's model, not the batch's first item.
+    manager.setSingleModelLock(true);
+    manager.apply('replace', identity('B', 100));
+    // Batch lists A items first (mimicking insertion-order iteration), but
+    // selection is in B → add should keep only B items.
+    const state = manager.applyMany('add', [
+      identity('A', 1),
+      identity('B', 10),
+      identity('A', 2),
+      identity('B', 20),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      const modelIds = state.identities.map((i) => i.modelId);
+      expect(new Set(modelIds)).toEqual(new Set(['B']));
+      expect(state.identities.map((i) => i.expressId).sort((a, b) => a - b)).toEqual([10, 20, 100]);
+    }
+  });
+
+  it('singleModelLock=true + remove + existing selection in B preserves B model', () => {
+    manager.setSingleModelLock(true);
+    manager.applyMany('replace', [identity('B', 10), identity('B', 20)]);
+    // Batch contains both A (which isn't in selection) and B items.
+    // remove should only act on B items.
+    const state = manager.applyMany('remove', [
+      identity('A', 1),
+      identity('B', 10),
+      identity('A', 2),
+    ]);
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].modelId).toBe('B');
+      expect(state.identities[0].expressId).toBe(20);
+    }
+  });
+
+  it('singleModelLock=true + add from empty selection falls back to first model in batch', () => {
+    manager.setSingleModelLock(true);
+    expect(manager.getState().kind).toBe('none');
+    const state = manager.applyMany('add', [
+      identity('A', 1),
+      identity('B', 10),
+      identity('A', 2),
     ]);
     expect(state.kind).toBe('multi');
     if (state.kind === 'multi') {
