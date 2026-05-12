@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   IFCAREAMEASURE,
   IFCBOOLEAN,
+  IFCFORCEMEASURE,
   IFCINTEGER,
   IFCLABEL,
   IFCLENGTHMEASURE,
@@ -31,6 +32,10 @@ describe('measureKindForType', () => {
 
   it('maps volume measure to "volume"', () => {
     expect(measureKindForType(IFCVOLUMEMEASURE)).toBe('volume');
+  });
+
+  it('maps force measure to "force"', () => {
+    expect(measureKindForType(IFCFORCEMEASURE)).toBe('force');
   });
 
   it('maps ratio types to "ratio"', () => {
@@ -121,6 +126,13 @@ describe('buildUnitTable + unitSuffixForType', () => {
     ]);
     expect(unitSuffixForType(IFCLENGTHMEASURE, table)).toBe('mm');
     expect(unitSuffixForType(IFCAREAMEASURE, table)).toBe('m²');
+  });
+
+  it('resolves a force unit with kilo prefix to "kN"', () => {
+    const table = buildUnitTable([
+      { unitType: 'FORCEUNIT', siPrefix: 'KILO', siName: 'NEWTON' },
+    ]);
+    expect(unitSuffixForType(IFCFORCEMEASURE, table)).toBe('kN');
   });
 
   it('falls back to the default when a measure kind is not in the table', () => {

@@ -160,6 +160,8 @@ export class InspectorPanel {
   private subhead: HTMLElement;
   private titleEl: HTMLElement;
   private collapseBtn: HTMLButtonElement;
+  /** Vertical "Inspector" label shown only in the collapsed state. */
+  private collapsedLabel: HTMLElement;
   private countPill: HTMLElement;
   private toggleTree: HTMLButtonElement;
   private toggleFlat: HTMLButtonElement;
@@ -189,6 +191,14 @@ export class InspectorPanel {
     this.container = document.createElement('div');
     this.container.className = 'inspector-panel hidden';
     parent.appendChild(this.container);
+
+    // Vertical "Inspector" label — only visible when the panel is collapsed.
+    // Stylesheet hides it by default; `.collapsed` shows it.
+    this.collapsedLabel = document.createElement('div');
+    this.collapsedLabel.className = 'inspector-collapsed-label';
+    this.collapsedLabel.textContent = 'Inspector';
+    this.collapsedLabel.setAttribute('aria-hidden', 'true');
+    this.container.appendChild(this.collapsedLabel);
 
     // ── Header ──
     this.header = document.createElement('div');
@@ -411,6 +421,7 @@ export class InspectorPanel {
     this.container.classList.toggle('collapsed', this.collapsed);
     this.collapseBtn.textContent = this.collapsed ? '▶' : '◀'; // ▶ / ◀
     this.collapseBtn.title = this.collapsed ? 'Expand panel' : 'Collapse panel';
+    this.collapsedLabel.setAttribute('aria-hidden', this.collapsed ? 'false' : 'true');
   }
 
   private renderHeader(identity: ElementIdentity, props: ElementProperties | null): void {

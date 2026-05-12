@@ -321,6 +321,26 @@ describe('InspectorPanel', () => {
       expect(container.classList.contains('collapsed')).toBe(false);
     });
 
+    it('renders an "Inspector" label that is exposed only in the collapsed state', () => {
+      const { parent } = mountPanel();
+      const label = parent.querySelector('.inspector-collapsed-label');
+      const collapseBtn = parent.querySelector('.inspector-collapse-btn') as HTMLButtonElement;
+
+      // The label element is always in the DOM (the stylesheet hides it
+      // by default and reveals it when `.collapsed` is set on the panel).
+      // To assertion-test the *exposure* without depending on the
+      // stylesheet, we use aria-hidden as the source of truth.
+      expect(label, 'collapsed label element exists in the DOM').not.toBeNull();
+      expect(label!.textContent).toBe('Inspector');
+      expect(label!.getAttribute('aria-hidden')).toBe('true');
+
+      collapseBtn.click();
+      expect(label!.getAttribute('aria-hidden')).toBe('false');
+
+      collapseBtn.click();
+      expect(label!.getAttribute('aria-hidden')).toBe('true');
+    });
+
     it('hides on dispose', () => {
       const { panel, parent } = mountPanel();
       panel.dispose();

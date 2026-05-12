@@ -17,6 +17,7 @@ import {
   IFCAREAMEASURE,
   IFCBOOLEAN,
   IFCCOUNTMEASURE,
+  IFCFORCEMEASURE,
   IFCIDENTIFIER,
   IFCINTEGER,
   IFCLABEL,
@@ -49,6 +50,7 @@ export type MeasureKind =
   | 'area'
   | 'volume'
   | 'mass'
+  | 'force'
   | 'time'
   | 'angle'
   | 'count'
@@ -72,6 +74,8 @@ export function measureKindForType(typeCode: number): MeasureKind {
       return 'volume';
     case IFCMASSMEASURE:
       return 'mass';
+    case IFCFORCEMEASURE:
+      return 'force';
     case IFCTIMEMEASURE:
       return 'time';
     case IFCPLANEANGLEMEASURE:
@@ -122,6 +126,7 @@ export const DEFAULT_UNITS: Readonly<Record<MeasureKind, string>> = {
   area: 'm²',
   volume: 'm³',
   mass: 'kg',
+  force: 'N',
   time: 's',
   angle: 'rad',
   count: '',
@@ -143,6 +148,7 @@ const UNIT_ENUM_TO_KIND: Readonly<Record<string, MeasureKind>> = {
   AREAUNIT: 'area',
   VOLUMEUNIT: 'volume',
   MASSUNIT: 'mass',
+  FORCEUNIT: 'force',
   TIMEUNIT: 'time',
   PLANEANGLEUNIT: 'angle',
 };

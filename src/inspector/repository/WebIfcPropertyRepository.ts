@@ -20,6 +20,7 @@
  * function for this.
  */
 
+import * as WebIFC from 'web-ifc';
 import {
   IFCBOOLEAN,
   IFCCOMPLEXPROPERTY,
@@ -80,11 +81,34 @@ export interface PropertyApi {
       recursive?: boolean,
       inverse?: boolean,
     ): Promise<unknown>;
+    /**
+     * Get IfcPropertySetDefinition lines attached to an element.
+     *
+     * IMPORTANT: web-ifc's behavior when `includeTypeProperties=true` is
+     * destructive — it returns ONLY the type-level psets (walking through
+     * the type object's `HasPropertySets`) and SILENTLY SKIPS every
+     * instance-level pset attached via `IfcRelDefinesByProperties`. To get
+     * the full set we have to call this twice: once with `false` (instance)
+     * and once via `getTypeProperties` (type), then merge. See the
+     * `fetchPropertyGroups` method.
+     */
     getPropertySets(
       modelID: number,
       elementID?: number,
       recursive?: boolean,
       includeTypeProperties?: boolean,
+    ): Promise<unknown[]>;
+    /**
+     * Get the `IfcTypeObject`(s) associated with an element via
+     * `IfcRelDefinesByType` (or `IsTypedBy` in IFC4+). Returned type
+     * objects expose their psets via the `HasPropertySets` field; with
+     * `recursive=false` each entry is a `{type, value: <expressId>}`
+     * reference that we must resolve via `GetLine`.
+     */
+    getTypeProperties(
+      modelID: number,
+      elementID?: number,
+      recursive?: boolean,
     ): Promise<unknown[]>;
     getMaterialsProperties(
       modelID: number,
@@ -104,21 +128,74 @@ export type ModelIdResolver = (modelId: string) => number | undefined;
 /**
  * Shape of a typed-wrapper value as returned by web-ifc. Loose because
  * web-ifc declares these as `any` in its TypeScript output.
+ *
+ * Two shapes show up in practice:
+ *   - Old: `{ type: <IFC class typecode>, value: <raw> }` for enums/labels.
+ *   - New: `{ type: <internal primitive code>, _representationValue: <raw>,
+ *           _internalValue: <STEP literal>, name: "IFCFORCEMEASURE" }`
+ *     for measure-wrapped numerics.
+ * `normalizeTypedValue` converts both into a canonical `{ type, value }`
+ * where `type` is the IFC class typecode (resolved via `name` when
+ * needed).
  */
 interface TypedValue {
   type: number;
   value: unknown;
 }
 
-/** Heuristic check: does `v` look like a `{ type, value }` typed wrapper? */
-function isTypedValue(v: unknown): v is TypedValue {
-  return (
-    typeof v === 'object' &&
-    v !== null &&
-    'type' in (v as Record<string, unknown>) &&
-    'value' in (v as Record<string, unknown>) &&
-    typeof (v as { type: unknown }).type === 'number'
-  );
+/** Map IFC measure class names → typecodes so the new-shape wrappers can
+ *  feed `unitSuffixForType` / `measureKindForType`. */
+const MEASURE_NAME_TO_TYPECODE: Readonly<Record<string, number>> = (() => {
+  const w = WebIFC as unknown as Record<string, number>;
+  const out: Record<string, number> = {};
+  for (const k of [
+    'IFCLENGTHMEASURE',
+    'IFCPOSITIVELENGTHMEASURE',
+    'IFCAREAMEASURE',
+    'IFCVOLUMEMEASURE',
+    'IFCMASSMEASURE',
+    'IFCFORCEMEASURE',
+    'IFCTIMEMEASURE',
+    'IFCPLANEANGLEMEASURE',
+    'IFCCOUNTMEASURE',
+    'IFCRATIOMEASURE',
+    'IFCPOSITIVERATIOMEASURE',
+    'IFCNORMALISEDRATIOMEASURE',
+    'IFCNUMERICMEASURE',
+    'IFCREAL',
+    'IFCINTEGER',
+    'IFCBOOLEAN',
+    'IFCLOGICAL',
+    'IFCLABEL',
+    'IFCIDENTIFIER',
+    'IFCTEXT',
+  ]) {
+    const v = w[k];
+    if (typeof v === 'number') out[k] = v;
+  }
+  return out;
+})();
+
+/** Normalize old + new web-ifc typed-wrapper shapes into a canonical
+ *  `{ type, value }`. Returns null if `v` isn't a typed wrapper. */
+function normalizeTypedValue(v: unknown): TypedValue | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const obj = v as Record<string, unknown>;
+  if (typeof obj.type !== 'number') return null;
+  // New shape: prefer the IFC class typecode resolved from the `name` string.
+  if ('_representationValue' in obj || '_internalValue' in obj) {
+    const name = typeof obj.name === 'string' ? obj.name : null;
+    const fromName = name ? MEASURE_NAME_TO_TYPECODE[name] : undefined;
+    return {
+      type: typeof fromName === 'number' ? fromName : obj.type,
+      value: '_representationValue' in obj ? obj._representationValue : obj._internalValue,
+    };
+  }
+  // Old shape: must have a `value` key.
+  if ('value' in obj) {
+    return { type: obj.type, value: obj.value };
+  }
+  return null;
 }
 
 /**
@@ -127,18 +204,37 @@ function isTypedValue(v: unknown): v is TypedValue {
  */
 function readString(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
-  if (isTypedValue(v)) {
-    return v.value === null || v.value === undefined ? undefined : String(v.value);
+  const norm = normalizeTypedValue(v);
+  if (norm) {
+    return norm.value === null || norm.value === undefined ? undefined : String(norm.value);
   }
   return String(v);
 }
 
 function readNumber(v: unknown): number | undefined {
   if (v === undefined || v === null) return undefined;
-  if (isTypedValue(v)) {
-    return typeof v.value === 'number' ? v.value : undefined;
+  const norm = normalizeTypedValue(v);
+  if (norm) {
+    return typeof norm.value === 'number' ? norm.value : undefined;
   }
   return typeof v === 'number' ? v : undefined;
+}
+
+/**
+ * One raw pset/qto line as returned by web-ifc, tagged with whether it
+ * originated from the element's type rather than the element itself.
+ */
+interface RawPropertyGroup {
+  raw: Record<string, unknown>;
+  inheritedFromType: boolean;
+}
+
+/** Recursively tag a PropertyNode tree as type-inherited (for nested complex props). */
+function markInheritedRecursively(node: PropertyNode): void {
+  node.inheritedFromType = true;
+  if (node.value.kind === 'complex') {
+    for (const child of node.value.children) markInheritedRecursively(child);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,9 +303,9 @@ export class WebIfcPropertyRepository implements ElementPropertyRepository {
       throw new Error(`WebIfcPropertyRepository: unknown modelId "${modelId}"`);
     }
 
-    const [item, psetsRaw, materialsRaw, unitTable] = await Promise.all([
+    const [item, rawGroups, materialsRaw, unitTable] = await Promise.all([
       this.api.properties.getItemProperties(webIfcId, expressId, false, false),
-      this.api.properties.getPropertySets(webIfcId, expressId, true, true),
+      this.fetchPropertyGroups(webIfcId, expressId),
       this.api.properties.getMaterialsProperties(webIfcId, expressId, true, true),
       this.getUnitTable(modelId),
     ]);
@@ -217,20 +313,7 @@ export class WebIfcPropertyRepository implements ElementPropertyRepository {
     const identity = this.buildIdentity(modelId, expressId, item);
     const direct = this.buildDirect(identity, item);
 
-    // Split psets vs qtos by IFC type code.
-    const psets: PropertyGroup[] = [];
-    const qtos: PropertyGroup[] = [];
-    for (const raw of psetsRaw) {
-      if (!isObj(raw)) continue;
-      const typeCode = this.getRawTypeCode(raw);
-      if (typeCode === IFCELEMENTQUANTITY) {
-        const group = this.buildQuantityGroup(raw, unitTable);
-        if (group) qtos.push(group);
-      } else if (typeCode === IFCPROPERTYSET) {
-        const group = this.buildPsetGroup(raw, unitTable);
-        if (group) psets.push(group);
-      }
-    }
+    const { psets, qtos } = this.buildPsetAndQtoGroups(rawGroups, unitTable);
 
     const materials = this.buildMaterials(materialsRaw);
 
@@ -245,6 +328,120 @@ export class WebIfcPropertyRepository implements ElementPropertyRepository {
       flat,
       fetchedAt: Date.now(),
     };
+  }
+
+  /**
+   * Resolve the merged instance + type psets/qtos for one element.
+   *
+   * Background: web-ifc's `getPropertySets(modelID, eid, recursive, true)`
+   * is destructive — when `includeTypeProperties=true` it returns ONLY
+   * type-level psets and silently SKIPS the entire
+   * `IfcRelDefinesByProperties` branch (every instance pset goes
+   * missing, including any `IfcElementQuantity`). So we cannot rely on
+   * a single call. We mirror the two-call merge pattern from
+   * IfcOpenShell-python's `ifcopenshell.util.element.get_psets`:
+   *
+   *   1. `getPropertySets(.., false)` → instance-side IfcPropertySet AND
+   *      IfcElementQuantity lines (both inherit from IfcPropertySetDefinition).
+   *   2. `getTypeProperties(.., false)` → the element's IfcTypeObject(s);
+   *      we then walk `HasPropertySets` and resolve each ref via
+   *      `GetLine` (the helpers expose them as `{type, value: <eid>}`).
+   *
+   * The resulting list is tagged with `inheritedFromType`. We do NOT
+   * dedupe: when an instance pset and a type pset share the same Name
+   * the inspector UI shows a "from type" badge so the user can see
+   * provenance.
+   */
+  private async fetchPropertyGroups(
+    webIfcId: number,
+    expressId: number,
+  ): Promise<RawPropertyGroup[]> {
+    // Branch 1: instance-level (walks IfcRelDefinesByProperties).
+    const instanceRaw = await this.api.properties.getPropertySets(
+      webIfcId,
+      expressId,
+      true,
+      false,
+    );
+
+    // Branch 2: type-level. `recursive=false` returns IfcTypeObject(s) with
+    // HasPropertySets as `{type, value: <expressId>}` refs that we resolve.
+    // Some files / schemas may not expose `getTypeProperties` cleanly; on
+    // failure we fall back to instance-only rather than aborting the fetch.
+    let typeObjects: unknown[];
+    try {
+      typeObjects = await this.api.properties.getTypeProperties(
+        webIfcId,
+        expressId,
+        false,
+      );
+    } catch {
+      typeObjects = [];
+    }
+
+    const typeRaw: unknown[] = [];
+    for (const t of typeObjects) {
+      if (!isObj(t)) continue;
+      const has = t.HasPropertySets;
+      if (!Array.isArray(has)) continue;
+      for (const ref of has) {
+        if (isObj(ref) && typeof ref.value === 'number') {
+          try {
+            const resolved = await this.api.GetLine(webIfcId, ref.value, true);
+            if (isObj(resolved)) typeRaw.push(resolved);
+          } catch {
+            /* skip — line not resolvable */
+          }
+        } else if (isObj(ref)) {
+          // Already-resolved pset (e.g. from a future recursive=true call path).
+          typeRaw.push(ref);
+        }
+      }
+    }
+
+    const out: RawPropertyGroup[] = [];
+    for (const raw of instanceRaw) {
+      if (isObj(raw)) out.push({ raw, inheritedFromType: false });
+    }
+    for (const raw of typeRaw) {
+      if (isObj(raw)) out.push({ raw, inheritedFromType: true });
+    }
+    return out;
+  }
+
+  /** Split a merged list of raw psets/qtos into our typed groups, tagging type-inherited ones. */
+  private buildPsetAndQtoGroups(
+    rawGroups: RawPropertyGroup[],
+    unitTable: UnitTable | null,
+  ): { psets: PropertyGroup[]; qtos: PropertyGroup[] } {
+    const psets: PropertyGroup[] = [];
+    const qtos: PropertyGroup[] = [];
+    for (const { raw, inheritedFromType } of rawGroups) {
+      const typeCode = this.getRawTypeCode(raw);
+      if (typeCode === IFCELEMENTQUANTITY) {
+        const group = this.buildQuantityGroup(raw, unitTable);
+        if (group) {
+          if (inheritedFromType) {
+            group.inheritedFromType = true;
+            for (const p of group.properties) p.inheritedFromType = true;
+          }
+          qtos.push(group);
+        }
+      } else if (typeCode === IFCPROPERTYSET) {
+        const group = this.buildPsetGroup(raw, unitTable);
+        if (group) {
+          if (inheritedFromType) {
+            group.inheritedFromType = true;
+            for (const p of group.properties) markInheritedRecursively(p);
+          }
+          psets.push(group);
+        }
+      }
+    }
+    // Note: we intentionally do NOT dedupe by Name. The inspector UI shows
+    // a "from type" badge for type-inherited groups, so the user can see
+    // when an instance pset overrides a same-named type pset.
+    return { psets, qtos };
   }
 
   // ---- Identity ------------------------------------------------------------
@@ -345,16 +542,17 @@ export class WebIfcPropertyRepository implements ElementPropertyRepository {
 
     if (typeCode === IFCPROPERTYSINGLEVALUE) {
       const nv = raw.NominalValue;
-      if (isTypedValue(nv)) {
+      const norm = normalizeTypedValue(nv);
+      if (norm) {
         const value: PropertyValue = {
           kind: 'single',
-          value: coerceSingleValue(nv),
-          raw: { typeCode: nv.type, value: nv.value },
+          value: coerceSingleValue(norm),
+          raw: { typeCode: norm.type, value: norm.value },
         };
         return {
           key,
           value,
-          unit: unitSuffixForType(nv.type, unitTable) || undefined,
+          unit: unitSuffixForType(norm.type, unitTable) || undefined,
           description,
           source,
         };
