@@ -569,11 +569,41 @@ html, body {
 
 .inspector-empty,
 .inspector-spinner,
-.inspector-multi-placeholder {
+.inspector-multi-placeholder,
+.inspector-multi-cap {
   padding: 12px 10px;
   font-size: 12px;
   color: #9ca3af;
   text-align: center;
+}
+
+/* Phase 4 — single-model lock row */
+.inspector-lock-row {
+  padding: 4px 10px 6px 10px;
+  font-size: 11px;
+  color: #4b5563;
+  border-top: 1px solid #f3f4f6;
+}
+
+.inspector-lock-row.hidden {
+  display: none;
+}
+
+.inspector-lock-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.inspector-lock-checkbox {
+  cursor: pointer;
+}
+
+.inspector-multi-mix {
+  color: #6b7280;
+  font-size: 11px;
 }
 
 .inspector-error {

@@ -47,6 +47,14 @@ const HIGHLIGHT_INTENSITY = 0.3;
 /** Movement threshold (in CSS pixels) for distinguishing click vs drag. */
 const CLICK_THRESHOLD = 3;
 
+/**
+ * Phase 4 — localStorage key for the single-model-selection lock preference.
+ * Default is `true`: most users only want intersection within one model at
+ * a time, and cross-model multi-select is an explicit opt-out via the
+ * inspector header checkbox.
+ */
+export const SINGLE_MODEL_LOCK_STORAGE_KEY = 'ifcviewer:inspectorSingleModelLock';
+
 /** Snapshot of one mesh's pre-highlight material for restoration on deselect. */
 interface MeshHighlight {
   mesh: THREE.Mesh;
@@ -95,6 +103,13 @@ export class SelectionManager {
   /** Listeners notified whenever the selection state changes. */
   private changeListeners: Array<(state: SelectionState) => void> = [];
 
+  /**
+   * Phase 4: when true, an `'add'` (ctrl+click) pick coming from a different
+   * model than the existing selection collapses the existing selection and
+   * starts fresh in the clicked model. Persisted to localStorage.
+   */
+  private singleModelLock: boolean;
+
   // Click-vs-drag tracking on pointerdown.
   private pointerDownPos = { x: 0, y: 0 };
   private pointerDownButton = -1;
@@ -106,6 +121,7 @@ export class SelectionManager {
   constructor(deps: SelectionManagerDeps) {
     this.deps = deps;
     this.canvas = deps.canvas ?? deps.viewer.getCanvas();
+    this.singleModelLock = readPersistedLock();
     this.boundOnPointerDown = this.onPointerDown.bind(this);
     this.boundOnPointerUp = this.onPointerUp.bind(this);
     this.canvas.addEventListener('pointerdown', this.boundOnPointerDown);
@@ -121,7 +137,67 @@ export class SelectionManager {
     );
     if (ids.length === 0) return { kind: 'none' };
     if (ids.length === 1) return { kind: 'single', identities: [ids[0]] };
-    return { kind: 'multi', identities: ids };
+    // Multi: if the lock is on and all selected elements share one model,
+    // surface that as lockedModelId for downstream consumers (the
+    // InspectorPanel uses it to label the header). If the lock is off
+    // we still report a single-model selection's lockedModelId because
+    // the inspector header benefits from knowing the lone model id.
+    const firstModel = ids[0].modelId;
+    const sameModel = ids.every((id) => id.modelId === firstModel);
+    return {
+      kind: 'multi',
+      identities: ids,
+      lockedModelId: sameModel ? firstModel : undefined,
+    };
+  }
+
+  /** Phase 4 — current single-model-lock state (for the inspector checkbox). */
+  isSingleModelLockEnabled(): boolean {
+    return this.singleModelLock;
+  }
+
+  /**
+   * Phase 4 — toggle the single-model-lock state. Persists to localStorage
+   * and emits onChange so the panel's checkbox stays in sync. When the
+   * lock turns on with a mixed-model selection active, the selection
+   * collapses to the most-recently-clicked model's elements (preserving
+   * insertion order from the Set). This is the documented Phase 4 spec.
+   */
+  setSingleModelLock(enabled: boolean): void {
+    if (this.singleModelLock === enabled) return;
+    this.singleModelLock = enabled;
+    writePersistedLock(enabled);
+
+    let mutated = false;
+    if (enabled && this.selected.size > 0) {
+      // Determine the most-recently-clicked model. Sets in JS preserve
+      // insertion order, so the last entry's model is the one to keep.
+      const keys = Array.from(this.selected);
+      const lastKey = keys[keys.length - 1];
+      const lastId = this.identities.get(lastKey);
+      if (lastId) {
+        const keepModel = lastId.modelId;
+        for (const key of keys) {
+          const id = this.identities.get(key);
+          if (!id) continue;
+          if (id.modelId !== keepModel) {
+            this.removeInternal(key);
+            mutated = true;
+          }
+        }
+      }
+    }
+
+    // Always notify so the checkbox UI re-renders, even when nothing in
+    // the selection changed. (Listeners can choose to ignore identical
+    // state via shallow equality.)
+    if (mutated || this.selected.size === 0) {
+      this.notifyChange();
+    } else {
+      // No element drops but consumers still need to know the flag changed
+      // (e.g. to refresh the checkbox). Re-emit current state.
+      this.notifyChange();
+    }
   }
 
   /** Subscribe to selection-state changes. Returns an unsubscribe callback. */
@@ -148,6 +224,20 @@ export class SelectionManager {
       this.clearInternal();
       this.addInternal(key, identity);
     } else if (mode === 'add') {
+      // Phase 4 single-model lock: ctrl+click in a *different* model
+      // clears the existing selection and restarts in the new model.
+      // When the lock is off or the new pick is in the same model, the
+      // original Phase 2 toggle/add behaviour applies.
+      if (this.singleModelLock && this.selected.size > 0) {
+        const existingModel = this.firstSelectedModelId();
+        if (existingModel !== null && existingModel !== identity.modelId) {
+          // Cross-model ctrl+click while locked → behave as replace.
+          this.clearInternal();
+          this.addInternal(key, identity);
+          this.notifyChange();
+          return this.getState();
+        }
+      }
       if (this.selected.has(key)) {
         this.removeInternal(key);
       } else {
@@ -163,6 +253,18 @@ export class SelectionManager {
 
     this.notifyChange();
     return this.getState();
+  }
+
+  /**
+   * Return the modelId of the first selected element, or null if the
+   * selection is empty. Used by the single-model-lock check in `apply`.
+   */
+  private firstSelectedModelId(): string | null {
+    for (const key of this.selected) {
+      const id = this.identities.get(key);
+      if (id) return id.modelId;
+    }
+    return null;
   }
 
   /** Drop all selection and restore materials. No-op if nothing selected. */
@@ -389,6 +491,28 @@ function cloneSingleWithEmissive(material: THREE.Material): THREE.Material {
     }
   }
   return clone;
+}
+
+/**
+ * Read the persisted single-model-lock flag.
+ * Default: `true` (Phase 4 spec — most users want one-model intersection).
+ */
+function readPersistedLock(): boolean {
+  try {
+    const v = window.localStorage?.getItem(SINGLE_MODEL_LOCK_STORAGE_KEY);
+    if (v === null || v === undefined) return true;
+    return v === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function writePersistedLock(enabled: boolean): void {
+  try {
+    window.localStorage?.setItem(SINGLE_MODEL_LOCK_STORAGE_KEY, enabled ? 'true' : 'false');
+  } catch {
+    /* ignore — storage may be disabled */
+  }
 }
 
 /** Restore the mesh's original material and dispose the highlight clone. */

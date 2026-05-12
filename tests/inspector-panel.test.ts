@@ -218,12 +218,30 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
 
 interface StubSelection extends SelectionSource {
   emit(state: SelectionState): void;
+  /** True when the stub exposes lock API; controlled via factory option. */
+  supportsLock: boolean;
+  /** Lock state (only meaningful when supportsLock is true). */
+  lockEnabled: boolean;
+  /** Spy: each call to setSingleModelLock pushes here. */
+  lockCalls: boolean[];
 }
 
-function makeStubSelection(initial: SelectionState = { kind: 'none' }): StubSelection {
+interface StubSelectionOptions {
+  withLock?: boolean;
+  initialLockEnabled?: boolean;
+}
+
+function makeStubSelection(
+  initial: SelectionState = { kind: 'none' },
+  opts: StubSelectionOptions = {},
+): StubSelection {
+  const withLock = opts.withLock ?? true;
+  let lockEnabled = opts.initialLockEnabled ?? true;
+  const lockCalls: boolean[] = [];
   let state = initial;
   let listeners: Array<(s: SelectionState) => void> = [];
-  return {
+
+  const stub: StubSelection = {
     onChange(listener) {
       listeners.push(listener);
       return () => {
@@ -237,18 +255,36 @@ function makeStubSelection(initial: SelectionState = { kind: 'none' }): StubSele
       state = s;
       for (const l of listeners) l(s);
     },
+    supportsLock: withLock,
+    get lockEnabled() {
+      return lockEnabled;
+    },
+    set lockEnabled(v: boolean) {
+      lockEnabled = v;
+    },
+    lockCalls,
   };
+
+  if (withLock) {
+    stub.isSingleModelLockEnabled = () => lockEnabled;
+    stub.setSingleModelLock = (v: boolean) => {
+      lockEnabled = v;
+      lockCalls.push(v);
+    };
+  }
+  return stub;
 }
 
 function mountPanel(
   initialSelection: SelectionState = { kind: 'none' },
   depsOverrides: Partial<InspectorPanelDeps> = {},
   initialProps?: ElementProperties,
+  selectionOpts: StubSelectionOptions = {},
 ) {
   const parent = document.createElement('div');
   document.body.appendChild(parent);
   const repo = makeStubRepo(initialProps);
-  const selection = makeStubSelection(initialSelection);
+  const selection = makeStubSelection(initialSelection, selectionOpts);
   const deps: InspectorPanelDeps = {
     repository: repo,
     getModelInfo: depsOverrides.getModelInfo,
@@ -298,15 +334,18 @@ describe('InspectorPanel', () => {
       expect(panel.isHidden()).toBe(true);
     });
 
-    it('renders multi-select placeholder for Phase 4', () => {
+    it('shows multi-select header summary (Phase 4)', () => {
       const { parent, selection } = mountPanel();
       selection.emit({
         kind: 'multi',
         identities: [identity(), identity({ expressId: 2 })],
       });
-      const note = parent.querySelector('.inspector-multi-placeholder');
-      expect(note).not.toBeNull();
+      // Panel becomes visible immediately (header renders synchronously).
       expect(parent.querySelector('.inspector-panel')!.classList.contains('hidden')).toBe(false);
+      const title = parent.querySelector('.inspector-title');
+      expect(title!.textContent).toBe('2 elements selected');
+      const mix = parent.querySelector('.inspector-multi-mix .inspector-class');
+      expect(mix!.textContent).toBe('2 IfcWall');
     });
 
     it('toggles collapse state', () => {
@@ -786,6 +825,315 @@ describe('InspectorPanel', () => {
       selection.emit({ kind: 'single', identities: [identity()] });
       const callsAfter = repo.getCallCount();
       expect(callsAfter).toBe(callsBefore);
+    });
+  });
+
+  // ── Phase 4 ──────────────────────────────────────────────────
+
+  describe('single-model lock checkbox (Phase 4)', () => {
+    it('lock row is hidden when no selection is active', () => {
+      const { parent } = mountPanel();
+      const row = parent.querySelector('.inspector-lock-row');
+      expect(row).not.toBeNull();
+      expect(row!.classList.contains('hidden')).toBe(true);
+    });
+
+    it('lock row appears when single selection is active', async () => {
+      const { parent, repo, selection } = mountPanel();
+      selection.emit({ kind: 'single', identities: [identity()] });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      const row = parent.querySelector('.inspector-lock-row');
+      expect(row!.classList.contains('hidden')).toBe(false);
+    });
+
+    it('lock row appears for multi selection', () => {
+      const { parent, selection } = mountPanel();
+      selection.emit({
+        kind: 'multi',
+        identities: [identity(), identity({ expressId: 2 })],
+      });
+      const row = parent.querySelector('.inspector-lock-row');
+      expect(row!.classList.contains('hidden')).toBe(false);
+    });
+
+    it('checkbox reflects initial lock-enabled state from selection source', () => {
+      const { parent, selection } = mountPanel(
+        { kind: 'multi', identities: [identity(), identity({ expressId: 2 })] },
+        {},
+        undefined,
+        { initialLockEnabled: false },
+      );
+      const cb = parent.querySelector('.inspector-lock-checkbox') as HTMLInputElement;
+      expect(cb.checked).toBe(false);
+      // Sanity: the stub reports the same value.
+      expect(selection.lockEnabled).toBe(false);
+    });
+
+    it('clicking the checkbox calls setSingleModelLock with the new value', () => {
+      const { parent, selection } = mountPanel(
+        { kind: 'multi', identities: [identity(), identity({ expressId: 2 })] },
+      );
+      const cb = parent.querySelector('.inspector-lock-checkbox') as HTMLInputElement;
+      expect(cb.checked).toBe(true);
+      cb.click();
+      expect(selection.lockCalls).toEqual([false]);
+      cb.click();
+      expect(selection.lockCalls).toEqual([false, true]);
+    });
+
+    it('lock row stays hidden when the selection source does not expose the lock API', () => {
+      const { parent, selection } = mountPanel(
+        { kind: 'multi', identities: [identity(), identity({ expressId: 2 })] },
+        {},
+        undefined,
+        { withLock: false },
+      );
+      const row = parent.querySelector('.inspector-lock-row');
+      expect(row!.classList.contains('hidden')).toBe(true);
+      // Sanity: source really has no setter.
+      expect(typeof selection.setSingleModelLock).toBe('undefined');
+    });
+  });
+
+  describe('multi-select intersection body (Phase 4)', () => {
+    it('renders intersection from per-element repo.get returns', async () => {
+      // Both walls share the same set of canned props (the stub returns
+      // the same ElementProperties for any (modelId, expressId)). With
+      // identical inputs the intersection has no varies rows.
+      const { parent, repo, selection } = mountPanel();
+      selection.emit({
+        kind: 'multi',
+        identities: [identity(), identity({ expressId: 2 })],
+      });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Body should contain rendered sections (Identity / Property Sets / …).
+      const sections = parent.querySelectorAll('.inspector-section-label');
+      const labels = Array.from(sections).map((s) => s.textContent);
+      expect(labels).toContain('Property Sets');
+
+      // Common count pill present.
+      const pill = parent.querySelector('.inspector-count-pill');
+      expect(pill!.textContent).toMatch(/common/);
+    });
+
+    it('renders varies value with italic class and distinct-values tooltip', async () => {
+      // Construct two element snapshots that differ at a single path.
+      const propsA = makeProperties();
+      const propsB = makeProperties({
+        identity: identity({ expressId: 2, name: 'Wall B' }),
+        psets: [
+          {
+            name: 'Pset_WallCommon',
+            source: 'pset',
+            properties: [
+              { ...leafNode('LoadBearing', false) },
+              { ...leafNode('IsExternal', true) },
+              { ...leafNode('Reference', 'WallType-A') },
+            ],
+          },
+        ],
+        flat: [
+          flatRow({
+            path: 'Pset_WallCommon.IsExternal',
+            name: 'IsExternal',
+            displayValue: 'true',
+          }),
+          flatRow({
+            path: 'Pset_WallCommon.LoadBearing',
+            name: 'LoadBearing',
+            displayValue: 'false',
+            rawValue: { kind: 'single', value: false, raw: { typeCode: 0, value: false } },
+          }),
+          flatRow({
+            path: 'Pset_WallCommon.Reference',
+            name: 'Reference',
+            displayValue: 'WallType-A',
+            rawValue: {
+              kind: 'single',
+              value: 'WallType-A',
+              raw: { typeCode: 0, value: 'WallType-A' },
+            },
+          }),
+        ].sort((a, b) => a.path.localeCompare(b.path)),
+      });
+
+      // Custom repo that returns different props per expressId.
+      let pending: Array<{ resolve: (p: ElementProperties) => void; reject: (e: Error) => void; eid: number }> = [];
+      const repo: ElementPropertyRepository = {
+        get(_modelId: string, expressId: number) {
+          return new Promise<ElementProperties>((resolve, reject) => {
+            pending.push({ resolve, reject, eid: expressId });
+          });
+        },
+        cancel: () => undefined,
+        disposeModel: () => undefined,
+        enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        describeSchema: () => {
+          throw new Error('not implemented');
+        },
+      };
+      const parent = document.createElement('div');
+      document.body.appendChild(parent);
+      const sel = makeStubSelection();
+      const panel = new InspectorPanel(parent, { repository: repo }, sel);
+      void panel;
+
+      sel.emit({
+        kind: 'multi',
+        identities: [identity({ expressId: 1001 }), identity({ expressId: 2 })],
+      });
+      const queue = pending;
+      pending = [];
+      for (const p of queue) {
+        // expressId 1001 → propsA (LoadBearing=true);  2 → propsB (false).
+        if (p.eid === 1001) p.resolve(propsA);
+        else p.resolve(propsB);
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // In Tree view, LoadBearing should render as a varies span.
+      const varies = parent.querySelectorAll('.inspector-row-varies');
+      expect(varies.length).toBeGreaterThan(0);
+      const variesEl = Array.from(varies).find((e) => e.textContent === 'varies')!;
+      expect(variesEl.classList.contains('inspector-row-varies')).toBe(true);
+      // Tooltip lists both distinct display values.
+      expect(variesEl.getAttribute('title')).toContain('true');
+      expect(variesEl.getAttribute('title')).toContain('false');
+    });
+
+    it('soft cap: shows the "refine selection" message when > cap', () => {
+      const { parent, selection } = mountPanel();
+      const identities = Array.from({ length: 1001 }, (_, i) =>
+        identity({ expressId: i + 1 }),
+      );
+      selection.emit({ kind: 'multi', identities });
+      const msg = parent.querySelector('.inspector-multi-cap');
+      expect(msg).not.toBeNull();
+      expect(msg!.textContent).toContain('Too many');
+      // Identity summary still shown in the header.
+      const title = parent.querySelector('.inspector-title');
+      expect(title!.textContent).toBe('1001 elements selected');
+    });
+
+    it('soft cap: dropping below cap re-fetches and renders body', async () => {
+      // Use a lower cap by selecting at-cap + 1, then dropping to cap.
+      // (MULTI_SELECT_SOFT_CAP is 1000; selecting 1001 then 999 exercises
+      // the boundary correctly.)
+      const { parent, repo, selection } = mountPanel();
+      const above = Array.from({ length: 1001 }, (_, i) =>
+        identity({ expressId: i + 1 }),
+      );
+      selection.emit({ kind: 'multi', identities: above });
+      expect(parent.querySelector('.inspector-multi-cap')).not.toBeNull();
+
+      const within = above.slice(0, 999);
+      selection.emit({ kind: 'multi', identities: within });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(parent.querySelector('.inspector-multi-cap')).toBeNull();
+      const pill = parent.querySelector('.inspector-count-pill');
+      expect(pill!.textContent).toMatch(/common/);
+    });
+
+    it('stale multi-fetch is dropped when selection changes mid-flight', async () => {
+      // Resolve only the SECOND emission and verify the panel reflects it.
+      // The first emission's fetch is left dangling; its later resolution
+      // should not overwrite the rendered state.
+      let allPending: Array<{
+        resolve: (p: ElementProperties) => void;
+        reject: (e: Error) => void;
+      }> = [];
+      const propsA = makeProperties();
+      const propsB = makeProperties({
+        identity: identity({ expressId: 99, name: 'Wall 99' }),
+      });
+      const repo: ElementPropertyRepository = {
+        get() {
+          return new Promise<ElementProperties>((resolve, reject) => {
+            allPending.push({ resolve, reject });
+          });
+        },
+        cancel: () => undefined,
+        disposeModel: () => undefined,
+        enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        describeSchema: () => {
+          throw new Error('not implemented');
+        },
+      };
+      const parent = document.createElement('div');
+      document.body.appendChild(parent);
+      const sel = makeStubSelection();
+      const panel = new InspectorPanel(parent, { repository: repo }, sel);
+      void panel;
+
+      sel.emit({
+        kind: 'multi',
+        identities: [identity({ expressId: 1 }), identity({ expressId: 2 })],
+      });
+      const firstBatch = allPending;
+      allPending = [];
+
+      // Newer selection.
+      sel.emit({
+        kind: 'multi',
+        identities: [identity({ expressId: 11 }), identity({ expressId: 12 })],
+      });
+      const secondBatch = allPending;
+      allPending = [];
+
+      // Resolve the SECOND batch first.
+      for (const p of secondBatch) p.resolve(propsB);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Now resolve the stale FIRST batch; it must not overwrite anything.
+      for (const p of firstBatch) p.resolve(propsA);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The current render must still reflect the second selection.
+      const title = parent.querySelector('.inspector-title');
+      expect(title!.textContent).toBe('2 elements selected');
+      // Pill present from the committed (second) fetch.
+      const pill = parent.querySelector('.inspector-count-pill');
+      expect(pill!.textContent).toMatch(/common/);
+    });
+
+    it('tree view re-renders for multi-loaded state on view toggle', async () => {
+      const { panel, parent, repo, selection } = mountPanel();
+      selection.emit({
+        kind: 'multi',
+        identities: [identity(), identity({ expressId: 2 })],
+      });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Switch to Flat: a flat-table header should appear.
+      panel.setView('flat');
+      expect(parent.querySelector('.inspector-flat-header')).not.toBeNull();
+
+      // Back to Tree: section labels reappear.
+      panel.setView('tree');
+      const sections = parent.querySelectorAll('.inspector-section-label');
+      expect(sections.length).toBeGreaterThan(0);
     });
   });
 });
