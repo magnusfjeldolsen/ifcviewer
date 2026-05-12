@@ -1,12 +1,37 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as THREE from 'three';
-import { SelectionManager } from '../src/inspector/SelectionManager';
+import {
+  SelectionManager,
+  SINGLE_MODEL_LOCK_STORAGE_KEY,
+} from '../src/inspector/SelectionManager';
 import type { SelectionManagerDeps } from '../src/inspector/SelectionManager';
 import type { Tool, ToolManager } from '../src/tools/Tool';
 import type { Viewer } from '../src/viewer/Viewer';
 import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
 import type { ElementIdentity } from '../src/inspector/types';
+
+// ── localStorage mock — must be installed before SelectionManager is
+// constructed because its constructor reads the persisted lock flag.
+const lsStore = new Map<string, string>();
+Object.defineProperty(globalThis, 'localStorage', {
+  value: {
+    getItem: (k: string) => lsStore.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      lsStore.set(k, v);
+    },
+    removeItem: (k: string) => {
+      lsStore.delete(k);
+    },
+    clear: () => lsStore.clear(),
+    get length() {
+      return lsStore.size;
+    },
+    key: (i: number) => [...lsStore.keys()][i] ?? null,
+  },
+  writable: true,
+  configurable: true,
+});
 
 /**
  * Tests focus on:
@@ -89,6 +114,7 @@ describe('SelectionManager — state transitions', () => {
   let manager: SelectionManager;
 
   beforeEach(() => {
+    lsStore.clear();
     env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
     env.modelStore.set('B', makeModelEntry('B', [10, 20]));
@@ -177,7 +203,8 @@ describe('SelectionManager — state transitions', () => {
     expect(state.kind).toBe('none');
   });
 
-  it('add freely spans models in Phase 2 (no single-model lock yet)', () => {
+  it('add freely spans models when the single-model lock is off', () => {
+    manager.setSingleModelLock(false);
     manager.apply('add', identity('A', 1));
     const state = manager.apply('add', identity('B', 10));
     expect(state.kind).toBe('multi');
@@ -384,10 +411,14 @@ describe('SelectionManager — tool / pivot ownership', () => {
 
 describe('SelectionManager — lifecycle', () => {
   it('onModelRemoved drops selected entries from that model only', () => {
+    lsStore.clear();
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     env.modelStore.set('B', makeModelEntry('B', [10]));
     const manager = new SelectionManager(env.deps);
+    // Disable the single-model lock so we can have a real cross-model
+    // multi-select to drop A from.
+    manager.setSingleModelLock(false);
 
     manager.apply('add', identity('A', 1));
     manager.apply('add', identity('B', 10));
@@ -440,5 +471,130 @@ describe('SelectionManager — lifecycle', () => {
       new PointerEvent('pointerup', { button: 0, clientX: 5, clientY: 5 }),
     );
     expect(manager.getState().kind).toBe('none');
+  });
+});
+
+// ── Phase 4: single-model lock ─────────────────────────────────
+
+describe('SelectionManager — single-model lock (Phase 4)', () => {
+  let env: ReturnType<typeof makeStubDeps>;
+  let manager: SelectionManager;
+
+  beforeEach(() => {
+    lsStore.clear();
+    env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+    env.modelStore.set('B', makeModelEntry('B', [10, 20]));
+    manager = new SelectionManager(env.deps);
+  });
+
+  it('lock is enabled by default', () => {
+    expect(manager.isSingleModelLockEnabled()).toBe(true);
+  });
+
+  it('reads persisted lock value on construction', () => {
+    lsStore.set(SINGLE_MODEL_LOCK_STORAGE_KEY, 'false');
+    const env2 = makeStubDeps();
+    env2.modelStore.set('A', makeModelEntry('A', [1]));
+    const m2 = new SelectionManager(env2.deps);
+    expect(m2.isSingleModelLockEnabled()).toBe(false);
+  });
+
+  it('setSingleModelLock persists to localStorage', () => {
+    manager.setSingleModelLock(false);
+    expect(lsStore.get(SINGLE_MODEL_LOCK_STORAGE_KEY)).toBe('false');
+    manager.setSingleModelLock(true);
+    expect(lsStore.get(SINGLE_MODEL_LOCK_STORAGE_KEY)).toBe('true');
+  });
+
+  it('setSingleModelLock emits onChange', () => {
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.setSingleModelLock(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('setSingleModelLock with the same value is a no-op (no notify)', () => {
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.setSingleModelLock(true); // already on by default
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('lock ON: ctrl+click in different model clears existing and starts fresh', () => {
+    manager.apply('replace', identity('A', 1));
+    expect(manager.getState().kind).toBe('single');
+    const state = manager.apply('add', identity('B', 10));
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].modelId).toBe('B');
+      expect(state.identities[0].expressId).toBe(10);
+    }
+  });
+
+  it('lock OFF: ctrl+click in different model adds (cross-model multi)', () => {
+    manager.setSingleModelLock(false);
+    manager.apply('add', identity('A', 1));
+    const state = manager.apply('add', identity('B', 10));
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      const modelIds = state.identities.map((i) => i.modelId).sort();
+      expect(modelIds).toEqual(['A', 'B']);
+    }
+  });
+
+  it('lock ON: ctrl+click within the same model still adds normally', () => {
+    manager.apply('add', identity('A', 1));
+    const state = manager.apply('add', identity('A', 2));
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId)).toEqual([1, 2]);
+    }
+  });
+
+  it('lockedModelId on multi-state reflects the locked model when all share one', () => {
+    manager.apply('add', identity('A', 1));
+    manager.apply('add', identity('A', 2));
+    const state = manager.getState();
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.lockedModelId).toBe('A');
+    }
+  });
+
+  it('lockedModelId is undefined on a cross-model multi (lock off)', () => {
+    manager.setSingleModelLock(false);
+    manager.apply('add', identity('A', 1));
+    manager.apply('add', identity('B', 10));
+    const state = manager.getState();
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.lockedModelId).toBeUndefined();
+    }
+  });
+
+  it('toggling lock ON with cross-model selection collapses to last-clicked model', () => {
+    manager.setSingleModelLock(false);
+    manager.apply('add', identity('A', 1));
+    manager.apply('add', identity('A', 2));
+    manager.apply('add', identity('B', 10)); // last-clicked is model B
+    expect(manager.getState().kind).toBe('multi');
+
+    manager.setSingleModelLock(true);
+    const state = manager.getState();
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].modelId).toBe('B');
+      expect(state.identities[0].expressId).toBe(10);
+    }
+  });
+
+  it('lock ON: plain "replace" pick in a different model still works (regression)', () => {
+    manager.apply('replace', identity('A', 1));
+    const state = manager.apply('replace', identity('B', 10));
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].modelId).toBe('B');
+    }
   });
 });
