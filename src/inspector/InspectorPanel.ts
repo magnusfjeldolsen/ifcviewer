@@ -31,7 +31,7 @@ import type {
   SelectionState,
 } from './types';
 import type { ElementPropertyRepository } from './repository/ElementPropertyRepository';
-import { displayStringForValue } from './repository/WebIfcPropertyRepository';
+import { displayStringForValue } from './repository/flatRows';
 import { intersectProperties, getDistinctValuesForPath } from './intersection';
 
 /** Persistence key for the user's last-used view (Tree vs Flat). */

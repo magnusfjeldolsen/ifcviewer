@@ -17,8 +17,8 @@ import {
 import {
   WebIfcPropertyRepository,
   type PropertyApi,
-  buildFlatRows,
 } from '../src/inspector/repository/WebIfcPropertyRepository';
+import { buildFlatRows } from '../src/inspector/repository/flatRows';
 
 /**
  * Test fixtures: a single "wall" element (expressId 100) in a model that
