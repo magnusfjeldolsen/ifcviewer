@@ -18,6 +18,7 @@ import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
 import { SelectionManager } from '../inspector/SelectionManager';
+import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { WebIfcPropertyRepository } from '../inspector/repository/WebIfcPropertyRepository';
 import type { ModelRecord, ModelSource } from '../services/SessionStore';
@@ -54,6 +55,10 @@ export class App {
   // Element selection (Phase 2 of the Inspector). Owns canvas pointer
   // listeners; defers to active tools and pivot picking via deps.
   private selectionManager!: SelectionManager;
+  // Alt-drag marquee selection (window/crossing). Coexists with
+  // SelectionManager via capture-phase pointerdown; bails when any tool
+  // is active or pivot picking is on.
+  private marqueeSelector!: MarqueeSelector;
   // Property repository + panel UI (Phase 3 of the Inspector).
   private propertyRepository!: WebIfcPropertyRepository;
   private inspectorPanel!: InspectorPanel;
@@ -97,6 +102,16 @@ export class App {
       viewer: this.viewer,
       modelManager: this.modelManager,
       toolManager: this.toolManager,
+    });
+
+    // Marquee selection (Alt-drag, window + crossing). Same dependency
+    // graph as SelectionManager; coexists via capture-phase pointerdown
+    // that only fires when Alt is held and no tool/pivot is active.
+    this.marqueeSelector = new MarqueeSelector({
+      viewer: this.viewer,
+      modelManager: this.modelManager,
+      toolManager: this.toolManager,
+      selectionManager: this.selectionManager,
     });
 
     // Toolbar UI
@@ -612,6 +627,7 @@ export class App {
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     if (this.inspectorPanel) this.inspectorPanel.dispose();
+    this.marqueeSelector.dispose();
     this.selectionManager.dispose();
     this.toolManager.dispose();
     this.modelManager.dispose();

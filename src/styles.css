@@ -1196,4 +1196,25 @@ html, body {
   border-color: #3b82f6;
 }
 
+/* ── Alt-drag marquee selection ──────────────────────────── */
+
+/* Window mode (left-to-right): blue solid — only fully-enclosed
+ * elements are selected. */
+.marquee-window {
+  position: fixed;
+  pointer-events: none;
+  background: rgba(50, 130, 255, 0.08);
+  border: 1.5px solid rgba(50, 130, 255, 0.65);
+  z-index: 100;
+}
+
+/* Crossing mode (right-to-left): green dashed — any element whose
+ * AABB intersects the marquee is selected. */
+.marquee-crossing {
+  position: fixed;
+  pointer-events: none;
+  background: rgba(0, 200, 0, 0.08);
+  border: 1.5px dashed rgba(0, 180, 0, 0.7);
+  z-index: 100;
+}
 
