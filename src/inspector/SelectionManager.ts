@@ -256,6 +256,82 @@ export class SelectionManager {
   }
 
   /**
+   * Batch variant of `apply` used by Alt-drag marquee selection.
+   *
+   * Semantics:
+   *   - `replace` with [] → clear and notify (if anything was selected).
+   *   - `replace` with N → clear, then add each (dedup within batch).
+   *   - `add` with N → for each: if not in selection, add. **Never toggles**
+   *     (CAD-standard batch behavior; differs from `apply('add', …)`).
+   *   - `remove` with N → for each: if in selection, remove.
+   *
+   * Single-model-lock collapse: when `singleModelLock === true` and the
+   * batch references multiple `modelId`s, the batch is filtered to the
+   * **first model encountered** (iterating the input array). This collapses
+   * cross-model marquees while preserving in-batch order. Note: this is
+   * batch-level collapse only; `setSingleModelLock(true)` does its own
+   * collapse of the existing selection.
+   *
+   * Emits `onChange` **once** per call, regardless of how many identities
+   * mutated. No-op calls (e.g. `remove` with identities none of which are
+   * selected, or `replace` from empty to empty) emit nothing.
+   *
+   * Returns the post-call state for callers that want it synchronously.
+   */
+  applyMany(mode: SelectionMode, identities: readonly ElementIdentity[]): SelectionState {
+    // Single-model-lock collapse: keep only the first-encountered model.
+    let batch = identities;
+    if (this.singleModelLock && identities.length > 0) {
+      const firstModel = identities[0].modelId;
+      if (identities.some((id) => id.modelId !== firstModel)) {
+        batch = identities.filter((id) => id.modelId === firstModel);
+      }
+    }
+
+    let mutated = false;
+    const seen = new Set<SelectionKey>();
+
+    if (mode === 'replace') {
+      // Clear existing selection first.
+      if (this.selected.size > 0) {
+        this.clearInternal();
+        mutated = true;
+      }
+      for (const id of batch) {
+        const key = makeKey(id.modelId, id.expressId);
+        if (seen.has(key)) continue; // Dedup within the batch.
+        seen.add(key);
+        this.addInternal(key, id);
+        mutated = true;
+      }
+    } else if (mode === 'add') {
+      for (const id of batch) {
+        const key = makeKey(id.modelId, id.expressId);
+        if (seen.has(key)) continue; // Dedup within the batch.
+        seen.add(key);
+        if (this.selected.has(key)) continue; // Never toggles.
+        this.addInternal(key, id);
+        mutated = true;
+      }
+    } else {
+      // 'remove'
+      for (const id of batch) {
+        const key = makeKey(id.modelId, id.expressId);
+        if (seen.has(key)) continue; // Dedup within the batch.
+        seen.add(key);
+        if (!this.selected.has(key)) continue; // No-op on unselected.
+        this.removeInternal(key);
+        mutated = true;
+      }
+    }
+
+    if (mutated) {
+      this.notifyChange();
+    }
+    return this.getState();
+  }
+
+  /**
    * Return the modelId of the first selected element, or null if the
    * selection is empty. Used by the single-model-lock check in `apply`.
    */

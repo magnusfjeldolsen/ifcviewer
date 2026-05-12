@@ -87,6 +87,16 @@ export class Viewer {
     return this._controlsMode;
   }
 
+  /**
+   * Temporarily enable / disable the OrbitControls. Used by the marquee
+   * selector to suspend orbit-drag while the user is Alt-dragging a
+   * selection rectangle. Callers MUST restore the previous value when
+   * their gesture ends (pointerup, Esc).
+   */
+  setControlsEnabled(enabled: boolean): void {
+    this.controls.enabled = enabled;
+  }
+
   restoreCameraState(state: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } }): void {
     this._controlsMode = 'user';
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
