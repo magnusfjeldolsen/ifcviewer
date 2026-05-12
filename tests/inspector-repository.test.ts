@@ -162,10 +162,26 @@ function mkFake(): PropertyApi {
         if (id === 1) return project;
         return {};
       }),
-      getPropertySets: vi.fn(async (modelID: number, id: number) => {
+      // New two-call flow:
+      //  - getPropertySets(.., false) → instance-side IfcPropertySet + IfcElementQuantity
+      //  - getTypeProperties(.., false) → IfcTypeObject(s); their HasPropertySets are walked
+      //    by the repo and resolved via GetLine.
+      // Our wall fixture has no type, so getTypeProperties returns [] here. Type-inherited
+      // psets are exercised in a dedicated test below.
+      getPropertySets: vi.fn(async (
+        modelID: number,
+        id: number,
+        _recursive?: boolean,
+        includeTypeProperties?: boolean,
+      ) => {
         if (modelID !== WEB_IFC_ID || id !== WALL_EXPRESS_ID) return [];
+        // The repository calls with includeTypeProperties=false. We return
+        // [] if some legacy caller passes true so any regression to the old
+        // single-call path would show up loudly as zero psets.
+        if (includeTypeProperties) return [];
         return [psetWallCommon, qtoWallBaseQuantities];
       }),
+      getTypeProperties: vi.fn(async () => []),
       getMaterialsProperties: vi.fn(async (modelID: number, id: number) => {
         if (modelID !== WEB_IFC_ID || id !== WALL_EXPRESS_ID) return [];
         return [material];
@@ -328,6 +344,185 @@ describe('WebIfcPropertyRepository — flat rows', () => {
     expect(lb).toBeDefined();
     expect(lb!.displayValue).toBe('true');
     expect(lb!.unit).toBeFalsy();
+  });
+});
+
+describe('WebIfcPropertyRepository — type-inherited psets (merge of two API calls)', () => {
+  // This test exercises the fix for the destructive-flag bug in web-ifc's
+  // getPropertySets(..., includeTypeProperties=true). Our repository now
+  // calls getPropertySets(..., false) AND getTypeProperties(...) and
+  // merges. Same-named psets from both sides are kept (no dedupe); the
+  // type-side rows are tagged `inheritedFromType: true`.
+  function mkFakeWithType(): PropertyApi {
+    const wall = {
+      type: 0x5111,
+      expressID: WALL_EXPRESS_ID,
+      GlobalId: { type: IFCLABEL, value: 'wall-guid' },
+      Name: { type: IFCLABEL, value: 'Wall' },
+    };
+
+    // Instance-side pset (overrides Pset_Common, plus has its own).
+    const instancePsetCommon = {
+      type: IFCPROPERTYSET,
+      Name: { type: IFCLABEL, value: 'Pset_Common' },
+      HasProperties: [
+        {
+          type: IFCPROPERTYSINGLEVALUE,
+          Name: { type: IFCLABEL, value: 'Reference' },
+          NominalValue: { type: IFCLABEL, value: 'instance-ref' },
+        },
+      ],
+    };
+    const instancePsetExtra = {
+      type: IFCPROPERTYSET,
+      Name: { type: IFCLABEL, value: 'Pset_Instance' },
+      HasProperties: [
+        {
+          type: IFCPROPERTYSINGLEVALUE,
+          Name: { type: IFCLABEL, value: 'OnlyOnInstance' },
+          NominalValue: { type: IFCLABEL, value: 'yes' },
+        },
+      ],
+    };
+
+    // Type-side pset (same Pset_Common name; instance overrides it but we keep both).
+    const typePsetCommon = {
+      expressID: 9001,
+      type: IFCPROPERTYSET,
+      Name: { type: IFCLABEL, value: 'Pset_Common' },
+      HasProperties: [
+        {
+          type: IFCPROPERTYSINGLEVALUE,
+          Name: { type: IFCLABEL, value: 'Reference' },
+          NominalValue: { type: IFCLABEL, value: 'type-ref' },
+        },
+      ],
+    };
+    // Type-side qto.
+    const typeQto = {
+      expressID: 9002,
+      type: IFCELEMENTQUANTITY,
+      Name: { type: IFCLABEL, value: 'Qto_FromType' },
+      Quantities: [
+        {
+          type: IFCQUANTITYLENGTH,
+          Name: { type: IFCLABEL, value: 'TypeLength' },
+          LengthValue: { type: IFCLENGTHMEASURE, value: 1234 },
+        },
+      ],
+    };
+
+    // The type object itself, with HasPropertySets as refs (matching web-ifc's
+    // recursive=false output shape).
+    const typeObject = {
+      expressID: 8001,
+      Name: { type: IFCLABEL, value: 'WallType' },
+      HasPropertySets: [
+        { type: 5 /* arbitrary ref type */, value: 9001 },
+        { type: 5, value: 9002 },
+      ],
+    };
+
+    return {
+      GetLine: vi.fn((_modelID: number, eid: number) => {
+        if (eid === 9001) return typePsetCommon;
+        if (eid === 9002) return typeQto;
+        return undefined;
+      }),
+      GetLineIDsWithType: vi.fn(() => ({ size: () => 0, get: () => 0 })),
+      properties: {
+        getItemProperties: vi.fn(async (_m: number, id: number) => {
+          if (id === WALL_EXPRESS_ID) return wall;
+          return {};
+        }),
+        getPropertySets: vi.fn(async (
+          _m: number,
+          id: number,
+          _r?: boolean,
+          includeTypeProperties?: boolean,
+        ) => {
+          if (id !== WALL_EXPRESS_ID) return [];
+          if (includeTypeProperties) return []; // Repo never calls this branch.
+          return [instancePsetCommon, instancePsetExtra];
+        }),
+        getTypeProperties: vi.fn(async (_m: number, id: number) => {
+          if (id !== WALL_EXPRESS_ID) return [];
+          return [typeObject];
+        }),
+        getMaterialsProperties: vi.fn(async () => []),
+      },
+    };
+  }
+
+  it('merges instance and type psets (keeping same-named entries from both sides)', async () => {
+    const api = mkFakeWithType();
+    const repo = makeRepo(api);
+    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+
+    const psetNames = props.psets.map((p) => p.name);
+    // Pset_Common appears TWICE: once from instance, once from type.
+    expect(psetNames.filter((n) => n === 'Pset_Common').length).toBe(2);
+    expect(psetNames).toContain('Pset_Instance');
+  });
+
+  it('tags type-inherited groups with inheritedFromType=true', async () => {
+    const api = mkFakeWithType();
+    const repo = makeRepo(api);
+    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+
+    const commons = props.psets.filter((p) => p.name === 'Pset_Common');
+    expect(commons).toHaveLength(2);
+    // Exactly one should be the type-inherited variant.
+    const inherited = commons.filter((p) => p.inheritedFromType === true);
+    const instance = commons.filter((p) => !p.inheritedFromType);
+    expect(inherited).toHaveLength(1);
+    expect(instance).toHaveLength(1);
+    // Its inner property should also carry the flag (consumed by flat rows).
+    expect(inherited[0].properties[0].inheritedFromType).toBe(true);
+  });
+
+  it('propagates inheritedFromType into flat rows', async () => {
+    const api = mkFakeWithType();
+    const repo = makeRepo(api);
+    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+
+    const referenceRows = props.flat.filter((r) => r.path === 'Pset_Common.Reference');
+    // Two rows: instance + type.
+    expect(referenceRows).toHaveLength(2);
+    expect(referenceRows.some((r) => r.inheritedFromType === true)).toBe(true);
+    expect(referenceRows.some((r) => !r.inheritedFromType)).toBe(true);
+  });
+
+  it('walks IfcTypeObject.HasPropertySets and resolves each ref via GetLine', async () => {
+    const api = mkFakeWithType();
+    const repo = makeRepo(api);
+    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    expect((api.GetLine as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).toEqual(
+      expect.arrayContaining([9001, 9002]),
+    );
+  });
+
+  it('separates type-inherited IfcElementQuantity into qtos[] (not psets[])', async () => {
+    const api = mkFakeWithType();
+    const repo = makeRepo(api);
+    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+
+    expect(props.qtos.map((q) => q.name)).toContain('Qto_FromType');
+    const qto = props.qtos.find((q) => q.name === 'Qto_FromType')!;
+    expect(qto.inheritedFromType).toBe(true);
+  });
+
+  it('falls back gracefully when getTypeProperties throws', async () => {
+    const api = mkFakeWithType();
+    (api.properties.getTypeProperties as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async () => {
+        throw new Error('schema not supported');
+      },
+    );
+    const repo = makeRepo(api);
+    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    // Still returns the instance-side psets.
+    expect(props.psets.map((p) => p.name)).toEqual(['Pset_Common', 'Pset_Instance']);
   });
 });
 

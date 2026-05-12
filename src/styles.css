@@ -373,6 +373,32 @@ html, body {
   display: none;
 }
 
+/* Vertical "Inspector" label — hidden by default, shown when collapsed.
+   Rotated 90° CCW so it reads bottom-to-top inside the thin 36px strip
+   below the expand button. */
+.inspector-collapsed-label {
+  display: none;
+}
+
+.inspector-panel.collapsed .inspector-collapsed-label {
+  display: block;
+  position: absolute;
+  /* Sit below the collapse/expand button (header padding 8px + ~24px button). */
+  top: 40px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #4b5563;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  pointer-events: none;
+  user-select: none;
+}
+
 .inspector-header {
   display: flex;
   flex-direction: column;

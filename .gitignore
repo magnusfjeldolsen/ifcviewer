@@ -30,3 +30,6 @@ coverage/
 
 # WASM artifacts (copied at build time)
 *.wasm
+
+# Large local IFC fixtures used by regression tests. Tests skip when absent.
+assets/ifcs/*.ifc
