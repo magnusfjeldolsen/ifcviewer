@@ -29,6 +29,10 @@ export class ModelManager {
       geometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertices, 3));
       geometry.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
       geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+      // Pre-compute the local bounding box once: marquee selection reads
+      // mesh.geometry.boundingBox on every classify call (10k+ meshes), and
+      // an unset boundingBox forces an O(verts) computation on first hit.
+      geometry.computeBoundingBox();
 
       const material = new THREE.MeshPhongMaterial({
         color: new THREE.Color(mesh.color.r, mesh.color.g, mesh.color.b),

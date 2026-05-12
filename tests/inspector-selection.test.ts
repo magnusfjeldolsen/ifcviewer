@@ -598,3 +598,200 @@ describe('SelectionManager — single-model lock (Phase 4)', () => {
     }
   });
 });
+
+// ── applyMany — batch selection for marquee ────────────────────
+
+describe('SelectionManager — applyMany (batch)', () => {
+  let env: ReturnType<typeof makeStubDeps>;
+  let manager: SelectionManager;
+
+  beforeEach(() => {
+    lsStore.clear();
+    env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3, 4, 5]));
+    env.modelStore.set('B', makeModelEntry('B', [10, 20, 30]));
+    manager = new SelectionManager(env.deps);
+    // Most batch tests use the cross-model behaviour; opt out of the
+    // single-model lock by default. The lock-specific test re-enables it.
+    manager.setSingleModelLock(false);
+  });
+
+  it('replace with [] clears existing selection', () => {
+    manager.apply('replace', identity('A', 1));
+    const state = manager.applyMany('replace', []);
+    expect(state.kind).toBe('none');
+  });
+
+  it('replace with [] on empty selection is a silent no-op', () => {
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.applyMany('replace', []);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('replace with one identity is equivalent to apply("replace", id)', () => {
+    const state = manager.applyMany('replace', [identity('A', 1)]);
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0]).toEqual(identity('A', 1));
+    }
+  });
+
+  it('replace with N selects all of them and drops prior selection', () => {
+    manager.apply('replace', identity('A', 5)); // Will be dropped.
+    const state = manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+      identity('A', 3),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2, 3]);
+    }
+  });
+
+  it('replace dedupes within the batch', () => {
+    const state = manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+      identity('A', 1), // dup
+      identity('A', 2), // dup
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId)).toEqual([1, 2]);
+    }
+  });
+
+  it('add with N appends each new id, never toggles existing ones', () => {
+    manager.apply('add', identity('A', 1));
+    const state = manager.applyMany('add', [
+      identity('A', 1), // already in → keep selected (no toggle)
+      identity('A', 2),
+      identity('A', 3),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2, 3]);
+    }
+  });
+
+  it('add dedupes within the batch', () => {
+    const state = manager.applyMany('add', [
+      identity('A', 1),
+      identity('A', 1),
+      identity('A', 2),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2]);
+    }
+  });
+
+  it('add of an empty batch is a no-op (no notify)', () => {
+    manager.apply('replace', identity('A', 1));
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.applyMany('add', []);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('remove drops only the intersection of selection and batch', () => {
+    manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+      identity('A', 3),
+    ]);
+    const state = manager.applyMany('remove', [
+      identity('A', 2),
+      identity('A', 4), // not in selection — no-op
+      identity('A', 3),
+    ]);
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') {
+      expect(state.identities[0].expressId).toBe(1);
+    }
+  });
+
+  it('remove of items none of which are selected is a silent no-op', () => {
+    manager.apply('replace', identity('A', 1));
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.applyMany('remove', [identity('A', 2), identity('A', 3)]);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('emits onChange exactly once per call', () => {
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+      identity('A', 3),
+      identity('A', 4),
+    ]);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('singleModelLock=true + multi-model batch keeps only the first model', () => {
+    manager.setSingleModelLock(true);
+    const state = manager.applyMany('replace', [
+      identity('A', 1),
+      identity('B', 10),
+      identity('A', 2),
+      identity('B', 20),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      const modelIds = state.identities.map((i) => i.modelId);
+      expect(new Set(modelIds)).toEqual(new Set(['A']));
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2]);
+    }
+  });
+
+  it('singleModelLock=false + multi-model batch keeps everything', () => {
+    const state = manager.applyMany('replace', [
+      identity('A', 1),
+      identity('B', 10),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => `${i.modelId}:${i.expressId}`).sort()).toEqual([
+        'A:1',
+        'B:10',
+      ]);
+    }
+  });
+
+  it('singleModelLock with single-model batch passes through unchanged', () => {
+    manager.setSingleModelLock(true);
+    const state = manager.applyMany('replace', [
+      identity('A', 1),
+      identity('A', 2),
+    ]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => i.expressId).sort()).toEqual([1, 2]);
+    }
+  });
+
+  it('highlights are applied for every added identity', () => {
+    manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
+    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
+    // Meshes for expressID 1 and 2 should be highlighted (material clone),
+    // mesh for expressID 3 untouched.
+    const mat1 = meshes[0].material as THREE.MeshPhongMaterial;
+    const mat2 = meshes[1].material as THREE.MeshPhongMaterial;
+    expect(mat1.emissive.getHex()).toBe(0x3b82f6);
+    expect(mat2.emissive.getHex()).toBe(0x3b82f6);
+  });
+
+  it('replace from N to [] restores all highlighted meshes', () => {
+    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
+    const orig = mesh.material;
+    manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
+    expect(mesh.material).not.toBe(orig);
+    manager.applyMany('replace', []);
+    expect(mesh.material).toBe(orig);
+  });
+});
