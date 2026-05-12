@@ -100,6 +100,23 @@ export class SelectionManager {
    */
   private highlights = new Map<string, MeshHighlight>();
 
+  /**
+   * Cache: original material reference -> shared highlight variant. Two
+   * meshes that share an original material now share the same emissive
+   * clone instead of each cloning their own.
+   *
+   * Why this matters: marquee-selecting ~18k elements in a 100k-mesh model
+   * previously cloned ~22k materials at ~1ms each (the dominant cost). The
+   * cache makes that O(distinct materials in selection), typically a few
+   * dozen.
+   *
+   * Lifetime: WeakMap entries release when the original material gets GC'd
+   * (i.e. when the model is removed and ModelManager disposes its meshes).
+   * We must NOT `.dispose()` cache variants on deselect — they may be in
+   * use by another selected mesh and will be needed again on reselect.
+   */
+  private highlightVariants = new WeakMap<THREE.Material, THREE.Material>();
+
   /** Listeners notified whenever the selection state changes. */
   private changeListeners: Array<(state: SelectionState) => void> = [];
 
@@ -485,15 +502,17 @@ export class SelectionManager {
     const model = this.deps.modelManager.getModel(modelId);
     if (!model) return;
 
-    for (const child of model.group.children) {
-      if (!(child instanceof THREE.Mesh)) continue;
-      if (child.userData.expressID !== expressId) continue;
-      if (this.highlights.has(child.uuid)) continue; // Already highlighted.
+    // O(1) lookup into the per-model index built at addModel time.
+    const matches = model.meshesByExpressId.get(expressId);
+    if (!matches) return;
 
-      const original = child.material;
-      const cloned = cloneWithEmissive(original);
-      child.material = cloned;
-      this.highlights.set(child.uuid, { mesh: child, originalMaterial: original });
+    for (const mesh of matches) {
+      if (this.highlights.has(mesh.uuid)) continue; // Already highlighted.
+
+      const original = mesh.material;
+      const variant = this.getHighlightVariant(original);
+      mesh.material = variant;
+      this.highlights.set(mesh.uuid, { mesh, originalMaterial: original });
     }
   }
 
@@ -503,14 +522,42 @@ export class SelectionManager {
       // Model already removed; just drop bookkeeping.
       return;
     }
-    for (const child of model.group.children) {
-      if (!(child instanceof THREE.Mesh)) continue;
-      if (child.userData.expressID !== expressId) continue;
-      const hl = this.highlights.get(child.uuid);
+    const matches = model.meshesByExpressId.get(expressId);
+    if (!matches) return;
+
+    for (const mesh of matches) {
+      const hl = this.highlights.get(mesh.uuid);
       if (!hl) continue;
       restoreMaterial(hl);
-      this.highlights.delete(child.uuid);
+      this.highlights.delete(mesh.uuid);
     }
+  }
+
+  /**
+   * Return a (possibly cached) emissive-boosted variant of `original`.
+   * Two meshes that share `original` get the SAME variant reference —
+   * makes highlight allocation O(distinct materials in selection) instead
+   * of O(N selected meshes).
+   *
+   * Handles both single-material and array-of-materials meshes. Arrays
+   * are NOT cached as a whole; each slot's material is cached individually.
+   */
+  private getHighlightVariant(
+    original: THREE.Material | THREE.Material[],
+  ): THREE.Material | THREE.Material[] {
+    if (Array.isArray(original)) {
+      return original.map((m) => this.getOrBuildVariant(m));
+    }
+    return this.getOrBuildVariant(original);
+  }
+
+  private getOrBuildVariant(original: THREE.Material): THREE.Material {
+    let variant = this.highlightVariants.get(original);
+    if (!variant) {
+      variant = cloneSingleWithEmissive(original);
+      this.highlightVariants.set(original, variant);
+    }
+    return variant;
   }
 
   // ── Helpers ────────────────────────────────────────────────
@@ -551,19 +598,11 @@ function identityFromHit(mesh: THREE.Mesh): ElementIdentity | null {
 }
 
 /**
- * Clone a mesh material (or array of materials) and apply an emissive
- * boost. We always *clone* so the unhighlight path can dispose the clone
- * without touching the shared original.
+ * Clone a single material and apply the brand-blue emissive boost.
+ * Used by SelectionManager.getOrBuildVariant — never call directly from
+ * highlight code; go through the variant cache so two meshes with the
+ * same original material share their highlight clone.
  */
-function cloneWithEmissive(
-  material: THREE.Material | THREE.Material[],
-): THREE.Material | THREE.Material[] {
-  if (Array.isArray(material)) {
-    return material.map((m) => cloneSingleWithEmissive(m));
-  }
-  return cloneSingleWithEmissive(material);
-}
-
 function cloneSingleWithEmissive(material: THREE.Material): THREE.Material {
   const clone = material.clone();
   // Three.js material types that support emissive (Phong, Standard, Lambert,
@@ -601,14 +640,16 @@ function writePersistedLock(enabled: boolean): void {
   }
 }
 
-/** Restore the mesh's original material and dispose the highlight clone. */
+/**
+ * Restore the mesh's original material.
+ *
+ * IMPORTANT: do not `.dispose()` the variant we're swapping out — the
+ * variant is shared by every mesh that selected this same original
+ * material, via SelectionManager.highlightVariants. Disposing here would
+ * break the next reselect (and any other mesh currently using the variant).
+ * The variant releases naturally when the original gets GC'd because the
+ * WeakMap holds the original as the key, not the variant.
+ */
 function restoreMaterial(hl: MeshHighlight): void {
-  const current = hl.mesh.material;
   hl.mesh.material = hl.originalMaterial;
-  // Dispose what we put on the mesh (the clone), not the original.
-  if (Array.isArray(current)) {
-    for (const m of current) m.dispose();
-  } else {
-    current.dispose();
-  }
 }
