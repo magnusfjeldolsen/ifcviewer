@@ -115,6 +115,38 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Risks:** raycasting changes — Three.js's InstancedMesh raycast returns `instanceId` not Mesh; current `raycast.ts` walks `userData.expressID`. Refactor needed.
 - **Source:** Performance research section 3.7.
 
+### `dev-profiling-doc` — Document the Chrome DevTools perf workflow
+- **Status:** queued
+- **Effort:** S
+- **Why:** No documented workflow today. Future perf PRs reinvent the measurement approach. Establishes baseline numbers for RIB.ifc + Snowdon Towers we can compare against.
+- **What:** New `dev/profiling.md` covering Memory tab snapshots, `performance.memory`, `renderer.info`, Performance tab recording.
+- **Risks:** zero. Docs decay if not maintained.
+- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
+
+### `cached-parsed-geometry-idb` — Cache parsed geometry in IndexedDB
+- **Status:** queued
+- **Effort:** M
+- **Why:** Today session restore re-parses the full .ifc (~60s for 191 MB). Caching the parsed buffers keyed by file hash skips parsing entirely on reload.
+- **What:** New `geometry-cache` IDB object store. Hydrate scene from cache on restore; background re-parse fills web-ifc modelID for property queries (user-confirmed: properties have a 2–5s availability gap after restore until reparse completes). 500 MB cap with simple eviction.
+- **Risks:** storage size (cap mitigates), schema versioning (constant in code), property availability gap.
+- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
+
+### `render-on-demand` — Skip frames when nothing changed
+- **Status:** queued
+- **Effort:** M
+- **Why:** `Viewer.animate` runs at 60 fps unconditionally even when idle. Battery / heat / fan noise on laptops, sustained GPU load.
+- **What:** `Viewer.requestRender()` flag-based approach. Audit every state-mutation site to add the call.
+- **Risks:** stale-frame regressions if any mutation site is missed. Bug surface is broad — extensive manual smoke required.
+- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
+
+### `frustum-cull-audit` — Verify Three.js culling actually runs
+- **Status:** queued (bundle with `render-perf-orbit-lag`)
+- **Effort:** S
+- **Why:** Three.js culls per-mesh by default but we have no test asserting this. A future PR could regress it silently.
+- **What:** Add a unit test asserting `mesh.frustumCulled === true` on every mesh from `ModelManager.addModel`. Add a comment near `addModel` explaining the dependency.
+- **Risks:** zero.
+- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
+
 ---
 
 ## Done
@@ -133,3 +165,6 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 
 ### `contextual-action-tray-and-remove-clipping` — Bottom-right floating action tray + Remove clipping button (PR #23, merged 2026-05-13)
 - **Outcome:** New `src/ui/ContextualActions.ts` tray container with a `register(action)` API that re-evaluates visibility predicates only on subscribed state changes (no polling). `ClippingTool` gained `hasClipPlane()` + `onStateChange(cb)` (additive, mirrors the `SelectionManager.onChange` shape). One button registered for v1 — `✂ Remove clipping` — appears bottom-right when a clip plane is active and dismisses only the plane (measurements, selections, camera, inspector all preserved). CSS matches the existing panel idiom (semi-transparent white, 8px radius, soft shadow, brand-blue icon). Forward-compatible: future "Remove measurements" / "Show hidden" / "Reset transparency" buttons plug in via `register`. 365 → 382 tests.
+
+### `parse-memory-hygiene` — Free Vector<PlacedGeometry> during StreamAllMeshes (PR #TBD, merged 2026-05-13)
+- **Outcome:** Original premise was half-wrong. The `node_modules/web-ifc/web-ifc-api.d.ts:71-75` declares `FlatMesh.delete()` but at runtime `FlatMesh` is a plain JS object — calling `.delete()` throws `not a function`. **However**, the inner `flatMesh.geometries` IS a real emscripten-bound `Vector<PlacedGeometry>` (own property `$$` confirms the C++-class marker) and DOES leak its heap allocation if not freed. The corrected fix: `(flatMesh.geometries as unknown as { delete(): void }).delete()` at the end of the `StreamAllMeshes` callback. Caught via an empirical runtime-shape diagnostic against RIB.ifc; documented inline in `src/parser/IfcParser.ts` so the next person reading the d.ts file doesn't fall into the same trap. Cast through `unknown` is needed because the d.ts for `Vector<T>` also omits `.delete` despite it existing at runtime. 382 → 382 tests (no new tests; existing parser + property tests act as smoke).
