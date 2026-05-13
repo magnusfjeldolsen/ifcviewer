@@ -80,6 +80,14 @@ export class IfcParser {
 
         geom.delete();
       }
+      // Free the inner Vector<PlacedGeometry> in WASM heap. Verified via
+      // runtime inspection: `flatMesh` itself is a plain JS object (no
+      // `.delete` despite the d.ts claim — that's the trap), but
+      // `flatMesh.geometries` is an emscripten-bound vector that DOES
+      // have `.delete` and DOES leak its heap allocation if not freed.
+      // The d.ts for Vector<T> omits `.delete` even though it exists at
+      // runtime — cast through unknown to satisfy the typechecker.
+      (flatMesh.geometries as unknown as { delete(): void }).delete();
     });
 
     // NOTE: model is intentionally kept open after parse.
