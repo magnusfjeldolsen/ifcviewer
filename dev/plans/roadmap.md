@@ -115,14 +115,6 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Risks:** raycasting changes — Three.js's InstancedMesh raycast returns `instanceId` not Mesh; current `raycast.ts` walks `userData.expressID`. Refactor needed.
 - **Source:** Performance research section 3.7.
 
-### `dev-profiling-doc` — Document the Chrome DevTools perf workflow
-- **Status:** queued
-- **Effort:** S
-- **Why:** No documented workflow today. Future perf PRs reinvent the measurement approach. Establishes baseline numbers for RIB.ifc + Snowdon Towers we can compare against.
-- **What:** New `dev/profiling.md` covering Memory tab snapshots, `performance.memory`, `renderer.info`, Performance tab recording.
-- **Risks:** zero. Docs decay if not maintained.
-- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
-
 ### `cached-parsed-geometry-idb` — Cache parsed geometry in IndexedDB
 - **Status:** queued
 - **Effort:** M
@@ -168,3 +160,6 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 
 ### `parse-memory-hygiene` — Free Vector<PlacedGeometry> during StreamAllMeshes (PR #24, merged 2026-05-13)
 - **Outcome:** Original premise was half-wrong. The `node_modules/web-ifc/web-ifc-api.d.ts:71-75` declares `FlatMesh.delete()` but at runtime `FlatMesh` is a plain JS object — calling `.delete()` throws `not a function`. **However**, the inner `flatMesh.geometries` IS a real emscripten-bound `Vector<PlacedGeometry>` (own property `$$` confirms the C++-class marker) and DOES leak its heap allocation if not freed. The corrected fix: `(flatMesh.geometries as unknown as { delete(): void }).delete()` at the end of the `StreamAllMeshes` callback. Caught via an empirical runtime-shape diagnostic against RIB.ifc; documented inline in `src/parser/IfcParser.ts` so the next person reading the d.ts file doesn't fall into the same trap. Cast through `unknown` is needed because the d.ts for `Vector<T>` also omits `.delete` despite it existing at runtime. 382 → 382 tests (no new tests; existing parser + property tests act as smoke).
+
+### `dev-profiling-doc` — Document the Chrome DevTools perf workflow (PR #TBD, merged 2026-05-13)
+- **Outcome:** New `dev/profiling.md` covering the three measurement tools we actually use (`performance.memory` console snippet, Memory tab heap-snapshot diffing, Performance tab Long-Task identification). Includes optional `renderer.info` access via a temporary `window.__viewer` hook, a reproducible test method, two real measurement gotchas (session-restore pollution + duplicate-name detection blocking re-load), and dated baseline numbers measured live in Chrome 147 against `main` at `8061b53`: RIB.ifc cold-load 0.51 s / 773 meshes / +88 MB heap; Snowdon Towers + RIB combined 18,027 meshes / ~340 MB total heap. Snowdon clean-load number deferred to a future re-measure (session-restore interference + duplicate-name blocked the third measurement attempt). Common-diagnoses section maps each typical complaint ("orbit laggy", "memory keeps growing", "load freezes the tab", etc.) to the queued roadmap card that addresses it.
