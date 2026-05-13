@@ -10,6 +10,62 @@ export interface ClippingToolDeps {
 }
 
 /**
+ * Compute the signed world-units to advance the clip plane along its normal
+ * for a given cursor pixel delta.
+ *
+ * Strategy: project the plane normal into screen space (in pixels), project
+ * the cursor delta onto that screen direction, then convert pixels-along-normal
+ * to world units using the perspective-correct world-per-pixel factor at the
+ * handle's depth.
+ *
+ * Apply with `clipPlane.constant -= computePlaneDelta(...)`. In THREE.Plane the
+ * signed distance from the origin to the plane along the normal is `-constant`,
+ * so subtracting a positive delta moves the plane forward along its normal.
+ *
+ * Returns 0 when the normal projects to a near-zero screen vector (i.e. the
+ * normal is roughly parallel to the view direction and dragging it has no
+ * visible meaning). No NaN, no crash.
+ */
+export function computePlaneDelta(args: {
+  handlePos: THREE.Vector3;
+  planeNormal: THREE.Vector3;
+  camera: THREE.PerspectiveCamera;
+  canvasRect: { width: number; height: number };
+  cursorDeltaPx: { x: number; y: number };
+}): number {
+  const { handlePos, planeNormal, camera, canvasRect, cursorDeltaPx } = args;
+
+  // Step 1: project handle and (handle + normal) to NDC, then to pixel offsets.
+  const hNdc = handlePos.clone().project(camera);
+  const nNdc = handlePos.clone().add(planeNormal).project(camera);
+
+  const halfW = canvasRect.width / 2;
+  const halfH = canvasRect.height / 2;
+
+  const nPxX = (nNdc.x - hNdc.x) * halfW;
+  // NDC-Y is +up; screen-Y is +down. Flip so the result is in screen-pixel space.
+  const nPxY = -(nNdc.y - hNdc.y) * halfH;
+
+  const len = Math.sqrt(nPxX * nPxX + nPxY * nPxY);
+  if (len < 1e-3) {
+    // Normal parallel to view direction — no meaningful screen direction.
+    return 0;
+  }
+
+  // Step 2: project cursor delta onto the (un-normalized) normal direction,
+  // dividing by the length to get pixels along the unit screen direction.
+  const pixelsAlongNormal = (cursorDeltaPx.x * nPxX + cursorDeltaPx.y * nPxY) / len;
+
+  // Step 3: perspective-aware world-per-pixel at the handle's depth.
+  const dist = camera.position.distanceTo(handlePos);
+  const fovRad = (camera.fov * Math.PI) / 180;
+  const worldPerPx = (2 * dist * Math.tan(fovRad / 2)) / canvasRect.height;
+
+  // Step 4: combined world delta along the plane normal.
+  return pixelsAlongNormal * worldPerPx;
+}
+
+/**
  * States:
  *   IDLE     — tool is not active
  *   PLACING  — tool is active, crosshair cursor, waiting for mousedown on a surface
@@ -32,7 +88,7 @@ export class ClippingTool implements Tool {
 
   // Drag state
   private dragging = false;
-  private dragPrevY = 0;
+  private dragPrev = new THREE.Vector2();
 
   // Constant screen-size factor
   private readonly HANDLE_SCREEN_SIZE = 0.03;
@@ -255,7 +311,7 @@ export class ClippingTool implements Tool {
     if (!ray.intersectsSphere(hitSphere)) return;
 
     this.dragging = true;
-    this.dragPrevY = e.clientY;
+    this.dragPrev.set(e.clientX, e.clientY);
     this.deps.canvas.style.cursor = 'ns-resize';
     this.deps.canvas.setPointerCapture(e.pointerId);
 
@@ -268,13 +324,23 @@ export class ClippingTool implements Tool {
     if (this.placing) return;
 
     if (this.dragging) {
-      const deltaY = e.clientY - this.dragPrevY;
-      this.dragPrevY = e.clientY;
+      const cursorDeltaPx = {
+        x: e.clientX - this.dragPrev.x,
+        y: e.clientY - this.dragPrev.y,
+      };
+      this.dragPrev.set(e.clientX, e.clientY);
 
-      const speed = this.getModelSize() * 0.002;
-      const movement = -deltaY * speed;
+      const handlePos = this.handleGroup.getWorldPosition(new THREE.Vector3());
+      const rect = this.deps.canvas.getBoundingClientRect();
+      const worldDelta = computePlaneDelta({
+        handlePos,
+        planeNormal: this.planeNormal,
+        camera: this.deps.camera,
+        canvasRect: { width: rect.width, height: rect.height },
+        cursorDeltaPx,
+      });
 
-      this.clipPlane.constant -= movement;
+      this.clipPlane.constant -= worldDelta;
       this.updateHandlePosition();
 
       e.preventDefault();
@@ -301,19 +367,5 @@ export class ClippingTool implements Tool {
       this.deps.canvas.style.cursor = '';
       this.deps.canvas.releasePointerCapture(e.pointerId);
     }
-  }
-
-  // ── Helpers ────────────────────────────────────────────────
-
-  private getModelSize(): number {
-    const box = new THREE.Box3();
-    this.deps.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && !obj.userData.isClipHelper) {
-        box.expandByObject(obj);
-      }
-    });
-    if (box.isEmpty()) return 10;
-    const size = box.getSize(new THREE.Vector3());
-    return Math.max(size.x, size.y, size.z);
   }
 }
