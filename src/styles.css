@@ -937,6 +937,61 @@ html, body {
   text-decoration: underline;
 }
 
+/* Contextual action tray (bottom-right floating buttons) */
+.contextual-actions {
+  position: absolute;
+  bottom: 40px;          /* clears the #app-footer at bottom:0 */
+  right: 12px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.contextual-actions[hidden] {
+  display: none;
+}
+
+.contextual-action {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.95);
+  border: none;
+  border-radius: 8px;                       /* matches .model-panel / .inspector-panel */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); /* matches existing panels */
+  font-size: 13px;
+  font-family: inherit;                     /* respects body system-ui */
+  color: #374151;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.contextual-action[hidden] {
+  display: none;
+}
+
+.contextual-action:hover {
+  background: rgba(255, 255, 255, 1);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.contextual-action:active {
+  background: #f3f4f6;
+}
+
+.contextual-action-icon {
+  font-size: 14px;
+  color: #3b82f6;       /* brand blue */
+}
+
+.contextual-action-label {
+  white-space: nowrap;
+}
+
 /* Cookie consent banner */
 .cookie-banner {
   position: fixed;
