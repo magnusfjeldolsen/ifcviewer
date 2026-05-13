@@ -36,6 +36,19 @@ export class ModelManager {
 
     const meshesByExpressId = new Map<number, THREE.Mesh[]>();
 
+    // Per-call material cache, keyed by stringified RGBA. Reusing one
+    // MeshPhongMaterial across every mesh that shares a color (a) shrinks
+    // material count from ~mesh-count to a few dozen on real IFC models,
+    // cutting WebGL state changes between draws — the main cause of the
+    // orbit / pan / zoom lag the user reported after PR #21 made selection
+    // fast — and (b) shrinks the SelectionManager.highlightVariants pool
+    // proportionally (it's a WeakMap<Material, Material> keyed by the
+    // original material reference; shared originals → shared variants).
+    // Cache is local to one addModel call so different models keep their
+    // own material instances, which keeps removeModel's dispose loop safe:
+    // no model references another model's materials.
+    const materialCache = new Map<string, THREE.MeshPhongMaterial>();
+
     for (const mesh of parsed.meshes) {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertices, 3));
@@ -46,12 +59,22 @@ export class ModelManager {
       // model load for no benefit when no marquee runs; the first marquee
       // pays the cost (~50-200ms) instead. Net win on load.
 
-      const material = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(mesh.color.r, mesh.color.g, mesh.color.b),
-        opacity: mesh.color.a,
-        transparent: mesh.color.a < 1,
-        side: THREE.DoubleSide,
-      });
+      const c = mesh.color;
+      // toFixed(6) gives a stable key: the parser emits doubles, and two
+      // meshes that should share a color must produce the same string.
+      // Six decimals is well below the 8-bit sRGB precision of a real
+      // GPU upload while still being far inside double-precision noise.
+      const matKey = `${c.r.toFixed(6)},${c.g.toFixed(6)},${c.b.toFixed(6)},${c.a.toFixed(6)}`;
+      let material = materialCache.get(matKey);
+      if (!material) {
+        material = new THREE.MeshPhongMaterial({
+          color: new THREE.Color(c.r, c.g, c.b),
+          opacity: c.a,
+          transparent: c.a < 1,
+          side: THREE.DoubleSide,
+        });
+        materialCache.set(matKey, material);
+      }
 
       const threeMesh = new THREE.Mesh(geometry, material);
       threeMesh.userData.expressID = mesh.expressID;
@@ -86,13 +109,20 @@ export class ModelManager {
     if (!entry) return false;
 
     this.scene.remove(entry.group);
+    // Materials are shared across meshes within a model (see addModel's
+    // materialCache), so dedupe before disposing. THREE.Material.dispose()
+    // is idempotent — calling it twice is harmless — but deduping is the
+    // honest accounting and keeps the dispose count meaningful in tests.
+    const seenMaterials = new Set<THREE.Material>();
     entry.group.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         child.geometry.dispose();
-        if (Array.isArray(child.material)) {
-          child.material.forEach((m) => m.dispose());
-        } else {
-          child.material.dispose();
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const m of mats) {
+          if (!seenMaterials.has(m)) {
+            seenMaterials.add(m);
+            m.dispose();
+          }
         }
       }
     });
