@@ -14,6 +14,7 @@ import { Footer } from '../ui/Footer';
 import { CookieBanner } from '../ui/CookieBanner';
 import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
 import { HelpOverlay } from '../ui/HelpOverlay';
+import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
@@ -43,6 +44,10 @@ export class App {
   private remoteLoader: RemoteLoader;
   private keyboardShortcuts!: KeyboardShortcuts;
   private helpOverlay!: HelpOverlay;
+  // Bottom-right floating action tray. Currently hosts the Remove clipping
+  // button; future contextual buttons (Remove measurements, Show hidden
+  // elements, etc.) will register here. Constructed in start().
+  private contextualActions!: ContextualActions;
   private modelRecords = new Map<string, ModelRecord>();
   private bufferCache = new Map<string, ArrayBuffer>();
   // Maps App UUID → web-ifc internal modelID. Populated when a parse
@@ -310,6 +315,21 @@ export class App {
         this.selectionManager,
       );
     }
+
+    // Contextual action tray (bottom-right). Currently hosts the Remove
+    // clipping button; future contextual buttons plug in by calling
+    // contextualActions.register(...). Disposed BEFORE clippingTool in
+    // App.dispose so the tray unsubscribes from a still-live event source.
+    const contextualParent = document.getElementById('app')!;
+    this.contextualActions = new ContextualActions(contextualParent);
+    this.contextualActions.register({
+      id: 'remove-clipping',
+      label: 'Remove clipping',
+      icon: '✂', // ✂
+      isVisible: () => this.clippingTool.hasClipPlane(),
+      onClick: () => this.clippingTool.clearClipPlane(),
+      subscribe: (refresh) => this.clippingTool.onStateChange(refresh),
+    });
 
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
@@ -629,6 +649,11 @@ export class App {
     if (this.inspectorPanel) this.inspectorPanel.dispose();
     this.marqueeSelector.dispose();
     this.selectionManager.dispose();
+    // contextualActions must dispose BEFORE toolManager so the tray can
+    // unsubscribe from a live ClippingTool source. (toolManager.dispose
+    // calls clippingTool.dispose, which clears its listener array.) The
+    // field is initialized in start(), so guard for early-dispose paths.
+    if (this.contextualActions) this.contextualActions.dispose();
     this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();

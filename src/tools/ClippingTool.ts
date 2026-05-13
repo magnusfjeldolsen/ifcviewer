@@ -90,6 +90,11 @@ export class ClippingTool implements Tool {
   private dragging = false;
   private dragPrev = new THREE.Vector2();
 
+  // State-change listeners for the contextual-action tray (and any other
+  // observer that wants to react to clip-plane create/remove transitions).
+  // Pattern mirrors SelectionManager.onChange — pure additive surface.
+  private stateListeners: Array<() => void> = [];
+
   // Constant screen-size factor
   private readonly HANDLE_SCREEN_SIZE = 0.03;
 
@@ -154,9 +159,32 @@ export class ClippingTool implements Tool {
     this.removeClipPlane();
   }
 
+  /** True when a clip plane is currently active. */
+  hasClipPlane(): boolean {
+    return this.clipPlane !== null;
+  }
+
+  /**
+   * Subscribe to plane state transitions (create / remove). Listener fires
+   * after the transition is fully applied. Returns an unsubscribe callback.
+   */
+  onStateChange(cb: () => void): () => void {
+    this.stateListeners.push(cb);
+    return () => {
+      this.stateListeners = this.stateListeners.filter((l) => l !== cb);
+    };
+  }
+
+  private notifyStateChange(): void {
+    for (const cb of this.stateListeners) cb();
+  }
+
   dispose(): void {
     this.deactivate();
+    // clearClipPlane → removeClipPlane fires notifyStateChange before we
+    // null out listeners below, so live observers see the final transition.
     this.clearClipPlane();
+    this.stateListeners = [];
   }
 
   // ── Placing (mousedown) ────────────────────────────────────
@@ -204,9 +232,16 @@ export class ClippingTool implements Tool {
 
     this.createHandle();
     this.addDragListeners();
+
+    this.notifyStateChange();
   }
 
   private removeClipPlane(): void {
+    // Only notify on an actual transition. When createClipPlane() calls
+    // removeClipPlane() before installing a new plane, this is a no-op
+    // (had === false) and the create-side notifier fires the single event.
+    const had = this.clipPlane !== null;
+
     this.deps.renderer.clippingPlanes = [];
 
     if (this.handleGroup) {
@@ -224,6 +259,8 @@ export class ClippingTool implements Tool {
 
     this.clipPlane = null;
     this.dragging = false;
+
+    if (had) this.notifyStateChange();
   }
 
   // ── Visual handle ──────────────────────────────────────────
