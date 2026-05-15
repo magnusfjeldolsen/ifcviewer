@@ -18,6 +18,7 @@ import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
+import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { InspectorPanel } from '../inspector/InspectorPanel';
@@ -34,6 +35,7 @@ export class App {
   private toolbar: Toolbar;
   private modelTreePanel: ModelTreePanel;
   private sessionStore: SessionStore;
+  private geometryCache: GeometryCache;
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private clippingTool: ClippingTool;
@@ -171,6 +173,11 @@ export class App {
 
     // Session persistence
     this.sessionStore = new SessionStore();
+    // Parsed-geometry cache, keyed by SHA-256 of the source .ifc buffer.
+    // Used to skip the web-ifc parse on session restore — the model
+    // becomes visible immediately and we re-parse in the background to
+    // refill the web-ifc state the property inspector needs.
+    this.geometryCache = new GeometryCache(this.sessionStore);
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
     this.memoryToggle.onChange(async (enabled) => {
       if (enabled) {
@@ -433,13 +440,39 @@ export class App {
           }
 
           if (stored) {
-            // Buffer available in IndexedDB — parse and add
-            const parsed = await this.parser.parse(stored.buffer, record.id);
-            this.modelManager.addModel(parsed);
-            this.modelIdMap.set(record.id, parsed.modelID);
-            this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length);
-            this.bufferCache.set(record.id, stored.buffer);
-            this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+            // Buffer is available — try the geometry-cache fast path first.
+            // On hit we hydrate the scene from cached typed-array buffers
+            // (instant on a 200 MB model) and queue a background re-parse
+            // for the web-ifc state the property inspector needs.
+            const cachedMeshes = record.hash
+              ? await this.geometryCache.load(record.hash)
+              : null;
+            if (cachedMeshes) {
+              this.modelManager.addModel({
+                id: record.id,
+                modelID: -1, // filled in by scheduleBackgroundReparse
+                meshes: cachedMeshes,
+              });
+              this.modelTreePanel.addModel(
+                record.id, record.name, cachedMeshes.length, record.source.type,
+              );
+              this.bufferCache.set(record.id, stored.buffer);
+              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+              // Properties stay unavailable until this completes.
+              this.scheduleBackgroundReparse(record.id, stored.buffer);
+            } else {
+              // Cache miss — full parse, then backfill the cache so the
+              // *next* restore is fast. Backfills also rescue sessions
+              // saved before the cache feature shipped (no record.hash).
+              const parsed = await this.parser.parse(stored.buffer, record.id);
+              this.modelManager.addModel(parsed);
+              this.modelIdMap.set(record.id, parsed.modelID);
+              this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length);
+              this.bufferCache.set(record.id, stored.buffer);
+              const hash = record.hash ?? await sha256Hex(stored.buffer);
+              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
+              void this.geometryCache.save(hash, parsed.meshes);
+            }
             // Fix the IndexedDB key to match the session UUID
             if (stored.id !== record.id) {
               await this.sessionStore.removeModel(stored.id);
@@ -484,6 +517,35 @@ export class App {
       .catch(() => {}); // errors handled inside handleFile
   }
 
+  /**
+   * Run web-ifc parse in the background after a cached-geometry restore.
+   * The scene is already up from cached meshes; this only populates
+   * web-ifc's STEP graph so the property inspector can answer queries.
+   *
+   * Chained onto parseQueue so multiple restored models re-parse one at
+   * a time, and any subsequent handleFile call waits behind them.
+   *
+   * Caveat: `parser.openForProperties` is synchronous inside web-ifc, so
+   * a large model can freeze the main thread for a few seconds during the
+   * re-parse. Acceptable for v1 (pre-cache restores froze for ~60 s);
+   * `web-worker-parse` removes this freeze when it lands.
+   */
+  private scheduleBackgroundReparse(id: string, buffer: ArrayBuffer): void {
+    this.parseQueue = this.parseQueue
+      .then(async () => {
+        try {
+          const modelID = await this.parser.openForProperties(buffer);
+          this.modelIdMap.set(id, modelID);
+          // Drop any "loading" placeholder the property repository may
+          // have cached so the next inspector fetch returns real data.
+          if (this.propertyRepository) this.propertyRepository.disposeModel(id);
+        } catch (err) {
+          console.warn(`Background re-parse failed for ${id}:`, err);
+        }
+      })
+      .catch(() => {});
+  }
+
   private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
     try {
       // Reject duplicate filenames
@@ -499,9 +561,13 @@ export class App {
       this.setStatus(`Loading ${file.name}...`);
 
       const id = crypto.randomUUID();
+      // Hash in parallel with parse — SHA-256 of 200 MB is a few hundred
+      // milliseconds and we don't want it serialized in front of the user.
+      const hashPromise = sha256Hex(file.buffer);
       const parsed = await this.parser.parse(file.buffer, id);
       this.modelManager.addModel(parsed);
       this.modelIdMap.set(id, parsed.modelID);
+      const hash = await hashPromise;
 
       const modelSource: ModelSource = source ?? { type: 'local', fileName: file.name };
       const record: ModelRecord = {
@@ -511,6 +577,7 @@ export class App {
         addedAt: Date.now(),
         sizeBytes: file.buffer.byteLength,
         hasCachedBuffer: true,
+        hash,
       };
 
       this.modelRecords.set(id, record);
@@ -532,6 +599,10 @@ export class App {
           camera: this.viewer.getCameraState(),
           models: Array.from(this.modelRecords.values()),
         });
+        // Fire-and-forget geometry-cache write. Runs after the scene is
+        // up so the user-perceived parse time is unaffected; a failed
+        // write just means the next restore falls back to a full parse.
+        void this.geometryCache.save(hash, parsed.meshes);
       }
 
       this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
