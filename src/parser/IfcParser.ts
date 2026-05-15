@@ -98,6 +98,24 @@ export class IfcParser {
     return { id, modelID, meshes };
   }
 
+  /**
+   * Open a model in web-ifc without streaming geometry. Used by the
+   * geometry-cache fast-restore path: scene is already up from cached
+   * meshes, we just need web-ifc's STEP graph populated so the property
+   * inspector can answer queries. Skipping StreamAllMeshes saves the bulk
+   * of the parse time on large models.
+   *
+   * Caller owns CloseModel via the same hooks as parse() (App.removeModel,
+   * App.resetView, App.dispose).
+   */
+  async openForProperties(buffer: ArrayBuffer): Promise<number> {
+    if (!this.api || !this.initialized) {
+      throw new Error('IfcParser not initialized. Call init() first.');
+    }
+    const data = new Uint8Array(buffer);
+    return this.api.OpenModel(data);
+  }
+
   dispose(): void {
     if (this.api) {
       this.api.Dispose();

@@ -134,8 +134,15 @@ export class WebIfcPropertyRepository implements ElementPropertyRepository {
     const cached = perModel.get(expressId);
     if (cached) return cached;
 
-    const work = this.fetch(modelId, expressId);
-    const promise = this.enqueue ? this.enqueue(() => work) : work;
+    // Defer the fetch into the enqueue thunk so the synchronous prefix
+    // of fetch (resolveModelId) runs AFTER any in-flight parse settles.
+    // This matters for the geometry-cache restore path: the scene is up
+    // before web-ifc has the model open, so modelIdMap is briefly empty.
+    // The background re-parse runs through the same parseQueue, so by
+    // the time this thunk fires modelIdMap is populated.
+    const promise = this.enqueue
+      ? this.enqueue(() => this.fetch(modelId, expressId))
+      : this.fetch(modelId, expressId);
     perModel.set(expressId, promise);
     return promise;
   }
