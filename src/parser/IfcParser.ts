@@ -15,6 +15,14 @@ export interface ParsedModel {
   meshes: ParsedMesh[];
 }
 
+/**
+ * Product-ID batch size for `parseStreaming`. Each batch is one synchronous
+ * `StreamMeshes` call; the loop yields to the event loop between batches so
+ * geometry appears progressively. ~50 keeps a batch well under one frame on
+ * the models measured (RIB.ifc: ~18 ms/batch).
+ */
+const STREAM_BATCH_SIZE = 50;
+
 export class IfcParser {
   // Public so App can route the web-ifc modelID through the property repository.
   // Kept open after parse; App owns CloseModel on remove / reset / dispose.
@@ -36,58 +44,10 @@ export class IfcParser {
       throw new Error('IfcParser not initialized. Call init() first.');
     }
 
-    const data = new Uint8Array(buffer);
-    const modelID = this.api.OpenModel(data);
+    const modelID = this.api.OpenModel(new Uint8Array(buffer));
     const meshes: ParsedMesh[] = [];
-
     this.api.StreamAllMeshes(modelID, (flatMesh: WebIFC.FlatMesh) => {
-      for (let i = 0; i < flatMesh.geometries.size(); i++) {
-        const placedGeom = flatMesh.geometries.get(i);
-        const geom = this.api!.GetGeometry(modelID, placedGeom.geometryExpressID);
-
-        const verts = this.api!.GetVertexArray(
-          geom.GetVertexData(),
-          geom.GetVertexDataSize(),
-        );
-        const idxs = this.api!.GetIndexArray(
-          geom.GetIndexData(),
-          geom.GetIndexDataSize(),
-        );
-
-        // Extract vertices (position only, stride of 6: x,y,z,nx,ny,nz)
-        const positions = new Float32Array((verts.length / 6) * 3);
-        const normals = new Float32Array((verts.length / 6) * 3);
-        for (let j = 0; j < verts.length / 6; j++) {
-          positions[j * 3] = verts[j * 6];
-          positions[j * 3 + 1] = verts[j * 6 + 1];
-          positions[j * 3 + 2] = verts[j * 6 + 2];
-          normals[j * 3] = verts[j * 6 + 3];
-          normals[j * 3 + 1] = verts[j * 6 + 4];
-          normals[j * 3 + 2] = verts[j * 6 + 5];
-        }
-
-        const color = placedGeom.color;
-        const transform = Array.from(placedGeom.flatTransformation);
-
-        meshes.push({
-          expressID: flatMesh.expressID,
-          vertices: positions,
-          normals,
-          indices: new Uint32Array(idxs),
-          transform,
-          color: { r: color.x, g: color.y, b: color.z, a: color.w },
-        });
-
-        geom.delete();
-      }
-      // Free the inner Vector<PlacedGeometry> in WASM heap. Verified via
-      // runtime inspection: `flatMesh` itself is a plain JS object (no
-      // `.delete` despite the d.ts claim — that's the trap), but
-      // `flatMesh.geometries` is an emscripten-bound vector that DOES
-      // have `.delete` and DOES leak its heap allocation if not freed.
-      // The d.ts for Vector<T> omits `.delete` even though it exists at
-      // runtime — cast through unknown to satisfy the typechecker.
-      (flatMesh.geometries as unknown as { delete(): void }).delete();
+      this.extractFlatMesh(flatMesh, modelID, meshes);
     });
 
     // NOTE: model is intentionally kept open after parse.
@@ -96,6 +56,120 @@ export class IfcParser {
     // called from App.removeModel, App.resetView, and App.dispose.
 
     return { id, modelID, meshes };
+  }
+
+  /**
+   * Progressive variant of `parse`. Geometry is delivered in batches via
+   * `onBatch` so the caller can fill the scene incrementally instead of
+   * showing nothing until the whole model is parsed.
+   *
+   * How it works (verified against web-ifc 0.0.77 — see the parse-streaming
+   * spike): web-ifc's streamed geometry is only valid *inside* a stream
+   * callback, and `StreamAllMeshes` is a single monolithic call that can't
+   * yield. So we run it once cheaply just to collect the product
+   * `expressID`s (no `GetGeometry`), then re-stream those IDs in batches
+   * via `StreamMeshes` — extracting geometry inside that callback — and
+   * yield to the event loop between batches so the browser can paint.
+   *
+   * `StreamMeshes` over the exact product-ID set reproduces the same
+   * meshes as `StreamAllMeshes`; feeding it arbitrary IDs over-produces
+   * (it would also stream openings, mapped items, sub-parts).
+   *
+   * Returns the full `ParsedModel` at the end, same as `parse`, so callers
+   * that also need the complete mesh list (e.g. the geometry cache) work
+   * unchanged.
+   */
+  async parseStreaming(
+    buffer: ArrayBuffer,
+    id: string,
+    onBatch: (meshes: ParsedMesh[]) => void,
+  ): Promise<ParsedModel> {
+    if (!this.api || !this.initialized) {
+      throw new Error('IfcParser not initialized. Call init() first.');
+    }
+    const api = this.api;
+    const modelID = api.OpenModel(new Uint8Array(buffer));
+
+    // Pass 1 — collect product expressIDs only (cheap: no GetGeometry).
+    const productIds: number[] = [];
+    api.StreamAllMeshes(modelID, (flatMesh: WebIFC.FlatMesh) => {
+      productIds.push(flatMesh.expressID);
+    });
+
+    // Pass 2 — re-stream the IDs in batches, extracting geometry inside
+    // the callback, yielding to the event loop after each batch so the
+    // scene paints progressively.
+    const all: ParsedMesh[] = [];
+    for (let i = 0; i < productIds.length; i += STREAM_BATCH_SIZE) {
+      const batchIds = productIds.slice(i, i + STREAM_BATCH_SIZE);
+      const batch: ParsedMesh[] = [];
+      api.StreamMeshes(modelID, batchIds, (flatMesh: WebIFC.FlatMesh) => {
+        this.extractFlatMesh(flatMesh, modelID, batch);
+      });
+      for (const m of batch) all.push(m);
+      if (batch.length > 0) onBatch(batch);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    // Model kept open after parse — see the note in `parse`.
+    return { id, modelID, meshes: all };
+  }
+
+  /**
+   * Extract every `PlacedGeometry` of one `FlatMesh` into `ParsedMesh`
+   * records appended to `sink`. Shared by `parse` (StreamAllMeshes) and
+   * `parseStreaming` (StreamMeshes). Must run inside a stream callback —
+   * web-ifc geometry is only valid there.
+   */
+  private extractFlatMesh(
+    flatMesh: WebIFC.FlatMesh,
+    modelID: number,
+    sink: ParsedMesh[],
+  ): void {
+    for (let i = 0; i < flatMesh.geometries.size(); i++) {
+      const placedGeom = flatMesh.geometries.get(i);
+      const geom = this.api!.GetGeometry(modelID, placedGeom.geometryExpressID);
+
+      const verts = this.api!.GetVertexArray(
+        geom.GetVertexData(),
+        geom.GetVertexDataSize(),
+      );
+      const idxs = this.api!.GetIndexArray(
+        geom.GetIndexData(),
+        geom.GetIndexDataSize(),
+      );
+
+      // Extract vertices (position only, stride of 6: x,y,z,nx,ny,nz)
+      const positions = new Float32Array((verts.length / 6) * 3);
+      const normals = new Float32Array((verts.length / 6) * 3);
+      for (let j = 0; j < verts.length / 6; j++) {
+        positions[j * 3] = verts[j * 6];
+        positions[j * 3 + 1] = verts[j * 6 + 1];
+        positions[j * 3 + 2] = verts[j * 6 + 2];
+        normals[j * 3] = verts[j * 6 + 3];
+        normals[j * 3 + 1] = verts[j * 6 + 4];
+        normals[j * 3 + 2] = verts[j * 6 + 5];
+      }
+
+      const color = placedGeom.color;
+
+      sink.push({
+        expressID: flatMesh.expressID,
+        vertices: positions,
+        normals,
+        indices: new Uint32Array(idxs),
+        transform: Array.from(placedGeom.flatTransformation),
+        color: { r: color.x, g: color.y, b: color.z, a: color.w },
+      });
+
+      geom.delete();
+    }
+    // Free the inner Vector<PlacedGeometry> in WASM heap. `flatMesh` itself
+    // is a plain JS object (no `.delete` despite the d.ts), but
+    // `flatMesh.geometries` is an emscripten-bound vector that DOES have
+    // `.delete` and leaks its heap allocation if not freed. Cast through
+    // unknown — the d.ts for Vector<T> omits `.delete`.
+    (flatMesh.geometries as unknown as { delete(): void }).delete();
   }
 
   /**
