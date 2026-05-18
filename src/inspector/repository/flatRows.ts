@@ -71,7 +71,12 @@ export function buildFlatRows(
   for (const g of qtos) {
     for (const n of g.properties) pushNode(g.name, n);
   }
-  rows.sort((a, b) => a.path.localeCompare(b.path));
+  // Sort by code point, not localeCompare. These paths are machine-generated
+  // dotted identifier keys (e.g. `Pset_X.Aaa`); locale collation is both
+  // unnecessary and unreliable here — it de-prioritizes the `_`/`.`
+  // punctuation and, on some ICU builds, orders `Pset_X.Aaa` *after*
+  // `Pset_X.Bbb`. A plain code-point compare is deterministic.
+  rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return rows;
 }
 
