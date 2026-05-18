@@ -7,6 +7,14 @@ export interface ClippingToolDeps {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   canvas: HTMLCanvasElement;
+  /**
+   * Optional render-on-demand hook. The tool calls this whenever it
+   * mutates visible state (creating / removing the clip plane, dragging
+   * the handle, etc.) so the viewer's animate loop draws the next frame.
+   * No-op if not provided — viewer falls back to its previous always-render
+   * behaviour.
+   */
+  requestRender?: () => void;
 }
 
 /**
@@ -176,6 +184,9 @@ export class ClippingTool implements Tool {
   }
 
   private notifyStateChange(): void {
+    // The clip-plane create/remove transition affects geometry visibility
+    // even when the camera is idle — request a frame before listeners run.
+    this.deps.requestRender?.();
     for (const cb of this.stateListeners) cb();
   }
 
@@ -379,6 +390,9 @@ export class ClippingTool implements Tool {
 
       this.clipPlane.constant -= worldDelta;
       this.updateHandlePosition();
+      // Drag updates mutate plane.constant — the camera hasn't moved, so
+      // OrbitControls won't fire 'change'. Request a render explicitly.
+      this.deps.requestRender?.();
 
       e.preventDefault();
       e.stopPropagation();

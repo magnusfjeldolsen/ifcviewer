@@ -72,7 +72,12 @@ export class App {
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
-    this.modelManager = new ModelManager(this.viewer.getScene());
+    // Shared render-on-demand hook. Every module that mutates visible
+    // scene state without moving the camera (model add/remove, tool
+    // mutations, highlight changes) receives this callback so the viewer
+    // renders the next frame instead of sitting idle.
+    const requestRender = (): void => this.viewer.requestRender();
+    this.modelManager = new ModelManager(this.viewer.getScene(), requestRender);
     this.fileLoader = new FileLoader();
     this.parser = new IfcParser();
     this.statusEl = document.getElementById('status');
@@ -85,6 +90,7 @@ export class App {
       scene: this.viewer.getScene(),
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
+      requestRender,
     });
     this.toolManager.register(this.clippingTool);
 
@@ -93,6 +99,7 @@ export class App {
       scene: this.viewer.getScene(),
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
+      requestRender,
     });
     this.toolManager.register(this.measurementTool);
 

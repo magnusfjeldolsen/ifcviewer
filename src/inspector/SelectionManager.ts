@@ -569,6 +569,10 @@ export class SelectionManager {
   }
 
   private notifyChange(): void {
+    // Highlight + unhighlight only mutate `mesh.material` references — the
+    // camera doesn't move, so OrbitControls won't fire 'change' to wake
+    // the render loop. Trigger it here so the highlight is drawn.
+    this.deps.viewer.requestRender();
     const state = this.getState();
     for (const cb of this.changeListeners) cb(state);
   }

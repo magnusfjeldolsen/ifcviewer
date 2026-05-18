@@ -11,6 +11,15 @@ export interface FlyToParams {
   far: number;
   durationMs?: number;
   onStart?: () => void;
+  /**
+   * Fires once per animation frame after camera + controls have been
+   * updated. Used by the viewer in render-on-demand mode to flip
+   * `needsRender = true` so each tick draws — controls.update() already
+   * dispatches 'change' on each tick, but tying onTick to the animator
+   * directly makes the contract explicit and survives any future
+   * refactor that stops calling controls.update().
+   */
+  onTick?: () => void;
   onComplete?: () => void;
   onInterrupt?: () => void;
 }
@@ -43,6 +52,7 @@ export class CameraAnimator {
       far,
       durationMs = 400,
       onStart,
+      onTick,
       onComplete,
       onInterrupt,
     } = params;
@@ -85,6 +95,7 @@ export class CameraAnimator {
         camera.far = startFar + (far - startFar) * t;
         camera.updateProjectionMatrix();
         controls.update();
+        onTick?.();
 
         if (rawT < 1) {
           this.rafId = requestAnimationFrame(tick);
