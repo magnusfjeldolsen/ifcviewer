@@ -554,6 +554,10 @@ export class App {
   }
 
   private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
+    // Tracks an in-progress streamed load so the catch block can drop a
+    // partially-built model if the parse fails. Null before the stream
+    // starts and once it completes.
+    let streamId: string | null = null;
     try {
       // Reject duplicate filenames
       for (const existing of this.modelRecords.values()) {
@@ -568,11 +572,32 @@ export class App {
       this.setStatus(`Loading ${file.name}...`);
 
       const id = crypto.randomUUID();
-      // Hash in parallel with parse — SHA-256 of 200 MB is a few hundred
-      // milliseconds and we don't want it serialized in front of the user.
+      // Hash in parallel with the parse — SHA-256 of 200 MB is a few
+      // hundred milliseconds and we don't want it in front of the user.
       const hashPromise = sha256Hex(file.buffer);
-      const parsed = await this.parser.parse(file.buffer, id);
-      this.modelManager.addModel(parsed);
+
+      // Stream the parse: the model's group goes into the scene now and
+      // geometry fills in batch by batch, so a large model materializes
+      // progressively instead of after one long frozen wait.
+      this.modelManager.beginStream(id);
+      streamId = id;
+      let meshCount = 0;
+      let framed = false;
+      const parsed = await this.parser.parseStreaming(file.buffer, id, (batch) => {
+        this.modelManager.appendMeshes(id, batch);
+        meshCount += batch.length;
+        this.setStatus(`Loading ${file.name}… (${meshCount} objects)`);
+        // Fit once, on the first batch, so the camera frames the model
+        // early and the progressive fill is actually visible. We do NOT
+        // re-fit at the end: the load is interactive now, and a late fit
+        // would yank a camera the user may already be orbiting.
+        if (!framed) {
+          framed = true;
+          this.viewer.fitToBox(this.modelManager.getBoundingBox());
+        }
+      });
+      this.modelManager.endStream(id);
+      streamId = null;
       this.modelIdMap.set(id, parsed.modelID);
       const hash = await hashPromise;
 
@@ -590,12 +615,9 @@ export class App {
       this.modelRecords.set(id, record);
       this.bufferCache.set(id, file.buffer);
       this.modelTreePanel.addModel(
-        parsed.id, file.name, parsed.meshes.length,
+        id, file.name, parsed.meshes.length,
         modelSource.type,
       );
-
-      const box = this.modelManager.getBoundingBox();
-      this.viewer.fitToBox(box);
 
       // Persist to IndexedDB if memory is enabled
       if (this.sessionStore.isMemoryEnabled()) {
@@ -615,6 +637,9 @@ export class App {
       this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
       setTimeout(() => this.setStatus(''), 3000);
     } catch (err) {
+      // A streamed load that failed partway leaves an empty/partial model
+      // and an open stream — drop both (removeModel also clears the stream).
+      if (streamId) this.modelManager.removeModel(streamId);
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
     }
