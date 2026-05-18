@@ -30,23 +30,13 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Source:** Performance research from the `claude conversation 2026-05-12`, summarized in `feature/element-inspector` audit. Section 3.1 + 3.10 of the original design doc.
 
 ### `mt-wasm-coop-coep` — Multi-thread web-ifc via cross-origin isolation
-- **Status:** queued
-- **Effort:** S–M
-- **Why:** `node_modules/web-ifc/web-ifc-mt.wasm` already ships in `public/` but never loads because the dev server and GitHub Pages don't send the COOP/COEP headers that enable `crossOriginIsolated`. With it enabled, web-ifc's `Init()` auto-selects the MT artifact and CPU stages get ~2–3× faster on multicore machines.
-- **What:**
-  - `vite.config.ts` dev server headers:
-    ```
-    Cross-Origin-Opener-Policy: same-origin
-    Cross-Origin-Embedder-Policy: credentialless   # safer than require-corp
-    ```
-  - For GitHub Pages prod, ship a Service Worker (use `coi-serviceworker` npm package or hand-roll ~30 lines) that re-broadcasts the headers.
-  - Add a smoke test that logs `self.crossOriginIsolated` and which WASM variant loaded.
-- **Risks:** COEP `require-corp` mode breaks any cross-origin asset without `Cross-Origin-Resource-Policy: cross-origin`. Use `credentialless` instead — it relaxes the requirement at the cost of not sending credentials. Audit:
-  - Google Analytics (`src/services/Analytics.ts`) — usually fine in credentialless mode.
-  - Cookie banner if it loads any external icon/font.
-  - Any third-party domain in `index.html`.
-- **Falls back gracefully:** if COI fails, web-ifc silently uses the single-threaded WASM. No crash, no regression.
-- **Source:** Performance research section 3.2.
+- **Status:** blocked (web-ifc 0.0.77 MT build is incompatible with our Vite/ESM bundling — see Blocker)
+- **Effort:** L (header plumbing is trivial; the blocker below makes the real fix a large change)
+- **Why:** `node_modules/web-ifc/web-ifc-mt.wasm` already ships in `public/` but never loads because the dev server and GitHub Pages don't send the COOP/COEP headers that enable `crossOriginIsolated`. With it enabled, web-ifc's `Init()` auto-selects the MT artifact — CPU stages *would* get ~2–3× faster on multicore machines.
+- **Blocker (found 2026-05-18):** Enabling cross-origin isolation works, but it does NOT fall back gracefully. With `crossOriginIsolated === true`, web-ifc's `Init()` selects the multi-threaded build, which is broken under ESM bundling. In `web-ifc-api.js` the pthread pool does `new Worker(_scriptName)` where `_scriptName = document.currentScript?.src`. `document.currentScript` is `null` for ES modules (how we `import` web-ifc), so the worker URL is `undefined` → the browser fetches `/ifcviewer/undefined` → gets `index.html` → `Uncaught SyntaxError: Unexpected token '<'`, once per CPU core. The parser breaks. The Emscripten escape hatch (`Module.mainScriptUrlOrBlob`) is not exposed by `IfcAPI.Init(customLocateFileHandler?, forceSingleThread?)`. web-ifc 0.0.77 is the latest published version — no upstream fix to upgrade into. Verified live: enabling the headers floods the console with worker errors and breaks `parse`.
+- **To unblock:** either (a) load web-ifc via its IIFE classic-script build (`web-ifc-api-iife.js` through a `<script>` tag instead of `import`) so `document.currentScript` resolves — a real `IfcParser` architecture change with its own risk surface; or (b) wait for an upstream web-ifc release that fixes MT worker spawning under bundlers. Header + service-worker plumbing alone is useless without one of these.
+- **Original design (kept for when this unblocks):** dev + preview `vite.config.ts` headers `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: credentialless`; a service worker for GitHub Pages prod (Pages can't set headers) that re-broadcasts them; `credentialless` (not `require-corp`) keeps cross-origin assets like the Google Analytics script working.
+- **Source:** Performance research section 3.2; blocker finding 2026-05-18.
 
 ### `progressive-scene-fill` — Meshes appear during StreamAllMeshes
 - **Status:** queued
