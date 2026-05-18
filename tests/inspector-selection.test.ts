@@ -97,6 +97,7 @@ function makeStubDeps(): {
     getCamera: () => new THREE.PerspectiveCamera(),
     getRenderer: () => ({ clippingPlanes: [] }) as unknown as THREE.WebGLRenderer,
     isPivotPicking: () => pivotState.picking,
+    requestRender: () => { /* no-op for tests */ },
   } as unknown as Viewer;
 
   const modelManager = {

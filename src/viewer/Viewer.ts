@@ -13,6 +13,19 @@ export class Viewer {
   private animationId: number | null = null;
   private updateCallbacks: Array<() => void> = [];
 
+  /**
+   * Render-on-demand gate. The animate loop still runs at requestAnimationFrame
+   * cadence so it can poll `controls.update()` (which dispatches 'change'
+   * events at the right times), but we only call `renderer.render` and the
+   * `updateCallbacks` when something has actually changed.
+   *
+   * Initial value `true` so the first frame after construction draws the
+   * empty scene. Cleared after each render. Set by `requestRender()`, by
+   * the OrbitControls 'change' event, and by every Viewer method that
+   * mutates visible state (fit/fly/pivot ops, resize).
+   */
+  private needsRender = true;
+
   // Pivot picking state
   private pickingPivot = false;
   private _controlsMode: 'user' | 'animating' | 'pivot-transition' = 'user';
@@ -44,6 +57,12 @@ export class Viewer {
     this.controls.addEventListener('start', () => {
       this.setControlsMode('user');
     });
+    // OrbitControls 'change' fires whenever camera or target moves —
+    // including programmatic moves through controls.update(). Hooking
+    // it here covers most user interactions (orbit/pan/zoom), the tail
+    // of an inertial drag, and fitToBox / restoreCameraState which both
+    // call controls.update().
+    this.controls.addEventListener('change', this.boundRequestRender);
 
     this.setupLights();
     this.setupGrid();
@@ -71,6 +90,25 @@ export class Viewer {
   onUpdate(callback: () => void): void {
     this.updateCallbacks.push(callback);
   }
+
+  /**
+   * Queue a render for the next animate tick. Cheap and idempotent —
+   * setting the flag multiple times in one frame still costs one render.
+   *
+   * Anything that mutates visible scene state must call this. The
+   * OrbitControls 'change' event handles camera-driven mutations
+   * automatically; tools, model add/remove, highlights, and scene-level
+   * mutations call it explicitly via the wiring in App and module
+   * constructors.
+   */
+  requestRender(): void {
+    this.needsRender = true;
+  }
+
+  /** Stable bound reference for add/removeEventListener. */
+  private boundRequestRender = (): void => {
+    this.needsRender = true;
+  };
 
   getCameraState(): { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } {
     return {
@@ -106,9 +144,15 @@ export class Viewer {
 
   animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
+    // Always poll OrbitControls in user mode so the 'change' event fires
+    // when the camera moves (including inertia/damping if ever enabled).
+    // The 'change' listener flips needsRender on, so we render only on
+    // frames where something visible actually changed.
     if (this._controlsMode === 'user') {
       this.controls.update();
     }
+    if (!this.needsRender) return;
+    this.needsRender = false;
     for (const cb of this.updateCallbacks) cb();
     this.updatePivotMarkerScale();
     this.renderer.render(this.scene, this.camera);
@@ -142,6 +186,7 @@ export class Viewer {
       near: fit.near,
       far: fit.far,
       onStart: () => this.setControlsMode('animating'),
+      onTick: this.boundRequestRender,
       onComplete: () => {
         this.setControlsMode('user');
         this.defaultTarget.copy(fit.center);
@@ -157,12 +202,14 @@ export class Viewer {
     this.controls.target.copy(this.defaultTarget);
     this.controls.update();
     this.removePivotMarker();
+    this.needsRender = true;
   }
 
   clearPivot(): void {
     this._controlsMode = 'user';
     if (this.pickingPivot) this.cancelPivotPicking();
     this.removePivotMarker();
+    this.needsRender = true;
   }
 
   dispose(): void {
@@ -194,6 +241,7 @@ export class Viewer {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.needsRender = true;
   };
 
   // ── Pivot picking ───────────────���────────────────────────
@@ -242,6 +290,7 @@ export class Viewer {
 
     this.showPivotMarker(point);
     this.cancelPivotPicking();
+    this.needsRender = true;
   }
 
   private showPivotMarker(point: THREE.Vector3): void {

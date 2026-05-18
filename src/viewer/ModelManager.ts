@@ -20,9 +20,16 @@ export interface ModelEntry {
 export class ModelManager {
   private scene: THREE.Scene;
   private models = new Map<string, ModelEntry>();
+  /**
+   * Optional render-on-demand hook. Called when models are added /
+   * removed / hidden / shown, since those changes happen without any
+   * camera movement and therefore won't trip OrbitControls' 'change' event.
+   */
+  private requestRender: (() => void) | null;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, requestRender?: () => void) {
     this.scene = scene;
+    this.requestRender = requestRender ?? null;
   }
 
   addModel(parsed: ParsedModel): ModelEntry {
@@ -100,6 +107,7 @@ export class ModelManager {
 
     const entry: ModelEntry = { id: parsed.id, group, visible: true, meshesByExpressId };
     this.models.set(parsed.id, entry);
+    this.requestRender?.();
 
     return entry;
   }
@@ -128,6 +136,7 @@ export class ModelManager {
     });
 
     this.models.delete(id);
+    this.requestRender?.();
     return true;
   }
 
@@ -137,6 +146,7 @@ export class ModelManager {
 
     entry.group.visible = visible;
     entry.visible = visible;
+    this.requestRender?.();
     return true;
   }
 

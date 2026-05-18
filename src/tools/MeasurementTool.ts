@@ -7,6 +7,12 @@ export interface MeasurementToolDeps {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   canvas: HTMLCanvasElement;
+  /**
+   * Optional render-on-demand hook. Called whenever the tool mutates
+   * scene state (hover marker, preview line/label, committed measurement
+   * groups). No-op if omitted.
+   */
+  requestRender?: () => void;
 }
 
 /**
@@ -107,6 +113,7 @@ export class MeasurementTool implements Tool {
     }
     this.measurements = [];
     this.removePendingStart();
+    this.deps.requestRender?.();
   }
 
   dispose(): void {
@@ -178,6 +185,7 @@ export class MeasurementTool implements Tool {
       this.removePreview();
       this.enterPickStart();
     }
+    this.deps.requestRender?.();
   }
 
   private onPointerMove(e: PointerEvent): void {
@@ -197,6 +205,9 @@ export class MeasurementTool implements Tool {
     } else if (this.pickingEnd) {
       this.removePreview();
     }
+    // Hover marker and preview line track the cursor; every move mutates
+    // scene state without touching the camera, so OrbitControls won't fire.
+    this.deps.requestRender?.();
   }
 
   private onContextMenu(e: MouseEvent): void {
@@ -208,6 +219,7 @@ export class MeasurementTool implements Tool {
       this.pickingStart = true;
       this.pickingEnd = false;
       this.startPoint = null;
+      this.deps.requestRender?.();
     }
   }
 
