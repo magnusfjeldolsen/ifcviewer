@@ -13,7 +13,7 @@
  * Schema-version mismatches are treated as cache misses.
  */
 
-import type { ParsedMesh } from '../parser/IfcParser';
+import type { ParsedMesh } from '../parser/types';
 import type { SessionStore } from './SessionStore';
 
 /**

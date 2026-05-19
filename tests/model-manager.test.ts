@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import type { ParsedModel } from '../src/parser/IfcParser';
+import type { ParsedMesh, ParsedModel } from '../src/parser/types';
 
 // Identity 4x4 matrix as flat array
 const IDENTITY = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
@@ -15,7 +15,7 @@ function createMockParsedModel(id: string, meshCount = 2): ParsedModel {
     transform: IDENTITY,
     color: { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
   }));
-  return { id, modelID: 1, meshes };
+  return { id, meshes };
 }
 
 describe('ModelManager', () => {
@@ -139,7 +139,6 @@ describe('ModelManager', () => {
     ): ParsedModel {
       return {
         id,
-        modelID: 1,
         meshes: colors.map((color, i) => ({
           expressID: i + 1,
           vertices: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
@@ -288,7 +287,6 @@ describe('ModelManager', () => {
     const sharedExpressId = 42;
     const parsed: ParsedModel = {
       id: 'shared',
-      modelID: 1,
       meshes: [
         {
           expressID: sharedExpressId,
@@ -313,5 +311,108 @@ describe('ModelManager', () => {
     expect(entry.meshesByExpressId.size).toBe(1);
     const bucket = entry.meshesByExpressId.get(sharedExpressId);
     expect(bucket).toHaveLength(2);
+  });
+
+  describe('streamed loads (beginStream / appendMeshes / endStream)', () => {
+    // The worker delivers geometry in batches; ModelManager consumes them
+    // through this API so the scene fills progressively during a parse.
+    function meshBatch(
+      startId: number,
+      count: number,
+      color = { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+    ): ParsedMesh[] {
+      return Array.from({ length: count }, (_, i) => ({
+        expressID: startId + i,
+        vertices: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint32Array([0, 1, 2]),
+        transform: IDENTITY,
+        color,
+      }));
+    }
+
+    it('beginStream adds an empty group to the scene', () => {
+      const scene = new THREE.Scene();
+      const manager = new ModelManager(scene);
+      const entry = manager.beginStream('s1');
+      expect(entry.id).toBe('s1');
+      expect(entry.group.children).toHaveLength(0);
+      expect(scene.children).toContain(entry.group);
+      expect(manager.getModel('s1')).toBe(entry);
+    });
+
+    it('appendMeshes fills the group and the expressID index across batches', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      manager.beginStream('s1');
+      manager.appendMeshes('s1', meshBatch(1, 2));
+      manager.appendMeshes('s1', meshBatch(3, 3));
+      const entry = manager.endStream('s1')!;
+      expect(entry.group.children).toHaveLength(5);
+      expect(entry.meshesByExpressId.size).toBe(5);
+      for (let id = 1; id <= 5; id++) {
+        expect(entry.meshesByExpressId.get(id)).toHaveLength(1);
+      }
+    });
+
+    it('endStream returns the finished entry; the model stays registered', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      const begun = manager.beginStream('s1');
+      manager.appendMeshes('s1', meshBatch(1, 1));
+      expect(manager.endStream('s1')).toBe(begun);
+      expect(manager.getModel('s1')).toBe(begun);
+    });
+
+    it('endStream on an unknown id returns undefined', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      expect(manager.endStream('nope')).toBeUndefined();
+    });
+
+    it('appendMeshes is a no-op when there is no active stream', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      expect(() => manager.appendMeshes('never-begun', meshBatch(1, 2))).not.toThrow();
+      expect(manager.getModel('never-begun')).toBeUndefined();
+    });
+
+    it('shares one material across batches for meshes of the same color', () => {
+      // The per-model material cache must persist across appendMeshes calls,
+      // not reset per batch — otherwise a streamed load would balloon the
+      // material count vs a one-shot addModel.
+      const manager = new ModelManager(new THREE.Scene());
+      const color = { r: 0.3, g: 0.6, b: 0.9, a: 1 };
+      manager.beginStream('s1');
+      manager.appendMeshes('s1', meshBatch(1, 1, color));
+      manager.appendMeshes('s1', meshBatch(2, 1, color));
+      const entry = manager.endStream('s1')!;
+      const [m0, m1] = entry.group.children as THREE.Mesh[];
+      expect(m0.material).toBe(m1.material);
+    });
+
+    it('appendMeshes after removeModel does not resurrect the model', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      manager.beginStream('s1');
+      manager.appendMeshes('s1', meshBatch(1, 1));
+      manager.removeModel('s1');
+      // A late batch (e.g. from an aborted parse) must not re-add anything.
+      manager.appendMeshes('s1', meshBatch(2, 1));
+      expect(manager.getModel('s1')).toBeUndefined();
+    });
+
+    it('addModel is equivalent to beginStream + appendMeshes + endStream', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      const entry = manager.addModel(createMockParsedModel('m1', 4));
+      expect(entry.group.children).toHaveLength(4);
+      expect(entry.meshesByExpressId.size).toBe(4);
+      // No dangling stream state: a later appendMeshes is a no-op.
+      manager.appendMeshes('m1', meshBatch(99, 1));
+      expect(entry.group.children).toHaveLength(4);
+    });
+
+    it('beginStream replaces an existing model with the same id', () => {
+      const manager = new ModelManager(new THREE.Scene());
+      manager.addModel(createMockParsedModel('m1', 3));
+      const entry = manager.beginStream('m1');
+      expect(entry.group.children).toHaveLength(0);
+      expect(manager.getAllModels()).toHaveLength(1);
+    });
   });
 });

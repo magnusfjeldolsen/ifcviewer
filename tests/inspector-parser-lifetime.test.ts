@@ -1,66 +1,78 @@
 import { describe, it, expect } from 'vitest';
 // Vite raw imports — get the source text as a string without parsing the file.
-import parserSrc from '../src/parser/IfcParser.ts?raw';
+import workerSrc from '../src/parser/ifcWorker.ts?raw';
 import appSrc from '../src/core/App.ts?raw';
-import type { ParsedModel } from '../src/parser/IfcParser';
+import type { ParsedModel } from '../src/parser/types';
 
-describe('IfcParser model lifetime change (Phase 1 enabler)', () => {
-  it('parser source does NOT close the model after parse', () => {
-    // CloseModel is now owned by App. Confirming it isn't called from the
-    // parser means property queries remain valid after parse().
-    expect(parserSrc).not.toMatch(/this\.api\.CloseModel\(/);
+/**
+ * Model-lifetime wiring tests, updated for `web-worker-parse`.
+ *
+ * Before: web-ifc lived on the main thread; `App` owned `CloseModel` and
+ * a `modelIdMap`. Now the IFC worker owns ALL web-ifc state — every open
+ * model, the numeric model ids, and the `CloseModel` call. The main
+ * thread only ever sends/receives the app-UUID `id`.
+ *
+ * These tests guard the new invariants: the worker (not the main thread)
+ * keeps models open and closes them; `App` routes teardown through the
+ * worker; `ParsedModel` no longer carries a numeric `modelID`.
+ */
+
+describe('ifcWorker model lifetime (web-worker-parse)', () => {
+  it('the worker keeps a model open after parse (CloseModel only on disposeModel)', () => {
+    // The worker must NOT close a model inside the parse handler — the
+    // STEP graph has to stay alive for later property queries. CloseModel
+    // appears, but only in the disposeModel handler.
+    expect(workerSrc).toMatch(/CloseModel/);
+    const handleParse = workerSrc.match(/async function handleParse\([\s\S]*?\n\}/);
+    expect(handleParse).not.toBeNull();
+    expect(handleParse![0]).not.toMatch(/CloseModel/);
   });
 
-  it('parser exposes the IfcAPI so App can route the modelID through queries', () => {
-    // The api is declared on the class (public) so the repository can call
-    // `parser.api.CloseModel(...)` and the inspector repository can call
-    // `parser.api.properties.*`. We assert the field exists in source.
-    expect(parserSrc).toMatch(/api:\s*WebIFC\.IfcAPI\s*\|\s*null/);
+  it('the worker owns the app-UUID -> numeric model id map', () => {
+    expect(workerSrc).toMatch(/modelIds\s*=\s*new\s+Map<string,\s*number>/);
   });
 
-  it('ParsedModel type carries modelID alongside id and meshes', () => {
-    // Compile-time check: the shape includes modelID. If this stops type-
-    // checking, the export contract has regressed.
-    const sample: ParsedModel = {
-      id: 'x',
-      modelID: 42,
-      meshes: [],
-    };
-    expect(sample.modelID).toBe(42);
+  it('the worker disposes the whole IfcAPI on a dispose message', () => {
+    const handleDispose = workerSrc.match(/function handleDispose\(\)[\s\S]*?\n\}/);
+    expect(handleDispose).not.toBeNull();
+    expect(handleDispose![0]).toMatch(/\.Dispose\(\)/);
   });
 });
 
-describe('App model lifetime wiring (Phase 1 enabler)', () => {
-  it('declares a modelIdMap keyed by App UUID', () => {
-    expect(appSrc).toMatch(/modelIdMap\s*=\s*new\s+Map<string,\s*number>/);
+describe('App model lifetime wiring (web-worker-parse)', () => {
+  it('no longer keeps a main-thread modelIdMap', () => {
+    // The numeric model id moved into the worker — App must not track it.
+    expect(appSrc).not.toMatch(/modelIdMap/);
   });
 
-  it('populates modelIdMap on parse', () => {
-    expect(appSrc).toMatch(/modelIdMap\.set\(/);
-  });
-
-  it('routes onRemoveModel through closeWebIfcModel', () => {
-    // The remove callback calls closeWebIfcModel before tearing down anything else.
-    const onRemove = appSrc.match(/onRemoveModel:\s*\(id\)\s*=>\s*\{[\s\S]*?\},/);
+  it('routes onRemoveModel through the worker (disposeModel)', () => {
+    const onRemove = appSrc.match(/onRemoveModel:\s*\(id\)\s*=>\s*\{[\s\S]*?\n {6}\},/);
     expect(onRemove).not.toBeNull();
-    expect(onRemove![0]).toMatch(/closeWebIfcModel\(id\)/);
+    expect(onRemove![0]).toMatch(/disposeModel\(id\)/);
   });
 
-  it('resetView closes every model before re-parsing', () => {
-    const reset = appSrc.match(/private async resetView\(\)[\s\S]*?\n\s{2}\}/);
+  it('resetView closes every model in the worker before re-parsing', () => {
+    const reset = appSrc.match(/private async resetView\(\)[\s\S]*?\n {2}\}/);
     expect(reset).not.toBeNull();
-    expect(reset![0]).toMatch(/closeWebIfcModel\(id\)/);
+    expect(reset![0]).toMatch(/disposeModel\(id\)/);
   });
 
-  it('dispose closes any still-open models before parser.dispose()', () => {
-    const dispose = appSrc.match(/dispose\(\): void \{[\s\S]*?\n\s{2}\}/);
+  it('dispose tears down the worker', () => {
+    const dispose = appSrc.match(/dispose\(\): void \{[\s\S]*?\n {2}\}/);
     expect(dispose).not.toBeNull();
-    expect(dispose![0]).toMatch(/closeWebIfcModel\(id\)/);
-    // closeWebIfcModel must come BEFORE parser.dispose(), otherwise the
-    // WASM heap is gone before we get a chance to clean up.
-    const closeIdx = dispose![0].indexOf('closeWebIfcModel');
-    const parserDisposeIdx = dispose![0].indexOf('this.parser.dispose()');
-    expect(closeIdx).toBeGreaterThan(-1);
-    expect(parserDisposeIdx).toBeGreaterThan(closeIdx);
+    expect(dispose![0]).toMatch(/this\.parser\.dispose\(\)/);
+  });
+});
+
+describe('ParsedModel shape (web-worker-parse)', () => {
+  it('carries id and meshes — the numeric modelID is gone (worker-owned)', () => {
+    // Compile-time check: the shape is { id, meshes }. A numeric modelID
+    // would be a type error here, since the worker owns numeric ids now.
+    const sample: ParsedModel = {
+      id: 'x',
+      meshes: [],
+    };
+    expect(sample.id).toBe('x');
+    expect(sample.meshes).toEqual([]);
   });
 });

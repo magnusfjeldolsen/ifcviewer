@@ -9,7 +9,7 @@ import {
   type CachedGeometryRecord,
   type CachedMesh,
 } from '../src/services/GeometryCache';
-import type { ParsedMesh } from '../src/parser/IfcParser';
+import type { ParsedMesh } from '../src/parser/types';
 import type { SessionStore, StoredCachedGeometry, CachedGeometryMeta } from '../src/services/SessionStore';
 
 function makeMesh(seed: number, vertexCount = 3): ParsedMesh {
