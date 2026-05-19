@@ -581,12 +581,15 @@ export class App {
       // progressively instead of after one long frozen wait.
       this.modelManager.beginStream(id);
       streamId = id;
-      let meshCount = 0;
+      let totalElements = 0;
       let framed = false;
-      const parsed = await this.parser.parseStreaming(file.buffer, id, (batch) => {
+      const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
         this.modelManager.appendMeshes(id, batch);
-        meshCount += batch.length;
-        this.setStatus(`Loading ${file.name}… (${meshCount} objects)`);
+        totalElements = progress.total;
+        this.setStatus(
+          `Loading ${file.name}… ` +
+          `(${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()} elements)`,
+        );
         // Fit once, on the first batch, so the camera frames the model
         // early and the progressive fill is actually visible. We do NOT
         // re-fit at the end: the load is interactive now, and a late fit
@@ -634,7 +637,7 @@ export class App {
         void this.geometryCache.save(hash, parsed.meshes);
       }
 
-      this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
+      this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model

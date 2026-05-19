@@ -17,6 +17,20 @@ export interface ParsedModel {
 }
 
 /**
+ * Progress of a streamed parse, reported to `parseStreaming`'s `onBatch`.
+ * Counted in products (≈ IFC elements with geometry), not meshes — one
+ * product can yield several geometry meshes. `total` is known up front,
+ * after the ID-collection pass, so the count is determinate from the
+ * first batch.
+ */
+export interface StreamProgress {
+  /** Products whose geometry has been delivered so far. */
+  loaded: number;
+  /** Total products with geometry in the model. */
+  total: number;
+}
+
+/**
  * Product-ID batch size for `parseStreaming`. Each batch is one synchronous
  * `StreamMeshes` call and one `onBatch` callback. Kept small so progress is
  * reported at a fine granularity; the actual event-loop yields are
@@ -79,11 +93,14 @@ export class IfcParser {
    * Returns the full `ParsedModel` at the end, same as `parse`, so callers
    * that also need the complete mesh list (e.g. the geometry cache) work
    * unchanged.
+   *
+   * `onBatch` receives each batch of meshes plus a `StreamProgress` with a
+   * determinate `loaded / total` product count.
    */
   async parseStreaming(
     buffer: ArrayBuffer,
     id: string,
-    onBatch: (meshes: ParsedMesh[]) => void,
+    onBatch: (meshes: ParsedMesh[], progress: StreamProgress) => void,
   ): Promise<ParsedModel> {
     if (!this.api || !this.initialized) {
       throw new Error('IfcParser not initialized. Call init() first.');
@@ -104,6 +121,8 @@ export class IfcParser {
     // paying a yield + re-render on every single batch.
     const all: ParsedMesh[] = [];
     const yielder = new FrameYielder();
+    const total = productIds.length;
+    let loaded = 0;
     for (let i = 0; i < productIds.length; i += STREAM_BATCH_SIZE) {
       const batchIds = productIds.slice(i, i + STREAM_BATCH_SIZE);
       const batch: ParsedMesh[] = [];
@@ -111,7 +130,10 @@ export class IfcParser {
         this.extractFlatMesh(flatMesh, modelID, batch);
       });
       for (const m of batch) all.push(m);
-      if (batch.length > 0) onBatch(batch);
+      // Every productId came from StreamAllMeshes, so each has geometry —
+      // one batch processes exactly batchIds.length products.
+      loaded += batchIds.length;
+      if (batch.length > 0) onBatch(batch, { loaded, total });
       await yielder.yieldIfNeeded();
     }
 
