@@ -1,177 +1,288 @@
-# Hand-off — `web-worker-parse`: move IFC parsing off the main thread
+# Plan — `web-worker-parse`: move IFC parsing off the main thread
+
+Implementation-ready plan. Pick up as its own PR, branched off `main`.
+Estimated effort **M–L** — the geometry side is small; the property
+inspector side is the bulk.
 
 ## TL;DR
 
-Run web-ifc parsing in a **Web Worker**. The main thread stays at 60 fps for
-the whole load; the worker streams geometry batches over and the main thread
-renders them. This removes the medium-model slowdown introduced by
-`progressive-scene-fill` (PR #30) **and** the frozen UI on huge models — in
-one move.
-
-Picked up after PR #30 merges. Intended as its own PR. Estimated effort:
-**M–L** — the geometry side is small (it reuses PR #30's `ModelManager`
-stream API); the property-inspector side is the bulk of the work.
+Run web-ifc in a **Web Worker**. The worker owns every web-ifc model and
+runs all parsing and property queries; the main thread renders. The main
+thread never blocks — smooth 60 fps for the whole load — and the parse is
+**single-pass** (faster than `progressive-scene-fill`'s reverted
+main-thread streaming, comparable to the old blocking `parse()`).
 
 ## Why
 
-PR #30 made big-model loads progressive by streaming on the **main thread**,
-with a time-boxed yield (`FrameYielder`). That trades total speed for
-responsiveness:
+The reverted `progressive-scene-fill` streamed on the main thread. To
+yield, it had to walk the model **twice** (one `StreamAllMeshes` pass for
+the product IDs, one `StreamMeshes` pass for geometry) and pay per-batch
+scheduler overhead — which made medium models (~48 MB `SBM_RIE.ifc`) load
+slower than the old blocking parse. A worker removes the trade entirely:
+it is not the UI thread, so it never yields — it does ONE `StreamAllMeshes`
+pass, extracts geometry inside the callback, and `postMessage`s batches as
+it goes.
 
-- It walks the model **twice** — one `StreamAllMeshes` pass for the product
-  IDs, one batched `StreamMeshes` pass for geometry — because a main-thread
-  loop cannot yield in the middle of a monolithic `StreamAllMeshes` call, and
-  streamed geometry is only valid inside a stream callback.
-- It pays per-batch scheduler / yield overhead.
+## What it fixes — and what it doesn't
 
-Net: huge models (200 MB+) win big (a frozen minute becomes an interactive
-progressive build); medium models (~48 MB, measured on `SBM_RIE.ifc`) load
-**noticeably slower** than the old blocking parse. A Web Worker removes the
-trade-off entirely.
+**Fixes:** main thread never blocks; single-pass parse; geometry crosses
+zero-copy via Transferable `ArrayBuffer`s.
 
-## What a worker fixes — and what it doesn't
+**Does NOT fix:** raw parse CPU time — still single-threaded web-ifc, one
+core. A worker *relocates* the work, it does not parallelize it. True
+multi-core parsing is web-ifc's internal WASM pthreads (`mt-wasm-coop-coep`,
+**blocked**, unrelated).
 
-**Fixes:**
-- **Main thread never blocks** → smooth 60 fps UI for the entire load.
-- **Single-pass parse.** The worker is not the UI thread, so it never needs
-  to yield. It runs ONE `StreamAllMeshes`, extracts geometry inside the
-  callback, and `postMessage`s batches as it goes. No second pass, no yield
-  overhead → faster wall-clock than PR #30's streaming, comparable to the old
-  blocking `parse()`.
-- Geometry crosses the boundary **zero-copy** via Transferable `ArrayBuffer`s.
+## Critical clarification — this is NOT `mt-wasm`
 
-**Does NOT fix:**
-- **Raw parse CPU time.** Still single-threaded web-ifc, one core. A worker
-  relocates the work, it does not parallelize it. True multi-core parsing is
-  web-ifc's internal WASM pthreads — the `mt-wasm-coop-coep` card, which is
-  **blocked** and unrelated to this.
+A plain `Web Worker` needs **no COOP/COEP headers, no service worker, no
+`crossOriginIsolated`**. That is completely separate from the failed
+`mt-wasm-coop-coep` (web-ifc's *internal* pthreads, which do need COI). A
+regular worker wrapping single-threaded web-ifc just works, everywhere.
 
-## Critical clarifications
+Rendering stays on the main thread (WebGL / Three.js are main-thread-bound).
+The split is: **worker = parse + property queries**, **main = build
+`THREE.Mesh` + render + UI**.
 
-- **No cross-origin isolation needed.** A plain `Web Worker` requires NO
-  COOP/COEP headers, no service worker, no `crossOriginIsolated`. This is
-  completely separate from the failed `mt-wasm-coop-coep` (that was web-ifc's
-  *internal* WASM pthreads, which do need COI). A regular worker wrapping
-  single-threaded web-ifc just works, everywhere.
-- **Rendering stays on the main thread.** WebGL / Three.js are
-  main-thread-bound. The split is: **worker = parse**, **main = build
-  `THREE.Mesh` + render**. (OffscreenCanvas could move rendering too, but
-  that is a much larger, separate effort — out of scope here.)
+## De-risk — web-ifc in a worker is VERIFIED (source-level)
+
+Checked `node_modules/web-ifc/web-ifc-api.js`:
+- It defines `ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope` and
+  branches on it — the browser build is **worker-aware by design**.
+- The only bare `document`/`window` uses are: `window.prompt` in Emscripten
+  stdin paths (never hit by parsing), and `document.currentScript` in the
+  **MT** build path (`require_web_ifc_mt`) — never reached by a plain
+  worker, where `self.crossOriginIsolated` is `false` so `Init()`
+  auto-selects the single-threaded build.
+- `package.json` `module: ./web-ifc-api.js` — Vite bundles the browser ESM
+  build into the worker chunk.
+
+Remaining unknown is small and is **Step 1** below: confirm Vite bundles
+the module worker and `IfcAPI.Init()` + the `.wasm` fetch succeed from
+worker scope. Low risk — standard Vite worker support; the `.wasm` fetch is
+a same-origin HTTP request.
 
 ## Architecture
 
 ```
-main thread                          worker thread
------------                          -------------
-App.handleFile
-  post {parse, id, buffer}   ───────► OpenModel(buffer)
-                                      StreamAllMeshes(cb): extract geometry
-  ModelManager.appendMeshes  ◄──────    post {batch, meshes, progress}   ×N
-  (renders progressively)
-                             ◄─────── post {parsed, id}
+main thread                              worker thread (ifcWorker.ts)
+-----------                              ----------------------------
+WorkerIfcParser.parseStreaming(buf,id)
+  post {type:parse, id, buffer}  ───────► OpenModel → models.set(id, numId)
+                                          StreamAllMeshes(cb):
+                                            extract geometry
+  ModelManager.appendMeshes      ◄──────     post {type:batch, id, meshes,
+  (renders progressively)                          progress}              ×N
+                                 ◄──────── post {type:parsed, id}
 
-  user clicks an element
-  repo.get(id, expressId)
-  post {getProps, reqId}     ───────► properties.* + normalize
-  InspectorPanel             ◄─────── post {props, reqId, ElementProperties}
+WorkerPropertyRepository.get(id,eid)
+  memo hit? → return
+  post {type:getProps, reqId,...} ───────► fetchElementProperties(...)
+  InspectorPanel ◄──────────────────────── post {type:props, reqId,
+                                                  ElementProperties}
 ```
 
-The main thread **reuses PR #30's `ModelManager.beginStream / appendMeshes /
-endStream` unchanged** — only the *source* of the batches changes (worker
-messages instead of `parseStreaming`'s callback). That API was built
-forward-compatible on purpose.
+The main thread **reuses `ModelManager.beginStream / appendMeshes /
+endStream` and the `StreamProgress` type unchanged** — only the *source*
+of the batches changes (worker messages instead of a callback).
 
-## The hard part — the property inspector
+## Design decisions (review these before implementing)
 
-Today `WebIfcPropertyRepository` holds a web-ifc `api` reference and queries
-it on the main thread. If the parsed model lives in the **worker**, the main
-thread has no `api`.
+1. **The worker is the single owner of all web-ifc state.** It holds the
+   `IfcAPI` instance, every open model, and its own `Map<appId, numericId>`.
+   The main thread never sees a numeric web-ifc modelID — it uses the
+   app-UUID `id` in every message. *(Alternative — keep the model on the
+   main thread for properties, worker only for geometry — does not unfreeze
+   the property path; rejected.)*
 
-**Recommended approach:** the worker owns the web-ifc model for its whole
-lifetime, and property queries become messages.
+2. **The worker serializes all requests on an internal promise-chain
+   queue** (mirrors today's `App.parseQueue`). web-ifc is not thread-safe;
+   one request completes fully before the next starts. This **replaces both
+   `App.parseQueue` and `WebIfcPropertyRepository`'s `enqueue`** — parses
+   and property queries serialize naturally in the worker.
 
-- The worker runs both web-ifc AND the existing normalization
-  (`propertyNormalizer`, `unitTable`, `flatRows`) — those modules are
-  pure/portable. It posts back fully-normalized `ElementProperties` objects
-  (structured-cloneable), so normalization is also off the main thread.
-- The main thread gets a **new `ElementPropertyRepository` implementation**
-  that is a thin message proxy: `get(id, expressId)` posts `{getProps,
-  reqId}` and awaits the matching reply. `ElementPropertyRepository.get()` is
-  already `async` (returns a `Promise`), so this fits with **no interface
-  change** — only a new implementation alongside `WebIfcPropertyRepository`.
+3. **`App.parseQueue` and `App.modelIdMap` are deleted.** Serialization
+   moves into the worker (decision 2); the numeric modelID lives in the
+   worker (decision 1). `App.closeWebIfcModel` becomes a `closeModel`
+   message; the `getModelIdMap()` test hook is removed.
 
-This is the bulk of the effort. The geometry path is small; the inspector
-data-path is the real work.
+4. **The property fetch+normalize core is extracted to a shared,
+   worker-importable module** — see next section. `WebIfcPropertyRepository`
+   is deleted; `App` uses the new `WorkerPropertyRepository`.
 
-## Message protocol (sketch)
+5. **Memoization stays on the main thread** (in `WorkerPropertyRepository`)
+   so repeated clicks never round-trip. The per-model **unit-table cache
+   stays in the worker** (it is part of the fetch core).
 
-- **Main → Worker:** `parse {id, buffer}` · `getProps {reqId, id, expressId}`
-  · `closeModel {id}`
-- **Worker → Main:** `batch {id, meshes, progress}` · `parsed {id}` ·
-  `props {reqId, ElementProperties}` · `error {id|reqId, message}`
+## The property path (the hard part)
 
-Transfer the `.buffer` of every typed array — the `.ifc` bytes in `parse`,
-the vertices/normals/indices in `batch` — so they cross zero-copy. **After
-transferring a buffer the sender must not touch it** (it is neutered).
+Today `WebIfcPropertyRepository.fetch` does: `getItemProperties` +
+`fetchPropertyGroups` (the destructive-`getPropertySets` two-call merge) +
+`getMaterialsProperties` + `getUnitTable`, then normalizes via
+`propertyNormalizer` / `unitTable` / `flatRows`. All of that must run where
+web-ifc lives — the worker.
+
+**Extract the core.** Move `fetch`, `fetchPropertyGroups`,
+`buildPsetAndQtoGroups`, and the unit-table logic out of
+`WebIfcPropertyRepository` into a pure-ish module, e.g.:
+
+```ts
+// src/inspector/repository/fetchElementProperties.ts
+export async function fetchElementProperties(
+  api: PropertyApi,
+  webIfcId: number,
+  modelId: string,
+  expressId: number,
+  unitTable: UnitTable,
+): Promise<ElementProperties>
+```
+
+- The **worker** imports this + `propertyNormalizer` / `unitTable` /
+  `flatRows` / `format` (all pure, portable) and calls it on a `getProps`
+  message. It posts back the `ElementProperties` — a plain
+  object/array/primitive tree, so it is structured-cloneable.
+- `WebIfcPropertyRepository` is **deleted** (App's only consumer moves to
+  `WorkerPropertyRepository`). The `PropertyApi` / unit-table types stay
+  (the extracted core and the worker use them).
+
+**`WorkerPropertyRepository implements ElementPropertyRepository`** (new,
+main thread):
+- `get(id, expressId)` — check the main-thread memo
+  (`Map<modelId, Map<expressId, Promise<ElementProperties>>>`); on miss,
+  post `getProps {reqId, id, expressId}`, await the matching `props` reply,
+  store the promise in the memo.
+- `disposeModel(id)` — clear the main-thread memo for `id` **and** post
+  `disposeModel {id}` so the worker frees its unit-table cache.
+- `cancel` — no-op (unchanged from today).
+- `enumerateExpressIds` / `describeSchema` — still throw "not implemented"
+  (unchanged).
+- No `enqueue`, no `resolveModelId` — the worker serializes and owns the
+  numeric IDs.
+
+## Message protocol (precise)
+
+Every request carries a correlation key — the model `id` for model-scoped
+ops, or a monotonic `reqId` for property queries. **Every failure path must
+post an `error` reply**, or a main-thread `await` hangs forever.
+
+```ts
+// main → worker
+type ToWorker =
+  | { type: 'parse';      id: string; buffer: ArrayBuffer }   // buffer transferred
+  | { type: 'openForProps'; id: string; buffer: ArrayBuffer } // buffer transferred; cache-restore path
+  | { type: 'getProps';   reqId: number; id: string; expressId: number }
+  | { type: 'disposeModel'; id: string }                      // CloseModel + free caches
+  | { type: 'dispose' };                                      // Dispose all; precedes worker.terminate()
+
+// worker → main
+type FromWorker =
+  | { type: 'batch';  id: string; meshes: CachedMesh[]; progress: StreamProgress } // mesh buffers transferred
+  | { type: 'parsed'; id: string }                            // also resolves openForProps
+  | { type: 'props';  reqId: number; props: ElementProperties }
+  | { type: 'error';  id?: string; reqId?: number; message: string };
+```
+
+- Transfer the `.buffer` of every typed array — the `.ifc` bytes in
+  `parse`/`openForProps`, the vertices/normals/indices in `batch`. **After
+  transferring a buffer the sender must not touch it** (it is neutered).
+- `meshes` in `batch` carries the geometry as transfer-friendly typed
+  arrays (the existing `ParsedMesh` shape works; reuse it).
+
+## App-level changes
+
+- **`handleFile`** — `parser.parse` → `workerParser.parseStreaming(buffer,
+  id, onBatch)`. `onBatch` feeds `ModelManager.appendMeshes` (as
+  `progressive-scene-fill` did). `parseStreaming` still resolves with the
+  full `ParsedModel` (accumulate the batches) so `geometryCache.save(hash,
+  parsed.meshes)` is unchanged. Drop the `modelIdMap.set` line.
+- **`restoreSession`, cache hit** — `addModel(cachedMeshes)` stays instant;
+  then post `openForProps {id, buffer}`. The old `scheduleBackgroundReparse`
+  + `modelID: -1` placeholder + `disposeModel` dance is **deleted** — a
+  later `getProps` for that `id` simply queues behind `openForProps` in the
+  worker and resolves once the model is open. The "properties unavailable"
+  gap is handled by message ordering, for free.
+- **`restoreSession`, cache miss / v1 fallback** — `parser.parse` →
+  `workerParser.parseStreaming`.
+- **`resetView`** — replace each `closeWebIfcModel` + `parser.parse` with a
+  `disposeModel` message + `parseStreaming`. Keep the existing
+  teardown/rebuild structure.
+- **`removeModel`** — `closeWebIfcModel(id)` → `disposeModel` message;
+  `propertyRepository.disposeModel(id)` already posts that message, so call
+  one or the other (not both).
+- **`dispose`** — post `dispose`, then `worker.terminate()`.
 
 ## Files
 
-- **NEW `src/parser/ifcWorker.ts`** — worker entry. Holds web-ifc, the open
-  models, runs parse + property queries. Vite bundles it via
-  `new Worker(new URL('./ifcWorker.ts', import.meta.url), { type: 'module' })`.
-- **NEW `src/parser/WorkerIfcParser.ts`** — main-thread proxy: owns the
-  `Worker`, exposes a `parseStreaming`-shaped API that turns worker `batch`
-  messages into the same `onBatch(meshes, progress)` callback `App` already
-  uses.
-- **NEW `src/inspector/repository/WorkerPropertyRepository.ts`** — an
-  `ElementPropertyRepository` implementation backed by worker messages.
-- `src/core/App.ts` — construct the worker parser + worker-backed repository;
-  model lifecycle (close / reset / dispose) becomes worker messages.
-- `src/parser/IfcParser.ts` — the parse + `openForProperties` logic moves
-  into the worker; the normalization modules are imported by the worker.
+| File | Change |
+|------|--------|
+| `src/parser/ifcWorker.ts` | NEW — worker entry. Holds `IfcAPI` + open models + the serial queue. Handles `parse` / `openForProps` / `getProps` / `disposeModel` / `dispose`. |
+| `src/parser/WorkerIfcParser.ts` | NEW — main-thread proxy. Owns the `Worker`; `parseStreaming(buffer, id, onBatch)` returning `Promise<ParsedModel>`. |
+| `src/parser/ifcMessages.ts` | NEW — the `ToWorker` / `FromWorker` message types, shared by worker + proxies. |
+| `src/parser/types.ts` | NEW — move `ParsedMesh` / `ParsedModel` / `StreamProgress` here (shared by worker + main; `IfcParser.ts` is deleted). |
+| `src/inspector/repository/fetchElementProperties.ts` | NEW — extracted property fetch+normalize core. |
+| `src/inspector/repository/WorkerPropertyRepository.ts` | NEW — `ElementPropertyRepository` impl backed by worker messages. |
+| `src/parser/IfcParser.ts` | DELETE — parse logic → `ifcWorker.ts`; types → `types.ts`. |
+| `src/inspector/repository/WebIfcPropertyRepository.ts` | DELETE — core → `fetchElementProperties.ts`; App → `WorkerPropertyRepository`. |
+| `src/core/App.ts` | Use `WorkerIfcParser` + `WorkerPropertyRepository`; delete `parseQueue`, `modelIdMap`, `closeWebIfcModel`, `scheduleBackgroundReparse`, `getModelIdMap`. |
 
-## Step-by-step
+`propertyNormalizer` / `unitTable` / `flatRows` / `format` are unchanged
+(pure) and imported by the worker. `flatRows.displayStringForValue` is also
+imported by `InspectorPanel` — fine, shared pure code bundled into both.
 
-1. Branch off main (after PR #30 merges).
-2. Stand up a trivial worker: `parse` message → `OpenModel` → post `parsed`.
-   Wire `App.handleFile` to it, geometry via `appendMeshes`. Get a model on
-   screen sourced from the worker.
-3. Stream batches from the worker (`StreamAllMeshes`, extract, post with
-   transferables). Confirm progressive fill and single-pass behaviour.
-4. Move the property path: worker runs the normalization;
-   `WorkerPropertyRepository` proxies `get()`. Wire the inspector.
-5. Model lifecycle messages (close / reset / dispose).
-6. Geometry cache: the main thread accumulates the worker's batches → still
-   writes the full `ParsedMesh[]` to the IDB cache. Cache-restore hydrates
-   from cache, then asks the worker to open the model for properties only.
-7. Tests + manual smoke (RIB, SBM_RIE, SMB_ARK).
+## Step-by-step (test-first)
+
+1. **Step 1 — integration spike.** Vite-bundle a trivial module worker
+   that imports `web-ifc`, calls `Init()`, `OpenModel` on `RIB.ifc`, posts
+   back the mesh count. Confirm it runs in the browser and the `.wasm`
+   loads from worker scope. **Stop and reassess if this fails.**
+2. Message types (`ifcMessages.ts`) + shared `types.ts`.
+3. Geometry path: `ifcWorker.ts` `parse` handler (single-pass
+   `StreamAllMeshes`, post `batch`es) + `WorkerIfcParser`. Wire
+   `App.handleFile`. Model on screen, sourced from the worker.
+4. Extract `fetchElementProperties.ts`; re-point the RIB property
+   regression test at it (verify the two-call-merge still holds).
+5. Property path: worker `getProps` / `openForProps` / `disposeModel`
+   handlers + the serial queue + `WorkerPropertyRepository`. Wire the
+   inspector.
+6. App lifecycle: `restoreSession` (both paths), `resetView`, `removeModel`,
+   `dispose`. Delete `IfcParser` / `WebIfcPropertyRepository` /
+   `parseQueue` / `modelIdMap`.
+7. Full suite + lint + typecheck; manual smoke (RIB, SBM_RIE, SMB_ARK).
 
 ## Testing
 
-- Worker message protocol — unit-test the proxy with a mock `Worker`
-  (`postMessage` / `onmessage` stub).
-- The worker entry itself — integration-tested via the existing real-IFC
-  smoke against `RIB.ifc`.
-- `WorkerPropertyRepository` — mock-Worker unit tests; the RIB property
-  regression test moves to exercise the worker path.
+- `WorkerIfcParser` / `WorkerPropertyRepository` — unit-test with a mock
+  `Worker` (`postMessage` / `onmessage` stub). Cover: request/reply
+  correlation by `reqId`; **error replies reject the right promise**; memo
+  hits skip the round-trip.
+- `fetchElementProperties` — test directly with a real `IfcAPI` against
+  `RIB.ifc`; this is where the existing RIB property regression test moves
+  (it still guards the destructive-`getPropertySets` two-call merge).
+- `buildFlatRows` test — unchanged (pure).
+- `ifcWorker.ts` itself — integration-smoke via the manual test; a real
+  worker is awkward to unit-test.
+- Audit `inspector-parser-lifetime.test.ts` and `inspector-repository.test.ts`
+  — re-point or remove the parts that construct `WebIfcPropertyRepository`
+  / `IfcParser` directly.
 
 ## Risks
 
-- **The property-path refactor is the real cost** — it touches the
-  inspector's whole data path. Budget most of the effort here.
-- web-ifc WASM init inside the worker — `SetWasmPath` must resolve from
-  worker scope (same-origin fetch, no COI).
-- Transferable ownership — a transferred buffer is neutered; never reuse one
-  after `postMessage`.
-- All model state lives in the worker — lifecycle (close on remove / reset /
-  dispose) is now async messaging; get the teardown ordering right.
-- Error propagation across the boundary — every worker failure mode needs a
-  message back, or a main-thread `await` hangs forever.
+- **Property-path refactor is the real cost** — budget most of the effort
+  on Steps 4–6.
+- Error propagation across the boundary — every worker failure mode must
+  post `error`, or a main-thread `await` hangs. Enforce in code review.
+- Transferable ownership — a transferred buffer is neutered; never reuse
+  one after `postMessage`.
+- Worker-side serialization — do not let an `await` inside a handler
+  interleave the next message; use the explicit promise-chain queue.
+- `worker.terminate()` ordering on `dispose` — drain or abandon in-flight
+  requests cleanly.
 
-## What PR #30 already did for this
+## What `progressive-scene-fill` (closed PR #30) left ready
 
-- `ModelManager.beginStream / appendMeshes / endStream` — the worker version
-  consumes batches through this **unchanged**.
+- `ModelManager.beginStream / appendMeshes / endStream` — the worker
+  version consumes batches through this **unchanged**.
 - `StreamProgress` — the worker posts the same shape.
-- `FrameYielder` — no longer needed for parsing (the worker does not yield),
-  but harmless and reusable for other main-thread loops.
+- The closed `feature/progressive-scene-fill` branch has a working
+  reference for the geometry-extraction loop and the `App.handleFile`
+  streaming wiring.
