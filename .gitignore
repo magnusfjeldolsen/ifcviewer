@@ -33,3 +33,6 @@ coverage/
 
 # Large local IFC fixtures used by regression tests. Tests skip when absent.
 assets/ifcs/*.ifc
+
+# Claude Code agent-local memory — machine-local scratch, not project content.
+.claude/agent-memory/
