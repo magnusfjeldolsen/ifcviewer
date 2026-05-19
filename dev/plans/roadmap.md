@@ -51,6 +51,14 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Risks:** Phase-4 marquee bounding-box use was made lazy in PR #21, so no problem there. Pivot/raycast operations during partial load should still work — meshes that aren't yet in the scene simply won't be hit.
 - **Source:** Performance research section 3.3.
 
+### `web-worker-parse` — Move IFC parsing into a Web Worker
+- **Status:** queued
+- **Effort:** M–L
+- **Why:** `progressive-scene-fill` (PR #30) streams on the main thread, which costs a second model pass + per-batch yield overhead — medium models (~48 MB) load slower than the old blocking parse. A Web Worker removes the trade: single-pass parse, 60 fps UI throughout.
+- **What:** web-ifc runs in a worker; it streams geometry batches (zero-copy transferables) to the main thread, which renders via the existing `ModelManager` stream API. Property queries route to the worker via messages. **No cross-origin isolation needed** — a plain Worker is unrelated to the blocked `mt-wasm-coop-coep`.
+- **Risks:** the inspector's property data-path must be refactored to message the worker — that is the bulk of the effort.
+- **Source:** `dev/plans/handoff-web-worker-parse.md` (full implementation plan).
+
 ### `bulk-property-fetch-and-cap` — Unblock the inspector soft cap
 - **Status:** queued
 - **Effort:** M
