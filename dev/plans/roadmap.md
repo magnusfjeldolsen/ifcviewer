@@ -38,20 +38,6 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Original design (kept for when this unblocks):** dev + preview `vite.config.ts` headers `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: credentialless`; a service worker for GitHub Pages prod (Pages can't set headers) that re-broadcasts them; `credentialless` (not `require-corp`) keeps cross-origin assets like the Google Analytics script working.
 - **Source:** Performance research section 3.2; blocker finding 2026-05-18.
 
-### `progressive-scene-fill` — Meshes appear during StreamAllMeshes
-- **Status:** reverted — built in PR #30, then reverted; superseded by `web-worker-parse`
-- **Effort:** M
-- **Why:** Today `IfcParser.parse` accumulates `ParsedMesh[]` and only after the full stream completes does `ModelManager.addModel` create THREE.Meshes and call `scene.add(group)`. User sees a frozen UI for ~60 s, then the model appears all at once.
-- **What:**
-  - Refactor `IfcParser.parse` to invoke a `onMesh(parsedMesh)` callback synchronously during the stream.
-  - New `ModelManager.beginStream(id) / appendMesh(id, parsed) / endStream(id)` API.
-  - `App.handleFile` adds the group to scene at `beginStream`; meshes pop in during `appendMesh`.
-  - Defer `viewer.fitToBox` until `endStream` (otherwise the camera zooms to the first dozen meshes then jerks back).
-  - Yield to the event loop between batches via `await new Promise(r => setTimeout(r, 0))` so frame ticks (and the progress overlay from `loading-overlay-and-percentage`) update.
-- **Risks:** Phase-4 marquee bounding-box use was made lazy in PR #21, so no problem there. Pivot/raycast operations during partial load should still work — meshes that aren't yet in the scene simply won't be hit.
-- **Outcome:** Implemented in PR #30 as main-thread streaming. It worked for huge models, but main-thread streaming needs a two-pass parse (one `StreamAllMeshes` pass for product IDs, one `StreamMeshes` pass for geometry), which made medium models (~48 MB) load slower than the old blocking parse. Reverted; PR #30 closed. The proper fix is `web-worker-parse` below — single-pass, off the main thread.
-- **Source:** Performance research section 3.3.
-
 ### `web-worker-parse` — Move IFC parsing into a Web Worker
 - **Status:** queued
 - **Effort:** M–L
@@ -102,22 +88,6 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Risks:** raycasting changes — Three.js's InstancedMesh raycast returns `instanceId` not Mesh; current `raycast.ts` walks `userData.expressID`. Refactor needed.
 - **Source:** Performance research section 3.7.
 
-### `cached-parsed-geometry-idb` — Cache parsed geometry in IndexedDB
-- **Status:** queued
-- **Effort:** M
-- **Why:** Today session restore re-parses the full .ifc (~60s for 191 MB). Caching the parsed buffers keyed by file hash skips parsing entirely on reload.
-- **What:** New `geometry-cache` IDB object store. Hydrate scene from cache on restore; background re-parse fills web-ifc modelID for property queries (user-confirmed: properties have a 2–5s availability gap after restore until reparse completes). 500 MB cap with simple eviction.
-- **Risks:** storage size (cap mitigates), schema versioning (constant in code), property availability gap.
-- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
-
-### `render-on-demand` — Skip frames when nothing changed
-- **Status:** queued
-- **Effort:** M
-- **Why:** `Viewer.animate` runs at 60 fps unconditionally even when idle. Battery / heat / fan noise on laptops, sustained GPU load.
-- **What:** `Viewer.requestRender()` flag-based approach. Audit every state-mutation site to add the call.
-- **Risks:** stale-frame regressions if any mutation site is missed. Bug surface is broad — extensive manual smoke required.
-- **Source:** `dev/plans/phase-perf-low-hanging-fruit.md`.
-
 ### `frustum-cull-audit` — Verify Three.js culling actually runs
 - **Status:** queued (bundle with `render-perf-orbit-lag`)
 - **Effort:** S
@@ -153,3 +123,12 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 
 ### `share-materials-by-color` — Material cache in ModelManager (PR #26, merged 2026-05-13)
 - **Outcome:** `ModelManager.addModel` now builds a per-call `Map<string, MeshPhongMaterial>` keyed by `${r},${g},${b},${a}` (each component `toFixed(6)`) and reuses the cached instance when the color matches. The cache is intentionally local to one `addModel` call — different models keep their own material instances, which keeps `removeModel`'s dispose loop safe (no cross-model material references). `removeModel` now dedupes via a `Set<Material>` before disposing so a 17k-mesh model with ~30 distinct colors calls `dispose()` 30 times, not 17k (idempotent in three, but the honest accounting matters for tests and future debugging). **SelectionManager synergy held automatically:** its `highlightVariants` is a `WeakMap<Material, Material>` keyed by the original reference, so shared originals → shared variants with zero changes to selection code. 5 new tests in `tests/model-manager.test.ts` (`material sharing by color` describe block) cover: same-color sharing, alpha-distinguishes-material, no cross-`addModel`-call sharing, dedup'd dispose count, and the `meshesByExpressId` index surviving shared materials. 382 → 387 tests.
+
+### `cached-parsed-geometry-idb` — Cache parsed geometry in IndexedDB (PR #27, merged 2026-05-15)
+- **Outcome:** New `src/services/GeometryCache.ts` — pure `serializeMeshes` / `deserializeMeshes` (ParsedMesh ↔ ArrayBuffer), SHA-256 hashing, approximate-LRU eviction at a 500 MB cap. `SessionStore` bumped to IDB v3 with a `geometry-cache` object store. `App.handleFile` hashes the buffer in parallel with the parse and fire-and-forget writes the parsed geometry; `restoreSession` checks the cache first — on a hit it hydrates the scene instantly from cached typed-array buffers and schedules a background re-parse (`IfcParser.openForProperties`, geometry-free) to refill web-ifc's STEP graph for the inspector. Surfaced a latent bug: `WebIfcPropertyRepository.get` ran `fetch`'s synchronous prefix eagerly — fixed by deferring it into the enqueue thunk so a property query during the restore gap waits for the background re-parse. New `tests/geometry-cache.test.ts`; 387 → 397 tests.
+
+### `render-on-demand` — Skip frames when nothing changed (PR #28, merged 2026-05-18)
+- **Outcome:** `Viewer` gained a `needsRender` flag + `requestRender()`; `animate` still polls OrbitControls every frame (so its `'change'` event fires) but only calls `renderer.render` + the update callbacks on frames where something changed. `requestRender` is wired into every non-camera mutation site: `ModelManager` (add / remove / setVisible), `SelectionManager` (highlight changes), `ClippingTool` and `MeasurementTool` (new optional `requestRender` dep), and `CameraAnimator` (new `onTick` so fly-to renders each frame). Idle CPU/GPU drops to ~0. New `tests/render-on-demand.test.ts`; 397 → 403 tests.
+
+### `progressive-scene-fill` — Meshes appear during StreamAllMeshes (PR #30, reverted 2026-05-19)
+- **Outcome:** Implemented as main-thread streaming — `IfcParser.parseStreaming`, a `ModelManager.beginStream / appendMeshes / endStream` API, and a `FrameYielder` time-slicer. It worked for huge models, but main-thread streaming needs a two-pass parse (one `StreamAllMeshes` pass for product IDs, one `StreamMeshes` pass for geometry — streamed geometry is only valid inside a callback, and the loop must yield to stay responsive), which made medium models (~48 MB) load slower than the old blocking parse. Reverted; PR #30 closed. The proper fix — single-pass, off the main thread — is `web-worker-parse` (queued; `dev/plans/handoff-web-worker-parse.md`).
