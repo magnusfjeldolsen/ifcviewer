@@ -1,4 +1,5 @@
 import * as WebIFC from 'web-ifc';
+import { FrameYielder } from '../utils/frameYield';
 
 export interface ParsedMesh {
   expressID: number;
@@ -17,9 +18,9 @@ export interface ParsedModel {
 
 /**
  * Product-ID batch size for `parseStreaming`. Each batch is one synchronous
- * `StreamMeshes` call; the loop yields to the event loop between batches so
- * geometry appears progressively. ~50 keeps a batch well under one frame on
- * the models measured (RIB.ifc: ~18 ms/batch).
+ * `StreamMeshes` call and one `onBatch` callback. Kept small so progress is
+ * reported at a fine granularity; the actual event-loop yields are
+ * time-boxed by `FrameYielder`, independent of batch size.
  */
 const STREAM_BATCH_SIZE = 50;
 
@@ -97,9 +98,12 @@ export class IfcParser {
     });
 
     // Pass 2 — re-stream the IDs in batches, extracting geometry inside
-    // the callback, yielding to the event loop after each batch so the
-    // scene paints progressively.
+    // the callback. The yield is time-boxed (see FrameYielder): the loop
+    // runs flat-out in ~frame-sized bursts and only cedes the main thread
+    // when the budget is spent, so the scene paints progressively without
+    // paying a yield + re-render on every single batch.
     const all: ParsedMesh[] = [];
+    const yielder = new FrameYielder();
     for (let i = 0; i < productIds.length; i += STREAM_BATCH_SIZE) {
       const batchIds = productIds.slice(i, i + STREAM_BATCH_SIZE);
       const batch: ParsedMesh[] = [];
@@ -108,7 +112,7 @@ export class IfcParser {
       });
       for (const m of batch) all.push(m);
       if (batch.length > 0) onBatch(batch);
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await yielder.yieldIfNeeded();
     }
 
     // Model kept open after parse — see the note in `parse`.
