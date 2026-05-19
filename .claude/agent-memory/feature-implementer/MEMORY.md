@@ -1,0 +1,10 @@
+- [Module boundaries](module_boundaries.md) — Where new feature code lands in src/
+- [Vitest patterns](vitest_patterns.md) — Test idioms used in this project
+- [Lint quirks](lint_quirks.md) — Project-specific ESLint behaviors that bite
+- [Phased rollouts](feedback_phased_rollouts.md) — User splits large features into phases and gates each phase on manual smoke tests
+- [Inspector architecture](inspector_architecture.md) — Module layout for the properties inspector, intersection-rule centralization, and lock/persistence/soft-cap conventions
+- [SelectionBox frustum gotcha](selectionbox_frustum_gotcha.md) — three's SelectionBox.js flips the far-plane normal without flipping its constant — copying that pattern breaks Frustum.containsPoint
+- [Highlight variant cache](highlight_variant_cache.md) — SelectionManager uses WeakMap<Material, Material> for shared emissive clones; never dispose on restore
+- [Observer pattern](observer_pattern.md) — Project convention for onChange/onStateChange listener arrays on tools and managers
+- [Contextual actions tray](contextual_actions.md) — Bottom-right floating tray; how to register new state-conditional buttons
+- [Worker architecture](worker_architecture.md) — IFC parse + property queries run in a Web Worker; module layout, message protocol, invariants

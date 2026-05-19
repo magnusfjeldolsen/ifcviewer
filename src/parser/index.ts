@@ -1,2 +1,2 @@
-export { IfcParser } from './IfcParser';
-export type { ParsedMesh, ParsedModel } from './IfcParser';
+export { WorkerIfcParser } from './WorkerIfcParser';
+export type { ParsedMesh, ParsedModel, StreamProgress } from './types';

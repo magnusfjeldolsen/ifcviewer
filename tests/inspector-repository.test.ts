@@ -15,20 +15,26 @@ import {
   IFCSIUNIT,
 } from 'web-ifc';
 import {
-  WebIfcPropertyRepository,
+  fetchElementProperties,
   type PropertyApi,
-} from '../src/inspector/repository/WebIfcPropertyRepository';
+} from '../src/inspector/repository/fetchElementProperties';
+import { computeUnitTable } from '../src/inspector/repository/unitTable';
 import { buildFlatRows } from '../src/inspector/repository/flatRows';
+import { buildUnitTable, type UnitTable } from '../src/inspector/format';
 
 /**
+ * Tests for the extracted property fetch + normalize core
+ * (`fetchElementProperties`). `web-worker-parse` lifted this out of the
+ * deleted `WebIfcPropertyRepository`; the orchestration that used to wrap
+ * it (memoization, serialization) is now the worker queue +
+ * `WorkerPropertyRepository` — covered by `worker-property-repository.test.ts`.
+ *
  * Test fixtures: a single "wall" element (expressId 100) in a model that
  * declares millimetre length, square-metre area, and cubic-metre volume
- * via IfcUnitAssignment.
- *
- * The fixture deliberately avoids spinning up the real web-ifc WASM
- * module — instead it constructs a `PropertyApi` fake that returns the
- * structures web-ifc emits, so we can pin down our normalization without
- * the cost (or flakiness) of WASM in CI.
+ * via IfcUnitAssignment. The fixture deliberately avoids spinning up the
+ * real web-ifc WASM module — it constructs a `PropertyApi` fake that
+ * returns the structures web-ifc emits, so normalization is pinned down
+ * without the cost (or flakiness) of WASM in CI.
  */
 
 const MODEL_UUID = 'app-uuid-A';
@@ -165,7 +171,7 @@ function mkFake(): PropertyApi {
       // New two-call flow:
       //  - getPropertySets(.., false) → instance-side IfcPropertySet + IfcElementQuantity
       //  - getTypeProperties(.., false) → IfcTypeObject(s); their HasPropertySets are walked
-      //    by the repo and resolved via GetLine.
+      //    by the fetch core and resolved via GetLine.
       // Our wall fixture has no type, so getTypeProperties returns [] here. Type-inherited
       // psets are exercised in a dedicated test below.
       getPropertySets: vi.fn(async (
@@ -175,7 +181,7 @@ function mkFake(): PropertyApi {
         includeTypeProperties?: boolean,
       ) => {
         if (modelID !== WEB_IFC_ID || id !== WALL_EXPRESS_ID) return [];
-        // The repository calls with includeTypeProperties=false. We return
+        // The fetch core calls with includeTypeProperties=false. We return
         // [] if some legacy caller passes true so any regression to the old
         // single-call path would show up loudly as zero psets.
         if (includeTypeProperties) return [];
@@ -190,15 +196,23 @@ function mkFake(): PropertyApi {
   };
 }
 
-function makeRepo(api: PropertyApi): WebIfcPropertyRepository {
-  return new WebIfcPropertyRepository(api, (id) => (id === MODEL_UUID ? WEB_IFC_ID : undefined));
+/** Compute the model's unit table via the same path the worker uses. */
+async function unitTableFor(api: PropertyApi): Promise<UnitTable> {
+  return computeUnitTable(
+    api as unknown as Parameters<typeof computeUnitTable>[0],
+    WEB_IFC_ID,
+  );
 }
 
-describe('WebIfcPropertyRepository — identity', () => {
+/** Fetch the wall element's properties through the extracted core. */
+async function fetchWall(api: PropertyApi): ReturnType<typeof fetchElementProperties> {
+  const unitTable = await unitTableFor(api);
+  return fetchElementProperties(api, WEB_IFC_ID, MODEL_UUID, WALL_EXPRESS_ID, unitTable);
+}
+
+describe('fetchElementProperties — identity', () => {
   it('extracts Name, GlobalId, ObjectType, Tag, PredefinedType from the element', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     expect(props.identity).toMatchObject({
       modelId: MODEL_UUID,
       expressId: WALL_EXPRESS_ID,
@@ -211,9 +225,7 @@ describe('WebIfcPropertyRepository — identity', () => {
   });
 
   it('populates the direct attribute rows from identity', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const keys = props.direct.map((d) => d.key);
     expect(keys).toContain('Name');
     expect(keys).toContain('GlobalId');
@@ -222,19 +234,15 @@ describe('WebIfcPropertyRepository — identity', () => {
   });
 });
 
-describe('WebIfcPropertyRepository — psets', () => {
+describe('fetchElementProperties — psets', () => {
   it('separates psets from qtos by IFC type code', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     expect(props.psets.map((p) => p.name)).toEqual(['Pset_WallCommon']);
     expect(props.qtos.map((q) => q.name)).toEqual(['Qto_WallBaseQuantities']);
   });
 
   it('normalizes a single-value boolean property', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const lb = props.psets[0].properties.find((p) => p.key === 'LoadBearing');
     expect(lb).toBeDefined();
     expect(lb!.value.kind).toBe('single');
@@ -243,9 +251,7 @@ describe('WebIfcPropertyRepository — psets', () => {
   });
 
   it('attaches the length unit to a length-typed property', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const thickness = props.psets[0].properties.find((p) => p.key === 'Thickness');
     expect(thickness).toBeDefined();
     expect(thickness!.unit).toBe('mm');
@@ -257,20 +263,16 @@ describe('WebIfcPropertyRepository — psets', () => {
   });
 
   it('renders complex properties as a nested `complex` value', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const ac = props.psets[0].properties.find((p) => p.key === 'AcousticRating');
     expect(ac).toBeDefined();
     expect(ac!.value.kind).toBe('complex');
   });
 });
 
-describe('WebIfcPropertyRepository — qtos', () => {
+describe('fetchElementProperties — qtos', () => {
   it('renders length quantity with mm unit (from the unit table)', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const length = props.qtos[0].properties.find((p) => p.key === 'Length');
     expect(length).toBeDefined();
     expect(length!.unit).toBe('mm');
@@ -278,9 +280,7 @@ describe('WebIfcPropertyRepository — qtos', () => {
   });
 
   it('renders area quantity with m² unit', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const area = props.qtos[0].properties.find((p) => p.key === 'NetSideArea');
     expect(area).toBeDefined();
     expect(area!.unit).toBe('m²');
@@ -288,9 +288,7 @@ describe('WebIfcPropertyRepository — qtos', () => {
   });
 
   it('renders volume quantity with m³ unit', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const vol = props.qtos[0].properties.find((p) => p.key === 'NetVolume');
     expect(vol).toBeDefined();
     expect(vol!.unit).toBe('m³');
@@ -298,38 +296,30 @@ describe('WebIfcPropertyRepository — qtos', () => {
   });
 });
 
-describe('WebIfcPropertyRepository — materials', () => {
+describe('fetchElementProperties — materials', () => {
   it('emits a material-ref for each associated material', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     expect(props.materials).toHaveLength(1);
     expect(props.materials[0]).toMatchObject({ kind: 'material-ref', materialName: 'Concrete C30/37' });
   });
 });
 
-describe('WebIfcPropertyRepository — flat rows', () => {
+describe('fetchElementProperties — flat rows', () => {
   it('flattens complex properties into dotted paths', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const paths = props.flat.map((r) => r.path);
     expect(paths).toContain('Pset_WallCommon.AcousticRating.Rw');
   });
 
   it('alphabetizes rows by path', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const paths = props.flat.map((r) => r.path);
     const sorted = [...paths].sort((a, b) => a.localeCompare(b));
     expect(paths).toEqual(sorted);
   });
 
   it('keeps unit in a separate column (raw value column has no unit)', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const thickness = props.flat.find((r) => r.path === 'Pset_WallCommon.Thickness');
     expect(thickness).toBeDefined();
     expect(thickness!.displayValue).toBe('200');
@@ -337,9 +327,7 @@ describe('WebIfcPropertyRepository — flat rows', () => {
   });
 
   it('renders booleans as `true`/`false` in the Value column', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchWall(mkFake());
     const lb = props.flat.find((r) => r.path === 'Pset_WallCommon.LoadBearing');
     expect(lb).toBeDefined();
     expect(lb!.displayValue).toBe('true');
@@ -347,9 +335,9 @@ describe('WebIfcPropertyRepository — flat rows', () => {
   });
 });
 
-describe('WebIfcPropertyRepository — type-inherited psets (merge of two API calls)', () => {
+describe('fetchElementProperties — type-inherited psets (merge of two API calls)', () => {
   // This test exercises the fix for the destructive-flag bug in web-ifc's
-  // getPropertySets(..., includeTypeProperties=true). Our repository now
+  // getPropertySets(..., includeTypeProperties=true). The fetch core now
   // calls getPropertySets(..., false) AND getTypeProperties(...) and
   // merges. Same-named psets from both sides are kept (no dedupe); the
   // type-side rows are tagged `inheritedFromType: true`.
@@ -442,7 +430,7 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
           includeTypeProperties?: boolean,
         ) => {
           if (id !== WALL_EXPRESS_ID) return [];
-          if (includeTypeProperties) return []; // Repo never calls this branch.
+          if (includeTypeProperties) return []; // Core never calls this branch.
           return [instancePsetCommon, instancePsetExtra];
         }),
         getTypeProperties: vi.fn(async (_m: number, id: number) => {
@@ -454,11 +442,15 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
     };
   }
 
-  it('merges instance and type psets (keeping same-named entries from both sides)', async () => {
-    const api = mkFakeWithType();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+  /** Fetch the wall with an empty unit table — these tests don't assert units. */
+  function fetchTypedWall(api: PropertyApi): ReturnType<typeof fetchElementProperties> {
+    return fetchElementProperties(
+      api, WEB_IFC_ID, MODEL_UUID, WALL_EXPRESS_ID, buildUnitTable([]),
+    );
+  }
 
+  it('merges instance and type psets (keeping same-named entries from both sides)', async () => {
+    const props = await fetchTypedWall(mkFakeWithType());
     const psetNames = props.psets.map((p) => p.name);
     // Pset_Common appears TWICE: once from instance, once from type.
     expect(psetNames.filter((n) => n === 'Pset_Common').length).toBe(2);
@@ -466,10 +458,7 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
   });
 
   it('tags type-inherited groups with inheritedFromType=true', async () => {
-    const api = mkFakeWithType();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-
+    const props = await fetchTypedWall(mkFakeWithType());
     const commons = props.psets.filter((p) => p.name === 'Pset_Common');
     expect(commons).toHaveLength(2);
     // Exactly one should be the type-inherited variant.
@@ -482,10 +471,7 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
   });
 
   it('propagates inheritedFromType into flat rows', async () => {
-    const api = mkFakeWithType();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-
+    const props = await fetchTypedWall(mkFakeWithType());
     const referenceRows = props.flat.filter((r) => r.path === 'Pset_Common.Reference');
     // Two rows: instance + type.
     expect(referenceRows).toHaveLength(2);
@@ -495,18 +481,14 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
 
   it('walks IfcTypeObject.HasPropertySets and resolves each ref via GetLine', async () => {
     const api = mkFakeWithType();
-    const repo = makeRepo(api);
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    await fetchTypedWall(api);
     expect((api.GetLine as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])).toEqual(
       expect.arrayContaining([9001, 9002]),
     );
   });
 
   it('separates type-inherited IfcElementQuantity into qtos[] (not psets[])', async () => {
-    const api = mkFakeWithType();
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-
+    const props = await fetchTypedWall(mkFakeWithType());
     expect(props.qtos.map((q) => q.name)).toContain('Qto_FromType');
     const qto = props.qtos.find((q) => q.name === 'Qto_FromType')!;
     expect(qto.inheritedFromType).toBe(true);
@@ -519,65 +501,9 @@ describe('WebIfcPropertyRepository — type-inherited psets (merge of two API ca
         throw new Error('schema not supported');
       },
     );
-    const repo = makeRepo(api);
-    const props = await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
+    const props = await fetchTypedWall(api);
     // Still returns the instance-side psets.
     expect(props.psets.map((p) => p.name)).toEqual(['Pset_Common', 'Pset_Instance']);
-  });
-});
-
-describe('WebIfcPropertyRepository — memoization & lifecycle', () => {
-  it('memoizes per (modelId, expressId): concurrent gets share one fetch', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    const [a, b] = await Promise.all([
-      repo.get(MODEL_UUID, WALL_EXPRESS_ID),
-      repo.get(MODEL_UUID, WALL_EXPRESS_ID),
-    ]);
-    expect(a).toBe(b);
-    expect(api.properties.getItemProperties).toHaveBeenCalledTimes(2);
-    // ↑ One for the element itself, one for the IfcProject (unit table). Both fire ONCE.
-  });
-
-  it('serves cached results on subsequent gets without re-calling the API', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-    const callsBefore = (api.properties.getItemProperties as ReturnType<typeof vi.fn>).mock.calls.length;
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-    const callsAfter = (api.properties.getItemProperties as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(callsAfter).toBe(callsBefore);
-  });
-
-  it('disposeModel clears memoization for that model', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-    repo.disposeModel(MODEL_UUID);
-    const callsBefore = (api.properties.getItemProperties as ReturnType<typeof vi.fn>).mock.calls.length;
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-    const callsAfter = (api.properties.getItemProperties as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(callsAfter).toBeGreaterThan(callsBefore);
-  });
-
-  it('throws when the modelId is unknown', async () => {
-    const api = mkFake();
-    const repo = makeRepo(api);
-    await expect(repo.get('does-not-exist', 1)).rejects.toThrow(/unknown modelId/);
-  });
-
-  it('runs work through an optional enqueue function (serialization)', async () => {
-    const api = mkFake();
-    const order: string[] = [];
-    const enqueue = async <T>(work: () => Promise<T>): Promise<T> => {
-      order.push('before');
-      const r = await work();
-      order.push('after');
-      return r;
-    };
-    const repo = new WebIfcPropertyRepository(api, () => WEB_IFC_ID, enqueue);
-    await repo.get(MODEL_UUID, WALL_EXPRESS_ID);
-    expect(order).toEqual(['before', 'after']);
   });
 });
 

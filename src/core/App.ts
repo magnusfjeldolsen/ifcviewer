@@ -1,7 +1,7 @@
 import { Viewer } from '../viewer/Viewer';
 import { ModelManager } from '../viewer/ModelManager';
 import { FileLoader } from '../loader/FileLoader';
-import { IfcParser } from '../parser/IfcParser';
+import { WorkerIfcParser } from '../parser/WorkerIfcParser';
 import { UrlInput } from '../ui/UrlInput';
 import { RemoteLoader } from '../loader/RemoteLoader';
 import { ToolManager } from '../tools/Tool';
@@ -22,7 +22,7 @@ import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { InspectorPanel } from '../inspector/InspectorPanel';
-import { WebIfcPropertyRepository } from '../inspector/repository/WebIfcPropertyRepository';
+import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import type { ModelRecord, ModelSource } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -30,7 +30,11 @@ export class App {
   private viewer: Viewer;
   private modelManager: ModelManager;
   private fileLoader: FileLoader;
-  private parser: IfcParser;
+  // IFC parsing runs in a Web Worker (see ifcWorker.ts). `parser` is the
+  // main-thread proxy; it owns the Worker. All web-ifc state — geometry
+  // AND property queries — lives in the worker, so the main thread never
+  // blocks during a load.
+  private parser: WorkerIfcParser;
   private toolManager: ToolManager;
   private toolbar: Toolbar;
   private modelTreePanel: ModelTreePanel;
@@ -52,12 +56,11 @@ export class App {
   private contextualActions!: ContextualActions;
   private modelRecords = new Map<string, ModelRecord>();
   private bufferCache = new Map<string, ArrayBuffer>();
-  // Maps App UUID → web-ifc internal modelID. Populated when a parse
-  // succeeds; entries are removed (and the web-ifc model closed) by
-  // removeModel / resetView / dispose. Used by the Element Property
-  // Repository to issue property queries to web-ifc.
-  private modelIdMap = new Map<string, number>();
-  private parseQueue = Promise.resolve();
+  // Serializes `handleFile` calls so two files dropped at once don't
+  // interleave their main-thread bookkeeping (modelRecords, sessionStore
+  // writes). The web-ifc parse itself is serialized inside the worker;
+  // this chain only orders the App-level work around it.
+  private loadChain = Promise.resolve();
   private statusEl: HTMLElement | null;
   // Element selection (Phase 2 of the Inspector). Owns canvas pointer
   // listeners; defers to active tools and pivot picking via deps.
@@ -66,8 +69,9 @@ export class App {
   // SelectionManager via capture-phase pointerdown; bails when any tool
   // is active or pivot picking is on.
   private marqueeSelector!: MarqueeSelector;
-  // Property repository + panel UI (Phase 3 of the Inspector).
-  private propertyRepository!: WebIfcPropertyRepository;
+  // Property repository + panel UI (Phase 3 of the Inspector). The
+  // repository proxies property queries to the same worker `parser` owns.
+  private propertyRepository!: WorkerPropertyRepository;
   private inspectorPanel!: InspectorPanel;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -79,7 +83,7 @@ export class App {
     const requestRender = (): void => this.viewer.requestRender();
     this.modelManager = new ModelManager(this.viewer.getScene(), requestRender);
     this.fileLoader = new FileLoader();
-    this.parser = new IfcParser();
+    this.parser = new WorkerIfcParser();
     this.statusEl = document.getElementById('status');
 
     // Tools
@@ -157,9 +161,16 @@ export class App {
         // Drop selection bookkeeping BEFORE ModelManager disposes the meshes,
         // so SelectionManager doesn't try to restore materials on dead meshes.
         this.selectionManager.onModelRemoved(id);
-        // Free memoized properties for this model before the web-ifc model is closed.
-        if (this.propertyRepository) this.propertyRepository.disposeModel(id);
-        this.closeWebIfcModel(id);
+        // Free memoized properties AND close the worker's model. The
+        // repository's disposeModel posts the `disposeModel` worker
+        // message, so we do NOT also call parser.disposeModel here.
+        if (this.propertyRepository) {
+          this.propertyRepository.disposeModel(id);
+        } else {
+          // Repository not yet constructed (very early removal) — still
+          // close the worker model directly so it isn't leaked.
+          this.parser.disposeModel(id);
+        }
         this.modelManager.removeModel(id);
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
@@ -181,9 +192,10 @@ export class App {
     // Session persistence
     this.sessionStore = new SessionStore();
     // Parsed-geometry cache, keyed by SHA-256 of the source .ifc buffer.
-    // Used to skip the web-ifc parse on session restore — the model
-    // becomes visible immediately and we re-parse in the background to
-    // refill the web-ifc state the property inspector needs.
+    // Used to skip geometry streaming on session restore — the model
+    // becomes visible immediately and the worker re-opens the model in
+    // the background to refill the web-ifc state the property inspector
+    // needs.
     this.geometryCache = new GeometryCache(this.sessionStore);
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
     this.memoryToggle.onChange(async (enabled) => {
@@ -291,44 +303,28 @@ export class App {
   }
 
   async start(): Promise<void> {
-    this.setStatus('Initializing IFC engine...');
-    await this.parser.init();
+    // The IFC engine now lives in a worker — it initializes lazily on the
+    // first message, so there is no main-thread init to wait for here.
     this.setStatus('');
 
-    // Construct the property repository + inspector panel here (Phase 3):
-    // both depend on `parser.api` being initialized. The panel subscribes
-    // to selectionManager.onChange itself in its constructor.
-    const api = this.parser.api;
-    if (api) {
-      this.propertyRepository = new WebIfcPropertyRepository(
-        // PropertyApi is a structural subset of web-ifc's IfcAPI.
-        api as unknown as ConstructorParameters<typeof WebIfcPropertyRepository>[0],
-        (id: string) => this.modelIdMap.get(id),
-        (work) => {
-          // Chain property fetches onto the parse queue so they don't
-          // race against an in-flight parse on the same web-ifc model.
-          const chained = this.parseQueue.then(() => work());
-          this.parseQueue = chained.then(
-            () => undefined,
-            () => undefined,
-          );
-          return chained;
+    // Construct the property repository + inspector panel (Phase 3). The
+    // repository shares the same worker the `parser` owns, so all web-ifc
+    // state stays in one place. The panel subscribes to
+    // selectionManager.onChange itself in its constructor.
+    this.propertyRepository = new WorkerPropertyRepository(this.parser);
+    const appEl = document.getElementById('app')!;
+    this.inspectorPanel = new InspectorPanel(
+      appEl,
+      {
+        repository: this.propertyRepository,
+        getModelInfo: (modelId: string) => {
+          const record = this.modelRecords.get(modelId);
+          return record ? { name: record.name } : undefined;
         },
-      );
-      const appEl = document.getElementById('app')!;
-      this.inspectorPanel = new InspectorPanel(
-        appEl,
-        {
-          repository: this.propertyRepository,
-          getModelInfo: (modelId: string) => {
-            const record = this.modelRecords.get(modelId);
-            return record ? { name: record.name } : undefined;
-          },
-          getModelCount: () => this.modelRecords.size,
-        },
-        this.selectionManager,
-      );
-    }
+        getModelCount: () => this.modelRecords.size,
+      },
+      this.selectionManager,
+    );
 
     // Contextual action tray (bottom-right). Currently hosts the Remove
     // clipping button; future contextual buttons plug in by calling
@@ -407,10 +403,14 @@ export class App {
           try {
             this.setStatus(`Restoring ${stored.name}...`);
             const id = stored.id;
-            const parsed = await this.parser.parse(stored.buffer, id);
-            this.modelManager.addModel(parsed);
-            this.modelIdMap.set(id, parsed.modelID);
-            this.modelTreePanel.addModel(parsed.id, stored.name, parsed.meshes.length);
+            // Stream the parse through the worker. The model fills in
+            // progressively; the worker keeps it open for properties.
+            this.modelManager.beginStream(id);
+            const parsed = await this.parser.parseStreaming(stored.buffer, id, (batch) => {
+              this.modelManager.appendMeshes(id, batch);
+            });
+            this.modelManager.endStream(id);
+            this.modelTreePanel.addModel(id, stored.name, parsed.meshes.length);
             this.bufferCache.set(id, stored.buffer);
             this.modelRecords.set(id, {
               id,
@@ -421,7 +421,8 @@ export class App {
               hasCachedBuffer: true,
             });
           } catch {
-            // skip files that fail to parse on restore
+            // skip files that fail to parse on restore — drop a partial stream
+            this.modelManager.removeModel(stored.id);
           }
         }
         const box = this.modelManager.getBoundingBox();
@@ -449,15 +450,14 @@ export class App {
           if (stored) {
             // Buffer is available — try the geometry-cache fast path first.
             // On hit we hydrate the scene from cached typed-array buffers
-            // (instant on a 200 MB model) and queue a background re-parse
-            // for the web-ifc state the property inspector needs.
+            // (instant on a 200 MB model) and ask the worker to open the
+            // model for properties (no geometry streamed).
             const cachedMeshes = record.hash
               ? await this.geometryCache.load(record.hash)
               : null;
             if (cachedMeshes) {
               this.modelManager.addModel({
                 id: record.id,
-                modelID: -1, // filled in by scheduleBackgroundReparse
                 meshes: cachedMeshes,
               });
               this.modelTreePanel.addModel(
@@ -465,16 +465,25 @@ export class App {
               );
               this.bufferCache.set(record.id, stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
-              // Properties stay unavailable until this completes.
-              this.scheduleBackgroundReparse(record.id, stored.buffer);
+              // Open the model in the worker for property queries. A later
+              // `getProps` for this id simply queues behind this open in
+              // the worker and resolves once the model is ready — the old
+              // "properties unavailable" gap is handled by message ordering.
+              void this.parser.openForProperties(stored.buffer, record.id).catch((err) => {
+                console.warn(`Worker openForProperties failed for ${record.id}:`, err);
+              });
             } else {
-              // Cache miss — full parse, then backfill the cache so the
-              // *next* restore is fast. Backfills also rescue sessions
-              // saved before the cache feature shipped (no record.hash).
-              const parsed = await this.parser.parse(stored.buffer, record.id);
-              this.modelManager.addModel(parsed);
-              this.modelIdMap.set(record.id, parsed.modelID);
-              this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length);
+              // Cache miss — full streamed parse, then backfill the cache
+              // so the *next* restore is fast. Backfills also rescue
+              // sessions saved before the cache feature shipped (no hash).
+              this.modelManager.beginStream(record.id);
+              const parsed = await this.parser.parseStreaming(
+                stored.buffer, record.id, (batch) => {
+                  this.modelManager.appendMeshes(record.id, batch);
+                },
+              );
+              this.modelManager.endStream(record.id);
+              this.modelTreePanel.addModel(record.id, record.name, parsed.meshes.length);
               this.bufferCache.set(record.id, stored.buffer);
               const hash = record.hash ?? await sha256Hex(stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
@@ -504,7 +513,8 @@ export class App {
             this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
           }
         } catch {
-          // skip models that fail to restore
+          // skip models that fail to restore — drop any partial stream
+          this.modelManager.removeModel(record.id);
         }
       }
       const box = this.modelManager.getBoundingBox();
@@ -519,41 +529,16 @@ export class App {
   }
 
   private enqueueLoad(file: LoadedFile, source?: ModelSource): void {
-    this.parseQueue = this.parseQueue
+    this.loadChain = this.loadChain
       .then(() => this.handleFile(file, source))
       .catch(() => {}); // errors handled inside handleFile
   }
 
-  /**
-   * Run web-ifc parse in the background after a cached-geometry restore.
-   * The scene is already up from cached meshes; this only populates
-   * web-ifc's STEP graph so the property inspector can answer queries.
-   *
-   * Chained onto parseQueue so multiple restored models re-parse one at
-   * a time, and any subsequent handleFile call waits behind them.
-   *
-   * Caveat: `parser.openForProperties` is synchronous inside web-ifc, so
-   * a large model can freeze the main thread for a few seconds during the
-   * re-parse. Acceptable for v1 (pre-cache restores froze for ~60 s);
-   * `web-worker-parse` removes this freeze when it lands.
-   */
-  private scheduleBackgroundReparse(id: string, buffer: ArrayBuffer): void {
-    this.parseQueue = this.parseQueue
-      .then(async () => {
-        try {
-          const modelID = await this.parser.openForProperties(buffer);
-          this.modelIdMap.set(id, modelID);
-          // Drop any "loading" placeholder the property repository may
-          // have cached so the next inspector fetch returns real data.
-          if (this.propertyRepository) this.propertyRepository.disposeModel(id);
-        } catch (err) {
-          console.warn(`Background re-parse failed for ${id}:`, err);
-        }
-      })
-      .catch(() => {});
-  }
-
   private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
+    // Tracks an in-progress streamed load so the catch block can drop a
+    // partially-built model if the parse fails. Null before the stream
+    // starts and once it completes.
+    let streamId: string | null = null;
     try {
       // Reject duplicate filenames
       for (const existing of this.modelRecords.values()) {
@@ -568,12 +553,36 @@ export class App {
       this.setStatus(`Loading ${file.name}...`);
 
       const id = crypto.randomUUID();
-      // Hash in parallel with parse — SHA-256 of 200 MB is a few hundred
-      // milliseconds and we don't want it serialized in front of the user.
+      // Hash in parallel with the parse — SHA-256 of 200 MB is a few
+      // hundred milliseconds and we don't want it in front of the user.
       const hashPromise = sha256Hex(file.buffer);
-      const parsed = await this.parser.parse(file.buffer, id);
-      this.modelManager.addModel(parsed);
-      this.modelIdMap.set(id, parsed.modelID);
+
+      // Stream the parse through the worker: the model's group goes into
+      // the scene now and geometry fills in batch by batch as the worker
+      // posts it, so a large model materializes progressively while the
+      // main thread stays at 60 fps.
+      this.modelManager.beginStream(id);
+      streamId = id;
+      let totalElements = 0;
+      let framed = false;
+      const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
+        this.modelManager.appendMeshes(id, batch);
+        totalElements = progress.total;
+        this.setStatus(
+          `Loading ${file.name}… ` +
+          `(${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()} elements)`,
+        );
+        // Fit once, on the first batch, so the camera frames the model
+        // early and the progressive fill is actually visible. We do NOT
+        // re-fit at the end: the load is interactive now, and a late fit
+        // would yank a camera the user may already be orbiting.
+        if (!framed) {
+          framed = true;
+          this.viewer.fitToBox(this.modelManager.getBoundingBox());
+        }
+      });
+      this.modelManager.endStream(id);
+      streamId = null;
       const hash = await hashPromise;
 
       const modelSource: ModelSource = source ?? { type: 'local', fileName: file.name };
@@ -590,12 +599,9 @@ export class App {
       this.modelRecords.set(id, record);
       this.bufferCache.set(id, file.buffer);
       this.modelTreePanel.addModel(
-        parsed.id, file.name, parsed.meshes.length,
+        id, file.name, parsed.meshes.length,
         modelSource.type,
       );
-
-      const box = this.modelManager.getBoundingBox();
-      this.viewer.fitToBox(box);
 
       // Persist to IndexedDB if memory is enabled
       if (this.sessionStore.isMemoryEnabled()) {
@@ -612,9 +618,12 @@ export class App {
         void this.geometryCache.save(hash, parsed.meshes);
       }
 
-      this.setStatus(`Loaded ${file.name} (${parsed.meshes.length} objects)`);
+      this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
     } catch (err) {
+      // A streamed load that failed partway leaves an empty/partial model
+      // and an open stream — drop both (removeModel also clears the stream).
+      if (streamId) this.modelManager.removeModel(streamId);
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
     }
@@ -636,27 +645,36 @@ export class App {
     // bookkeeping from referencing materials we're about to dispose.
     this.selectionManager.clear();
 
-    // Remove all models and UI rows
+    // Remove all models and UI rows. propertyRepository.disposeModel posts
+    // the `disposeModel` worker message, so we do not also call
+    // parser.disposeModel here.
     for (const id of this.modelManager.getModelIds()) {
-      if (this.propertyRepository) this.propertyRepository.disposeModel(id);
-      this.closeWebIfcModel(id);
+      if (this.propertyRepository) {
+        this.propertyRepository.disposeModel(id);
+      } else {
+        this.parser.disposeModel(id);
+      }
       this.modelManager.removeModel(id);
       this.modelTreePanel.removeModel(id);
     }
 
-    // Re-parse and re-add every loaded model from buffer cache.
-    // modelIdMap is rebuilt as re-parses complete (old IDs were cleared above).
+    // Re-parse and re-add every loaded model from buffer cache. The worker
+    // re-opens each model under its existing app-UUID; property queries
+    // resume once the re-parse completes.
     for (const [id, record] of this.modelRecords) {
       const buffer = this.bufferCache.get(id);
       if (!buffer) continue;
       try {
         this.setStatus(`Reloading ${record.name}...`);
-        const parsed = await this.parser.parse(buffer, id);
-        this.modelManager.addModel(parsed);
-        this.modelIdMap.set(id, parsed.modelID);
-        this.modelTreePanel.addModel(parsed.id, record.name, parsed.meshes.length, record.source.type);
+        this.modelManager.beginStream(id);
+        const parsed = await this.parser.parseStreaming(buffer, id, (batch) => {
+          this.modelManager.appendMeshes(id, batch);
+        });
+        this.modelManager.endStream(id);
+        this.modelTreePanel.addModel(id, record.name, parsed.meshes.length, record.source.type);
       } catch {
-        // skip files that fail to re-parse
+        // skip files that fail to re-parse — drop any partial stream
+        this.modelManager.removeModel(id);
       }
     }
 
@@ -735,33 +753,10 @@ export class App {
     this.toolManager.dispose();
     this.modelManager.dispose();
     this.fileLoader.dispose();
-    // Close every still-open web-ifc model before the parser disposes its WASM heap
-    for (const id of Array.from(this.modelIdMap.keys())) {
-      this.closeWebIfcModel(id);
-    }
+    // Tear down the IFC worker: `dispose` posts a `dispose` message
+    // (the worker frees every open web-ifc model + the WASM heap) and
+    // then terminates the worker thread.
     this.parser.dispose();
     this.viewer.dispose();
-  }
-
-  /**
-   * Close the web-ifc model corresponding to the given App UUID and drop
-   * the entry from modelIdMap. Safe to call when no entry exists (no-op).
-   * Errors from CloseModel are swallowed — the WASM may already be down
-   * (e.g. dispose during teardown), and an upstream caller cannot recover.
-   */
-  private closeWebIfcModel(id: string): void {
-    const webIfcId = this.modelIdMap.get(id);
-    if (webIfcId === undefined) return;
-    this.modelIdMap.delete(id);
-    try {
-      this.parser.api?.CloseModel(webIfcId);
-    } catch {
-      // ignore — web-ifc may already be disposed
-    }
-  }
-
-  /** Test/inspector hook: snapshot of the current App UUID → web-ifc modelID map. */
-  getModelIdMap(): ReadonlyMap<string, number> {
-    return this.modelIdMap;
   }
 }
