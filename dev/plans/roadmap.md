@@ -39,7 +39,7 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Source:** Performance research section 3.2; blocker finding 2026-05-18.
 
 ### `progressive-scene-fill` — Meshes appear during StreamAllMeshes
-- **Status:** queued
+- **Status:** reverted — built in PR #30, then reverted; superseded by `web-worker-parse`
 - **Effort:** M
 - **Why:** Today `IfcParser.parse` accumulates `ParsedMesh[]` and only after the full stream completes does `ModelManager.addModel` create THREE.Meshes and call `scene.add(group)`. User sees a frozen UI for ~60 s, then the model appears all at once.
 - **What:**
@@ -49,12 +49,13 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
   - Defer `viewer.fitToBox` until `endStream` (otherwise the camera zooms to the first dozen meshes then jerks back).
   - Yield to the event loop between batches via `await new Promise(r => setTimeout(r, 0))` so frame ticks (and the progress overlay from `loading-overlay-and-percentage`) update.
 - **Risks:** Phase-4 marquee bounding-box use was made lazy in PR #21, so no problem there. Pivot/raycast operations during partial load should still work — meshes that aren't yet in the scene simply won't be hit.
+- **Outcome:** Implemented in PR #30 as main-thread streaming. It worked for huge models, but main-thread streaming needs a two-pass parse (one `StreamAllMeshes` pass for product IDs, one `StreamMeshes` pass for geometry), which made medium models (~48 MB) load slower than the old blocking parse. Reverted; PR #30 closed. The proper fix is `web-worker-parse` below — single-pass, off the main thread.
 - **Source:** Performance research section 3.3.
 
 ### `web-worker-parse` — Move IFC parsing into a Web Worker
 - **Status:** queued
 - **Effort:** M–L
-- **Why:** `progressive-scene-fill` (PR #30) streams on the main thread, which costs a second model pass + per-batch yield overhead — medium models (~48 MB) load slower than the old blocking parse. A Web Worker removes the trade: single-pass parse, 60 fps UI throughout.
+- **Why:** `progressive-scene-fill` (PR #30, reverted) streamed on the main thread, which cost a second model pass + per-batch yield overhead — medium models (~48 MB) loaded slower than the old blocking parse. A Web Worker removes the trade: single-pass parse, 60 fps UI throughout.
 - **What:** web-ifc runs in a worker; it streams geometry batches (zero-copy transferables) to the main thread, which renders via the existing `ModelManager` stream API. Property queries route to the worker via messages. **No cross-origin isolation needed** — a plain Worker is unrelated to the blocked `mt-wasm-coop-coep`.
 - **Risks:** the inspector's property data-path must be refactored to message the worker — that is the bulk of the effort.
 - **Source:** `dev/plans/handoff-web-worker-parse.md` (full implementation plan).
