@@ -82,9 +82,11 @@ WorkerPropertyRepository.get(id,eid)
                                                   ElementProperties}
 ```
 
-The main thread **reuses `ModelManager.beginStream / appendMeshes /
-endStream` and the `StreamProgress` type unchanged** — only the *source*
-of the batches changes (worker messages instead of a callback).
+The main thread consumes batches through a `ModelManager` stream API
+(`beginStream / appendMeshes / endStream`) plus the `StreamProgress` type.
+⚠️ **That API was added in PR #30 and reverted with it — it is NOT on
+`main`.** Re-introducing it is an explicit early step (Step 2 below); the
+closed `feature/progressive-scene-fill` branch is the reference.
 
 ## Design decisions (review these before implementing)
 
@@ -176,7 +178,7 @@ type ToWorker =
 
 // worker → main
 type FromWorker =
-  | { type: 'batch';  id: string; meshes: CachedMesh[]; progress: StreamProgress } // mesh buffers transferred
+  | { type: 'batch';  id: string; meshes: ParsedMesh[]; progress: StreamProgress } // mesh buffers transferred
   | { type: 'parsed'; id: string }                            // also resolves openForProps
   | { type: 'props';  reqId: number; props: ElementProperties }
   | { type: 'error';  id?: string; reqId?: number; message: string };
@@ -235,7 +237,11 @@ imported by `InspectorPanel` — fine, shared pure code bundled into both.
    that imports `web-ifc`, calls `Init()`, `OpenModel` on `RIB.ifc`, posts
    back the mesh count. Confirm it runs in the browser and the `.wasm`
    loads from worker scope. **Stop and reassess if this fails.**
-2. Message types (`ifcMessages.ts`) + shared `types.ts`.
+2. **Re-introduce the geometry-consumption layer reverted with PR #30:**
+   `ModelManager.beginStream / appendMeshes / endStream` and the
+   `StreamProgress` type (cherry-pick from the closed
+   `feature/progressive-scene-fill` branch, or re-implement). Then add the
+   message types (`ifcMessages.ts`) and shared `types.ts`.
 3. Geometry path: `ifcWorker.ts` `parse` handler (single-pass
    `StreamAllMeshes`, post `batch`es) + `WorkerIfcParser`. Wire
    `App.handleFile`. Model on screen, sourced from the worker.
@@ -278,11 +284,15 @@ imported by `InspectorPanel` — fine, shared pure code bundled into both.
 - `worker.terminate()` ordering on `dispose` — drain or abandon in-flight
   requests cleanly.
 
-## What `progressive-scene-fill` (closed PR #30) left ready
+## Reference — the closed `progressive-scene-fill` branch (PR #30)
+
+PR #30 built the geometry-consumption layer this plan needs, then was
+reverted (the streaming itself ran on the main thread — the wrong
+approach). The code is **not on `main`**, but the closed
+`feature/progressive-scene-fill` branch is a working reference. Step 2
+re-introduces:
 
 - `ModelManager.beginStream / appendMeshes / endStream` — the worker
-  version consumes batches through this **unchanged**.
-- `StreamProgress` — the worker posts the same shape.
-- The closed `feature/progressive-scene-fill` branch has a working
-  reference for the geometry-extraction loop and the `App.handleFile`
-  streaming wiring.
+  version consumes batches through it unchanged.
+- the `StreamProgress` type — the worker posts the same shape.
+- the geometry-extraction loop and the `App.handleFile` streaming wiring.
