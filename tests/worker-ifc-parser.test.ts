@@ -57,7 +57,13 @@ function mesh(expressID: number): ParsedMesh {
 }
 
 describe('WorkerIfcParser — parseStreaming', () => {
-  it('posts a parse message transferring the buffer', () => {
+  it('posts a parse message without transferring the buffer', () => {
+    // Regression guard. We deliberately do NOT transfer the .ifc buffer to
+    // the worker — the main thread still needs the original alive after this
+    // call, for `sessionStore.saveModel` (IDB persistence) and
+    // `App.bufferCache` (used by `resetView`). Transferring detached the
+    // main-thread ArrayBuffer and turned reloads into "File missing — re-
+    // upload" for every model.
     const worker = new MockWorker();
     const parser = new WorkerIfcParser(worker);
     const buffer = new ArrayBuffer(8);
@@ -65,7 +71,8 @@ describe('WorkerIfcParser — parseStreaming', () => {
     void parser.parseStreaming(buffer, 'model-1', () => {});
 
     expect(worker.posted[0]).toMatchObject({ type: 'parse', id: 'model-1' });
-    expect(worker.transfers[0]).toEqual([buffer]);
+    expect(worker.transfers[0]).toBeUndefined();
+    expect(buffer.byteLength).toBe(8); // not neutered
   });
 
   it('feeds onBatch per batch message and resolves with all meshes accumulated', async () => {
@@ -135,7 +142,10 @@ describe('WorkerIfcParser — openForProperties', () => {
 
     const promise = parser.openForProperties(buffer, 'restore-1');
     expect(worker.posted[0]).toMatchObject({ type: 'openForProps', id: 'restore-1' });
-    expect(worker.transfers[0]).toEqual([buffer]);
+    // Same as parseStreaming: no transferable; main keeps the buffer for IDB
+    // saves and the bufferCache used by resetView.
+    expect(worker.transfers[0]).toBeUndefined();
+    expect(buffer.byteLength).toBe(8); // not neutered
 
     worker.reply({ type: 'parsed', id: 'restore-1' });
     await expect(promise).resolves.toBeUndefined();
