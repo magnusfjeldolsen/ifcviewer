@@ -9,11 +9,17 @@
  * Analysis` (with `Max_Tension` and `Max_Compression`) and
  * `Pset_SlabCommon`.
  *
- * Our `WebIfcPropertyRepository` mitigates this by calling
+ * Our property fetch core mitigates this by calling
  * `getPropertySets(.., false)` AND `getTypeProperties(.., false)` and
  * merging the two lists. This test loads the real IFC, picks an element
  * known (via the agent diagnostic) to own `Max_Tension`, and asserts the
- * expected psets and rows are now present.
+ * expected psets and rows are present.
+ *
+ * `web-worker-parse` deleted `WebIfcPropertyRepository`; the two-call
+ * merge now lives in `fetchElementProperties` (worker-importable). This
+ * test is re-pointed at that module directly — it still guards the same
+ * code path, just without the memoization/serialization wrapper (which is
+ * now the worker queue + `WorkerPropertyRepository`'s main-thread memo).
  *
  * Known target elements with Max_Tension / Max_Compression: expressId
  * 4682 and 4801 (and 31 others — 33 total). We use 4682 as the primary
@@ -30,7 +36,11 @@ import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { IfcAPI } from 'web-ifc';
-import { WebIfcPropertyRepository } from '../src/inspector/repository/WebIfcPropertyRepository';
+import {
+  fetchElementProperties,
+  type PropertyApi,
+} from '../src/inspector/repository/fetchElementProperties';
+import { computeUnitTable } from '../src/inspector/repository/unitTable';
 
 // @ts-expect-error -- `process` is a Node global, no bundled types in this project
 const IFC_PATH = path.resolve(process.cwd(), 'assets/ifcs/RIB.ifc');
@@ -43,7 +53,7 @@ const FALLBACK_EXPRESS_ID = 4801;
 // still guard the same code path.
 const FILE_PRESENT = existsSync(IFC_PATH);
 
-describe.skipIf(!FILE_PRESENT)('WebIfcPropertyRepository (RIB.ifc regression)', () => {
+describe.skipIf(!FILE_PRESENT)('fetchElementProperties (RIB.ifc regression)', () => {
   it('extracts both instance-level and type-level psets for elements with Max_Tension', async () => {
     const api = new IfcAPI();
     await api.Init();
@@ -52,17 +62,23 @@ describe.skipIf(!FILE_PRESENT)('WebIfcPropertyRepository (RIB.ifc regression)', 
     const modelID = api.OpenModel(new Uint8Array(buf));
 
     try {
-      const repo = new WebIfcPropertyRepository(
-        api as unknown as ConstructorParameters<typeof WebIfcPropertyRepository>[0],
-        (id) => (id === MODEL_UUID ? modelID : undefined),
+      // PropertyApi is a structural subset of web-ifc's IfcAPI.
+      const propApi = api as unknown as PropertyApi;
+      const unitTable = await computeUnitTable(
+        api as unknown as Parameters<typeof computeUnitTable>[0],
+        modelID,
       );
 
       // Try primary, fall back to secondary if the file evolved.
-      let props = await repo.get(MODEL_UUID, PRIMARY_EXPRESS_ID);
+      let props = await fetchElementProperties(
+        propApi, modelID, MODEL_UUID, PRIMARY_EXPRESS_ID, unitTable,
+      );
       let pickedId: number = PRIMARY_EXPRESS_ID;
       let structural = props.psets.find((p) => p.name === 'Structural Analysis');
       if (!structural) {
-        props = await repo.get(MODEL_UUID, FALLBACK_EXPRESS_ID);
+        props = await fetchElementProperties(
+          propApi, modelID, MODEL_UUID, FALLBACK_EXPRESS_ID, unitTable,
+        );
         pickedId = FALLBACK_EXPRESS_ID;
         structural = props.psets.find((p) => p.name === 'Structural Analysis');
       }

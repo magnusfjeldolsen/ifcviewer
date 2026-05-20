@@ -12,12 +12,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import type { ParsedModel } from '../src/parser/IfcParser';
+import type { ParsedModel } from '../src/parser/types';
 
 function makeParsed(id: string, expressId = 1): ParsedModel {
   return {
     id,
-    modelID: 0,
     meshes: [
       {
         expressID: expressId,
