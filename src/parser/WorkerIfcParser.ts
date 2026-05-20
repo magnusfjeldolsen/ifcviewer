@@ -113,14 +113,22 @@ export class WorkerIfcParser {
   ): Promise<ParsedModel> {
     return new Promise<ParsedModel>((resolve, reject) => {
       this.pending.set(id, { resolve, reject, meshes: [], onBatch });
-      this.worker.postMessage({ type: 'parse', id, buffer }, [buffer]);
+      // We intentionally do NOT transfer the buffer. The main thread still
+      // needs the original alive after this call — for `sessionStore.saveModel`
+      // (IDB persistence) and `App.bufferCache` (used by `resetView`).
+      // Transferring detaches the main-thread ArrayBuffer, which made the IDB
+      // save silently fail and turned a reload into "File missing — re-upload"
+      // for every model. The worker gets a structured-clone copy; the cost is
+      // one copy of the .ifc bytes, which is fine.
+      this.worker.postMessage({ type: 'parse', id, buffer });
     });
   }
 
   /**
    * Open a model in the worker for property queries only — no geometry
    * streamed. Used by the geometry-cache fast-restore path. Resolves once
-   * the worker posts `parsed`. The `.ifc` buffer is transferred.
+   * the worker posts `parsed`. The `.ifc` buffer is structured-cloned (not
+   * transferred — see the rationale on `parseStreaming`).
    */
   openForProperties(buffer: ArrayBuffer, id: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -129,7 +137,7 @@ export class WorkerIfcParser {
         reject,
         meshes: [],
       });
-      this.worker.postMessage({ type: 'openForProps', id, buffer }, [buffer]);
+      this.worker.postMessage({ type: 'openForProps', id, buffer });
     });
   }
 
