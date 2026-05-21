@@ -120,10 +120,18 @@ the screen stays empty until there's something to manage.
 
 ## Edge cases
 
-- **MR with the single-model-lock on**: `SelectionManager` has a
-  single-model-lock that can collapse cross-model selections. The basket can
-  span models. Recall should select **all** basket contents regardless of the
-  lock (it's an explicit recall) — verify/decide during implementation.
+- **MR vs the single-model-lock (decided: MR bypasses it).** The lock is a
+  **global, persisted user preference** — localStorage
+  `ifcviewer:inspectorSingleModelLock` (default on), toggled by the inspector's
+  "Single-model selection" checkbox; it governs how selection *additions*
+  combine across models (ctrl-click, marquee). It is NOT tool-scoped.
+  `applyMany('replace', …)` currently honours the lock (collapses the batch to
+  the first model), so recall needs a **lock-bypassing path** — a new
+  `SelectionManager` method (e.g. `selectExactly(identities)`) or an
+  `applyMany(…, { bypassLock: true })` option — that selects all basket
+  contents across models **without changing the setting**. This is the
+  "be careful to avoid bugginess" point: don't toggle the lock, just bypass it
+  for this one operation and leave the user's preference untouched.
 - **M+ with nothing selected** → no-op (button disabled anyway).
 - **M− removing elements not in the basket** → no-op per element.
 - **Duplicate add** → deduped, no growth.
@@ -161,10 +169,13 @@ Filtering, coloring, aggregation — they will *consume* the basket `Scope`
 but are separate cards. This feature only establishes the basket + the
 `Scope.getContents()` shape they'll read.
 
-## Decisions for sign-off
+## Decisions — CONFIRMED 2026-05-21 (build to these)
 
-- **D1** — the three-surface UX split above (recommended) vs a single
-  always-present greyed cluster.
-- **D2** — basket persists in the session (recommended) vs session-only
-  in-memory (lost on reload).
-- **D3** — MR ignores the single-model-lock (recommended) vs respects it.
+- **D1 — CONFIRMED:** the three-surface UX split above (inspector "Add to
+  basket" entry · basket panel that appears only when non-empty · contextual-
+  tray "Clear basket"), with tooltips and M+/M− greyed when no live selection.
+- **D2 — CONFIRMED:** the basket persists in the session (rides in the
+  localStorage session state; rehydrated after models restore).
+- **D3 — CONFIRMED:** MR ignores the single-model-lock — recall selects the
+  whole basket across models via a lock-bypassing path that does NOT mutate
+  the setting. See the lock note under Edge cases.
