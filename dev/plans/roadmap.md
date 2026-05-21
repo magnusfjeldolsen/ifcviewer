@@ -38,13 +38,52 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Original design (kept for when this unblocks):** dev + preview `vite.config.ts` headers `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: credentialless`; a service worker for GitHub Pages prod (Pages can't set headers) that re-broadcasts them; `credentialless` (not `require-corp`) keeps cross-origin assets like the Google Analytics script working.
 - **Source:** Performance research section 3.2; blocker finding 2026-05-18.
 
-### `web-worker-parse` — Move IFC parsing into a Web Worker
+## Data Insight phase (epic — see `dev/plans/phase-data-insight.md`)
+
+Quickly understand the data in loaded IFC model(s): select, filter, colorize,
+aggregate. Built on one shared `Scope` (a set of elements) with several
+sources (model / basket / filter) and consumers (visibility / coloring /
+aggregation). Ships feature-by-feature, foundational-first.
+
+### `selection-basket` — Curated element set (M+/M−/MR/Clear)
 - **Status:** queued
-- **Effort:** M–L
-- **Why:** `progressive-scene-fill` (PR #30, reverted) streamed on the main thread, which cost a second model pass + per-batch yield overhead — medium models (~48 MB) loaded slower than the old blocking parse. A Web Worker removes the trade: single-pass parse, 60 fps UI throughout.
-- **What:** web-ifc runs in a worker; it streams geometry batches (zero-copy transferables) to the main thread, which renders via the existing `ModelManager` stream API. Property queries route to the worker via messages. **No cross-origin isolation needed** — a plain Worker is unrelated to the blocked `mt-wasm-coop-coep`.
-- **Risks:** the inspector's property data-path must be refactored to message the worker — that is the bulk of the effort.
-- **Source:** `dev/plans/handoff-web-worker-parse.md` (full implementation plan).
+- **Effort:** M
+- **Why:** Users need a persistent, curated set of elements to act on (filter / color / aggregate). The first `Scope` source.
+- **What:** Calculator-style CRUD — M+ add current selection, M− remove, MR recall (select the basket), Clear. A "Clear basket" button in the contextual-action tray when non-empty (same idiom as "Remove clipping"). Persisted in the session.
+- **Risks:** keep the UX calm; don't conflict with the live click-selection.
+- **Source:** `dev/plans/phase-data-insight.md` (feature 1 — ships first).
+
+### `element-visibility` — Hide / unhide / isolate elements
+- **Status:** queued
+- **Effort:** M
+- **Why:** Prerequisite for filter ("show matching, hide the rest"); useful alone (isolate selection). Today visibility is per-model only.
+- **What:** Element-level show / hide / isolate over a `Scope`. "Show all" contextual button when anything is hidden.
+- **Risks:** selection / raycast interaction with hidden elements.
+- **Source:** `dev/plans/phase-data-insight.md` (feature 2).
+
+### `filter-by-parameter` — Show elements matching a parameter
+- **Status:** queued (needs `element-visibility` + bulk property access)
+- **Effort:** M
+- **Why:** From a selected element/class, show all elements sharing a parameter value and hide the rest — fast "find everything like this."
+- **What:** Pick parameter(s) + match → matching elements become a `Scope`, isolated via `element-visibility`. Predicate evaluated across the model via bulk property access (the worker).
+- **Risks:** evaluating a predicate over thousands of elements — needs the worker bulk fetch.
+- **Source:** `dev/plans/phase-data-insight.md` (feature 4).
+
+### `parameter-coloring` — Color a scope by a parameter (color scale)
+- **Status:** queued
+- **Effort:** M
+- **Why:** See data spread visually — color elements by a parameter's value, like Naviate in Revit.
+- **What:** Apply a color scale (gradient for numeric, categorical for discrete) to a chosen parameter across a `Scope` (model / basket / filter), with a legend. Temporary; restored on clear. Reuses the highlight-variant material mechanism.
+- **Risks:** legend UX; large-model color application cost (use bulk fetch).
+- **Source:** `dev/plans/phase-data-insight.md` (feature 5).
+
+### `data-aggregation-tabs` — Pivot-style aggregation in workspace tabs
+- **Status:** queued (capstone — depends on bulk property access + the `Scope` spine)
+- **Effort:** L
+- **Why:** Quickly understand a model's data — sum / avg / count over a scope, Excel-pivot-style. The headline of the Data Insight phase.
+- **What:** A tabbed workspace (MODEL + renamable, session-persisted data-agg tabs). Each tab pivots a `Scope` (model / basket / filter): group + aggregate, show contributing elements + result tables; graphs + report/export later. Sub-phased: tab infra → pivot → graphs/export.
+- **Risks:** the pivot authoring UX and the tab / session-persistence model are the design risk — each gets its own hand-off doc.
+- **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
 ### `bulk-property-fetch-and-cap` — Unblock the inspector soft cap
 - **Status:** queued
@@ -55,6 +94,7 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
   - `InspectorPanel.beginMultiFetch` uses `getMany`.
   - Raise `MULTI_SELECT_SOFT_CAP` to 5 000 with a progress spinner, or remove entirely with a "Computing intersection... N / M" overlay. User has asked for this to be tunable in a future settings panel.
 - **Risks:** Bulk property data can be megabytes for large selections — memory peak during the call. Stream the result instead of materialising everything at once if it's a problem.
+- **Also feature 3 of the Data Insight phase** (`phase-data-insight.md`): the same `getMany` (plus real `enumerateExpressIds` / `describeSchema`, now running in the worker) is the enabler for `filter-by-parameter` and `data-aggregation-tabs`. Plan them together.
 - **Source:** Performance research section 6.
 
 ### `settings-panel` — User-tunable caps and preferences
@@ -131,4 +171,7 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Outcome:** `Viewer` gained a `needsRender` flag + `requestRender()`; `animate` still polls OrbitControls every frame (so its `'change'` event fires) but only calls `renderer.render` + the update callbacks on frames where something changed. `requestRender` is wired into every non-camera mutation site: `ModelManager` (add / remove / setVisible), `SelectionManager` (highlight changes), `ClippingTool` and `MeasurementTool` (new optional `requestRender` dep), and `CameraAnimator` (new `onTick` so fly-to renders each frame). Idle CPU/GPU drops to ~0. New `tests/render-on-demand.test.ts`; 397 → 403 tests.
 
 ### `progressive-scene-fill` — Meshes appear during StreamAllMeshes (PR #30, reverted 2026-05-19)
-- **Outcome:** Implemented as main-thread streaming — `IfcParser.parseStreaming`, a `ModelManager.beginStream / appendMeshes / endStream` API, and a `FrameYielder` time-slicer. It worked for huge models, but main-thread streaming needs a two-pass parse (one `StreamAllMeshes` pass for product IDs, one `StreamMeshes` pass for geometry — streamed geometry is only valid inside a callback, and the loop must yield to stay responsive), which made medium models (~48 MB) load slower than the old blocking parse. Reverted; PR #30 closed. The proper fix — single-pass, off the main thread — is `web-worker-parse` (queued; `dev/plans/handoff-web-worker-parse.md`).
+- **Outcome:** Implemented as main-thread streaming — `IfcParser.parseStreaming`, a `ModelManager.beginStream / appendMeshes / endStream` API, and a `FrameYielder` time-slicer. It worked for huge models, but main-thread streaming needs a two-pass parse (one `StreamAllMeshes` pass for product IDs, one `StreamMeshes` pass for geometry — streamed geometry is only valid inside a callback, and the loop must yield to stay responsive), which made medium models (~48 MB) load slower than the old blocking parse. Reverted; PR #30 closed. The proper fix — single-pass, off the main thread — is `web-worker-parse`.
+
+### `web-worker-parse` — Move IFC parsing into a Web Worker (PR #33, merged 2026-05-21)
+- **Outcome:** All web-ifc work — geometry parsing and property queries — runs in a plain module Web Worker (no cross-origin isolation needed). `IfcParser` + `WebIfcPropertyRepository` deleted; replaced by `ifcWorker.ts`, `WorkerIfcParser`, `WorkerPropertyRepository`, the extracted `fetchElementProperties` core, and `ifcMessages`/`types`. The worker owns all web-ifc state behind a serial queue, so `App.parseQueue` and `App.modelIdMap` are gone. `ModelManager` regained `beginStream/appendMeshes/endStream`; main thread renders progressively from worker batches. Single-pass parse — fixes the medium-model slowdown; UI stays at 60 fps during loads. 403 → 432 tests. Two follow-up fixes after merge-review: (1) the buffer was being *transferred* to the worker, which detached the main-thread copy and silently broke `sessionStore.saveModel` → reloads showed "File missing"; switched to structured-clone. (2) a pre-existing flaky leaked spinner-timer in `inspector-panel.test.ts` (fired post-teardown → `document is not defined`) was surfaced by the bigger suite; fixed by disposing mounted panels in `afterEach`. Also gitignored `.claude/agent-memory/` (the feature-implementer agent had committed its scratch).
