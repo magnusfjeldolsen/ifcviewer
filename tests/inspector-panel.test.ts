@@ -275,6 +275,11 @@ function makeStubSelection(
   return stub;
 }
 
+// Panels created via mountPanel — disposed in afterEach so their delayed
+// spinner timer (SPINNER_DELAY_MS) can't fire after the jsdom environment is
+// torn down, which throws "document is not defined" and flakes CI.
+const mountedPanels: InspectorPanel[] = [];
+
 function mountPanel(
   initialSelection: SelectionState = { kind: 'none' },
   depsOverrides: Partial<InspectorPanelDeps> = {},
@@ -291,6 +296,7 @@ function mountPanel(
     getModelCount: depsOverrides.getModelCount,
   };
   const panel = new InspectorPanel(parent, deps, selection);
+  mountedPanels.push(panel);
   return { panel, parent, repo, selection };
 }
 
@@ -305,6 +311,10 @@ describe('InspectorPanel', () => {
   });
 
   afterEach(() => {
+    // Dispose every panel a test mounted — clears its pending spinner timer
+    // so it can't fire post-teardown (dispose is idempotent-safe).
+    for (const p of mountedPanels) p.dispose();
+    mountedPanels.length = 0;
     vi.useRealTimers();
   });
 
