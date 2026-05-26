@@ -984,3 +984,83 @@ describe('SelectionManager — highlight scaling', () => {
     }
   });
 });
+
+// ── selectExactly — lock-bypassing recall path (Selection Basket, D3) ──
+//
+// MR (basket recall) must select the whole basket across models WITHOUT
+// mutating the persisted single-model-lock preference. `applyMany('replace',
+// …)` honours the lock (collapses the batch to one model), so recall uses
+// `selectExactly(identities)` instead. These tests pin the two invariants
+// that make D3 safe: (1) cross-model selection happens even when the lock is
+// ON, and (2) the persisted lock preference is untouched.
+describe('SelectionManager — selectExactly (basket recall, lock-bypassing)', () => {
+  let env: ReturnType<typeof makeStubDeps>;
+  let manager: SelectionManager;
+
+  beforeEach(() => {
+    lsStore.clear();
+    env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+    env.modelStore.set('B', makeModelEntry('B', [10, 20]));
+    manager = new SelectionManager(env.deps); // lock defaults ON
+  });
+
+  it('selects elements across models even with the single-model lock ON', () => {
+    expect(manager.isSingleModelLockEnabled()).toBe(true);
+    const state = manager.selectExactly([identity('A', 1), identity('B', 10)]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      const keys = state.identities.map((i) => `${i.modelId}:${i.expressId}`);
+      expect(keys).toEqual(['A:1', 'B:10']);
+    }
+  });
+
+  it('does NOT mutate the persisted single-model-lock preference', () => {
+    manager.selectExactly([identity('A', 1), identity('B', 10)]);
+    // In-memory flag unchanged…
+    expect(manager.isSingleModelLockEnabled()).toBe(true);
+    // …and localStorage is not written by recall (no key, or still 'true').
+    const persisted = lsStore.get(SINGLE_MODEL_LOCK_STORAGE_KEY);
+    expect(persisted === undefined || persisted === 'true').toBe(true);
+  });
+
+  it('replaces the existing selection (replace semantics)', () => {
+    manager.apply('replace', identity('A', 2));
+    const state = manager.selectExactly([identity('A', 1), identity('B', 10)]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.map((i) => `${i.modelId}:${i.expressId}`)).toEqual(['A:1', 'B:10']);
+    }
+  });
+
+  it('dedupes within the batch', () => {
+    const state = manager.selectExactly([identity('A', 1), identity('A', 1), identity('B', 10)]);
+    expect(state.kind).toBe('multi');
+    if (state.kind === 'multi') {
+      expect(state.identities.length).toBe(2);
+    }
+  });
+
+  it('empty input clears the selection', () => {
+    manager.apply('replace', identity('A', 1));
+    const state = manager.selectExactly([]);
+    expect(state.kind).toBe('none');
+  });
+
+  it('emits onChange once for a mutating recall', () => {
+    const listener = vi.fn();
+    manager.onChange(listener);
+    manager.selectExactly([identity('A', 1), identity('B', 10)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('highlights meshes in every recalled model', () => {
+    manager.selectExactly([identity('A', 1), identity('B', 10)]);
+    const aMesh = env.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+    const bMesh = env.modelStore.get('B')!.meshesByExpressId.get(10)![0];
+    const aMat = aMesh.material as THREE.MeshPhongMaterial;
+    const bMat = bMesh.material as THREE.MeshPhongMaterial;
+    expect(aMat.emissive.getHex()).toBe(0x3b82f6);
+    expect(bMat.emissive.getHex()).toBe(0x3b82f6);
+  });
+});

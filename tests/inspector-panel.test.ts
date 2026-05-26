@@ -294,6 +294,7 @@ function mountPanel(
     repository: repo,
     getModelInfo: depsOverrides.getModelInfo,
     getModelCount: depsOverrides.getModelCount,
+    onAddToBasket: depsOverrides.onAddToBasket,
   };
   const panel = new InspectorPanel(parent, deps, selection);
   mountedPanels.push(panel);
@@ -1144,6 +1145,44 @@ describe('InspectorPanel', () => {
       panel.setView('tree');
       const sections = parent.querySelectorAll('.inspector-section-label');
       expect(sections.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── "Add to basket" header button (Selection Basket, D1) ──
+  describe('add-to-basket header button', () => {
+    it('does not render the button when onAddToBasket is not provided', () => {
+      const { parent, selection } = mountPanel();
+      selection.emit({ kind: 'single', identities: [identity()] });
+      expect(parent.querySelector('.inspector-add-basket-btn')).toBeNull();
+    });
+
+    it('renders the button when onAddToBasket is provided and the panel is shown', () => {
+      const onAddToBasket = vi.fn();
+      const { parent, selection } = mountPanel({ kind: 'none' }, { onAddToBasket });
+      // Hidden panel: the button exists in the DOM but the panel is hidden.
+      selection.emit({ kind: 'single', identities: [identity()] });
+      const btn = parent.querySelector('.inspector-add-basket-btn') as HTMLButtonElement;
+      expect(btn).not.toBeNull();
+      expect(btn.title).toMatch(/add to basket/i);
+    });
+
+    it('calls onAddToBasket when clicked', () => {
+      const onAddToBasket = vi.fn();
+      const { parent, selection } = mountPanel({ kind: 'none' }, { onAddToBasket });
+      selection.emit({ kind: 'single', identities: [identity()] });
+      const btn = parent.querySelector('.inspector-add-basket-btn') as HTMLButtonElement;
+      btn.click();
+      expect(onAddToBasket).toHaveBeenCalledTimes(1);
+    });
+
+    it('is also available for a multi-selection', () => {
+      const onAddToBasket = vi.fn();
+      const { parent, selection } = mountPanel({ kind: 'none' }, { onAddToBasket });
+      selection.emit({ kind: 'multi', identities: [identity(), identity({ expressId: 2 })] });
+      const btn = parent.querySelector('.inspector-add-basket-btn') as HTMLButtonElement;
+      expect(btn).not.toBeNull();
+      btn.click();
+      expect(onAddToBasket).toHaveBeenCalledTimes(1);
     });
   });
 });
