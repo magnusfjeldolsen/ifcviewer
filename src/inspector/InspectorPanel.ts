@@ -81,14 +81,6 @@ export interface InspectorPanelDeps {
    * to show the model-name row. Optional — defaults to 1.
    */
   getModelCount?: () => number;
-  /**
-   * Selection Basket (D1) — invoked when the user clicks the header
-   * "Add to basket" button. Adds the current live selection to the basket.
-   * Optional: the button only renders when this is provided. App wires it to
-   * `basket.add(selectionManager.getState() identities)`. See
-   * dev/plans/handoff-selection-basket.md.
-   */
-  onAddToBasket?: () => void;
 }
 
 /** Internal "what is the panel currently rendering" tag. */
@@ -241,20 +233,6 @@ export class InspectorPanel {
 
     const titleActions = document.createElement('div');
     titleActions.className = 'inspector-title-actions';
-    // Selection Basket (D1) — "Add to basket" entry point. This is how a
-    // basket is *started*: the inspector already appears on any live
-    // selection, so one header button here solves the chicken-and-egg of
-    // "the basket cluster only shows once a basket exists." Only rendered
-    // when the host wires `onAddToBasket`.
-    if (deps.onAddToBasket) {
-      const addBasketBtn = document.createElement('button');
-      addBasketBtn.className = 'inspector-add-basket-btn';
-      addBasketBtn.type = 'button';
-      addBasketBtn.title = 'Add to basket (M+)';
-      addBasketBtn.textContent = '▲'; // ▲ — calculator-style "add to memory"
-      addBasketBtn.addEventListener('click', () => deps.onAddToBasket?.());
-      titleActions.appendChild(addBasketBtn);
-    }
     this.collapseBtn = document.createElement('button');
     this.collapseBtn.className = 'inspector-collapse-btn';
     this.collapseBtn.title = 'Collapse panel';

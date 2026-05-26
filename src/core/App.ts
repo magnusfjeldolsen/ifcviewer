@@ -339,9 +339,6 @@ export class App {
           return record ? { name: record.name } : undefined;
         },
         getModelCount: () => this.modelRecords.size,
-        // Selection Basket (D1) — header "Add to basket (M+)" button adds the
-        // current live selection. Same action as the panel's M+.
-        onAddToBasket: () => this.basketAdd(),
       },
       this.selectionManager,
     );
@@ -699,11 +696,11 @@ export class App {
 
   // ── Selection Basket actions (M+ / M− / MR) ───────────────
   //
-  // The four calculator keys: M+ (add live selection), M− (remove live
-  // selection), MR (recall — select the basket's contents), MC (clear,
-  // wired inline to `selectionBasket.clear()`). M+/M− read the current
-  // SelectionManager state; an empty selection is a no-op (the UI disables
-  // the buttons, but we guard here too for the header entry point).
+  // The four calculator keys, all driven by the basket panel: M+ (add live
+  // selection), M− (remove live selection), MR (recall — select the basket's
+  // contents), MC (clear, wired inline to `selectionBasket.clear()`). M+/M−
+  // read the current SelectionManager state; an empty selection is a no-op
+  // (the panel disables the buttons, but we guard here too).
 
   /** M+ — add the current live selection to the basket. */
   private basketAdd(): void {
