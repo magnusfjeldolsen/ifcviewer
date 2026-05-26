@@ -9,46 +9,50 @@ the verbs.
 
 ## Goal
 
-Right-click an element (or a multi-selection) → a native-feeling menu at the
-cursor with the actions that apply to that target. **Selection-aware**
-(confirmed): right-clicking an element that's part of the current selection
-acts on the whole selection; otherwise it acts on just that element.
+Right-click opens a menu of actions on the **current selection**. The menu
+**never reads or changes the element under the cursor** — there is no
+per-element targeting and no raycast. To act on something you select it first
+(left-click / ctrl-click / marquee / MR), then right-click. One rule: *the menu
+acts on what's selected.*
 
-## Behaviour
+## Behaviour (CM2 — confirmed)
 
 1. `contextmenu` event on the viewer canvas → `preventDefault()` (suppress the
-   browser menu) → `raycastVisible(...)` (already in `src/utils/raycast.ts`)
-   to resolve the element under the cursor.
-2. **Target resolution (selection-aware, confirmed):**
-   - Hit element **is in** the current selection → target = the whole selection
-     (header: "N elements"); the selection is left as-is.
-   - Hit element **is not** in the selection → **select it first** (replace the
-     selection with this one element, CM2), then target = that element. This
-     matches Explorer/Revit: right-clicking something not selected selects it,
-     so you always act on what's highlighted and there's no "I right-clicked
-     here but it acted there" surprise.
-   - **Empty space** (no hit) → a reduced menu offering only the active global
-     recovery actions (Show all, Clear transparency) if any state is active;
-     otherwise no menu. (Does not clear the selection.)
-3. Items (context-adaptive; greyed when N/A):
+   browser menu) → open the menu at the cursor. **No raycast**, no hit-testing.
+2. **Target is always the current `SelectionManager` selection.** Right-clicking
+   does not select, deselect, or otherwise touch the element under the cursor —
+   right-clicking an unselected element opens the same menu, still scoped to the
+   current selection. (To act directly on an element, left-click to select it
+   first, then right-click.)
+3. **The basket is reached via MR, not the menu.** The menu never targets the
+   basket directly. To act on basket contents, **MR** (recall) first so they
+   become the selection, then right-click. If a basket exists *and* the user
+   has a separate live selection, the menu acts on the **live selection**.
+4. Contents depend on the selection state:
+   - **Selection present** → verbs acting on it (below). Header shows "N
+     elements" (or the single element's class · tag).
+   - **No selection** → only the active global recovery actions (Show all /
+     Clear transparency) if any appearance state is active. If nothing is
+     selected and no recovery action applies, **the menu does not open** —
+     "menus only work for a selection".
 
 ```
 ┌─────────────────────────────┐
-│  3 elements                 │   ← header (target count / identity)
+│  3 elements                 │   ← header = the current selection
 │ ─────────────────────────── │
-│  Hide                       │
+│  Hide                       │   ← acts on the selection
 │  Isolate (hide others)      │
 │  Show all            (N)    │   ← enabled only when something is hidden
 │ ─────────────────────────── │
 │  Make transparent           │
 │  Make opaque                │   ← enabled only when something is transparent
 │ ─────────────────────────── │
-│  Select similar           ▸ │   ← single-element target only; needs A (bulk)
-│  Add to basket        (M+)  │
+│  Select similar           ▸ │   ← only when exactly ONE element is selected; needs A (bulk)
+│  Add to basket        (M+)  │   ← M+ : add the selection to the basket
 └─────────────────────────────┘
 ```
 
-4. Dismissal: outside-click, `Escape`, scroll/zoom, window blur, or after an
+5. Dismissal: outside-click, `Escape`, scroll/zoom, window blur, or after an
    item fires. Positioned at the cursor and **clamped to the viewport** (flip
    up/left near edges).
 
@@ -72,16 +76,18 @@ class ContextMenu {
 }
 ```
 
-App builds the `MenuItem[]` from current state on each open (target + whether
-anything is hidden/transparent + whether bulk-access is available), and wires
-each `onClick` to the AppearanceManager / SelectionManager / SelectionBasket.
+App builds the `MenuItem[]` from current state on each open — the current
+selection (count / single vs multi) + whether anything is hidden/transparent +
+whether bulk-access is available — and wires each `onClick` to the
+AppearanceManager / SelectionManager / SelectionBasket. **No raycast** is
+involved; the menu reads `SelectionManager.getState()`.
 
 ## Files
 
 | File | Change |
 |------|--------|
 | `src/ui/ContextMenu.ts` | NEW — the generic positioned menu (items, submenu, clamp, dismissal). |
-| `src/core/App.ts` | `contextmenu` listener on the canvas; raycast + selection-aware target; build items; dispatch to the relevant managers. |
+| `src/core/App.ts` | `contextmenu` listener on the canvas; build items from the current selection + appearance state; dispatch to the relevant managers. No raycast / no selection change. |
 | `src/styles.css` | Menu styling (matches the panel/tray idiom); submenu flyout. |
 
 ## Edge cases
@@ -94,44 +100,46 @@ each `onClick` to the AppearanceManager / SelectionManager / SelectionBasket.
 - **No `contextmenu` leak** — every code path that opens it calls
   `preventDefault()`; never trigger native dialogs (per the harness's dialog
   caveat — this is our own DOM, so fine).
-- **Menu outlives target** — if the model is removed while the menu is open,
-  close it.
+- **Selection cleared while the menu is open** (e.g. model removed) → close it.
 
 ## Test plan
 
 **Automated** (jsdom):
 - `tests/context-menu.test.ts` (NEW): builds the correct item set for a
-  single-element target vs a multi-selection target vs empty-space; selection-
-  aware target resolution (mock raycast: hit-in-selection → whole selection;
-  hit-not-in-selection → single element, selection unchanged); item `onClick`
-  dispatches the right callback; disabled items when the corresponding state is
-  absent (Show all greyed when nothing hidden); `Escape` and outside-click
-  close; menu clamps near a viewport edge.
+  single-element selection vs a multi-selection vs no selection (mock
+  `SelectionManager.getState()`); right-click does **not** mutate the selection
+  (no select/deselect on open); no menu opens when nothing is selected and no
+  recovery action applies; "Select similar" present only for a single-element
+  selection; item `onClick` dispatches the right callback; disabled items when
+  the corresponding state is absent (Show all greyed when nothing hidden);
+  `Escape` and outside-click close; menu clamps near a viewport edge.
 
 **Manual smoke**:
-1. Right-click an unselected element → menu shows that element; Hide works;
-   the rest of the scene is untouched and the selection didn't change.
-2. Marquee-select several → right-click one of them → header "N elements";
-   Hide hides all of them.
-3. Right-click empty space with something hidden → "Show all (N)" appears;
-   clicking it restores.
-4. Esc / click-away / scroll all dismiss the menu.
-5. Menu near the right/bottom edge flips to stay on-screen.
+1. Nothing selected → right-click → no menu (unless something is hidden/
+   transparent → only the recovery action shows).
+2. Select an element (left-click) → right-click → menu acts on it; Hide works.
+3. Marquee-select several → right-click → header "N elements"; Hide hides all.
+4. Build a basket, then start a different live selection → right-click acts on
+   the live selection, not the basket. MR the basket → right-click now acts on
+   the basket contents (they're the selection).
+5. Right-click an *unselected* element while a selection exists elsewhere →
+   menu still acts on the existing selection; the clicked element is untouched.
+6. Esc / click-away / scroll dismiss; menu near an edge flips on-screen.
 
 ## Open decisions
 
-- **CM1 — empty-space right-click**: show a recovery-only menu (Show all /
-  Clear transparency) when state is active vs. nothing. Recommend the
-  recovery-only menu.
+- **CM1 — no-selection right-click**: show a recovery-only menu (Show all /
+  Clear transparency) when appearance state is active vs. nothing. Recommend the
+  recovery-only menu (and no menu at all when there's nothing to recover).
 - **CM3 — extra items** (Properties / focus inspector, Zoom to selection):
   defer to v2.
 - **CM4 — suppress during active tool** — recommend yes.
 
 ## Confirmed (build to these)
 
-- **Selection-aware target** (user): right-click on a selected element acts on
-  the whole selection; otherwise on the single clicked element.
-- **CM2 — right-click selects the target first.** Right-clicking an element
-  that isn't in the current selection replaces the selection with it before the
-  menu acts (Explorer/Revit convention). An element already in a multi-selection
-  keeps the whole selection.
+- **CM2 — the menu acts only on the current selection.** Right-click opens a
+  menu scoped to whatever is selected and **does not read or change the element
+  under the cursor** (no raycast, no select-on-right-click). To act on an
+  element, select it first; to act on the basket, MR it into the selection
+  first. With a basket *and* a separate live selection, the menu acts on the
+  live selection. No selection (and no active recovery action) → no menu.

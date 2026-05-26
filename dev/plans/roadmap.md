@@ -70,7 +70,7 @@ features build on them. Confirmed decisions live in the epic doc.
 - **Status:** queued (debuts with `element-appearance`)
 - **Effort:** M
 - **Why:** The unifying surface for hide/isolate/fade/select-similar/add-to-basket; no context menu exists today.
-- **What:** New `src/ui/ContextMenu.ts`; `contextmenu` → raycast target. Right-click selects its target first (Explorer/Revit convention); an element already in a multi-selection keeps the whole selection. Empty-space → recovery-only menu.
+- **What:** New `src/ui/ContextMenu.ts`; `contextmenu` opens a menu scoped to the **current selection** — no raycast, no select-on-right-click. To act on an element, select it first; to act on the basket, MR it into the selection first. No selection (and no active recovery action) → no menu.
 - **Risks:** positioning/clamping; suppress during active tools.
 - **Source:** `dev/plans/handoff-context-menu.md`.
 

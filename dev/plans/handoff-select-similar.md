@@ -47,8 +47,10 @@ for that parameter equals this row's value. Mirrored as a **"Select similar ▸"
 submenu in the right-click context menu (`handoff-context-menu.md`), listing the
 element's parameters (+ the type/class presets).
 
-Only meaningful for a **single-element** target (a multi-selection has no single
-"this value"); greyed/hidden otherwise.
+Only meaningful for a **single-element selection** (a multi-selection has no
+single "this value"); greyed/hidden otherwise. In the context menu it follows
+CM2 — it acts on the current selection, so "Select similar" appears only when
+exactly one element is selected.
 
 ## Mechanism
 
