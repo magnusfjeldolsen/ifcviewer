@@ -112,10 +112,12 @@ satisfying capability — before transparency, select-similar, or the data work.
     just a selection change, already covered by selection undo.
   - *Camera* (orbit / pan / zoom / fly-to / pivot): **never recorded.**
 - **History clears on model add/remove** (U2) — safe v1; prune-only later.
-- **Context menu is selection-aware**, and **right-click selects its target**
-  (CM2): clicking an element not in the current selection replaces the
-  selection with it before the menu acts (Explorer/Revit convention); an
-  element already in a multi-selection keeps the whole selection.
+- **Context menu acts only on the current selection** (CM2): right-click opens
+  a menu scoped to whatever is selected and **does not read or change the
+  element under the cursor** (no raycast, no select-on-right-click). To act on
+  an element, select it first; to act on the basket, MR it into the selection
+  first. With a basket *and* a separate live selection, the menu acts on the
+  live selection. No selection (and no active recovery action) → no menu.
 - **Appearance is one system, states mutually exclusive** (A4): a single
   per-element manager with one state (normal / hidden / transparent); a new op
   overrides the current one (no combined transparent+hidden). It normalizes to
