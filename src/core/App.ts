@@ -22,8 +22,10 @@ import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { InspectorPanel } from '../inspector/InspectorPanel';
+import { SelectionBasket } from '../inspector/SelectionBasket';
+import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
-import type { ModelRecord, ModelSource } from '../services/SessionStore';
+import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
 export class App {
@@ -73,6 +75,12 @@ export class App {
   // repository proxies property queries to the same worker `parser` owns.
   private propertyRepository!: WorkerPropertyRepository;
   private inspectorPanel!: InspectorPanel;
+  // Selection Basket (Data Insight feature 1). The basket is the model
+  // (constructed eagerly so restore can rehydrate it); the panel + tray
+  // button are wired in start(). The 4 calculator actions (M+/M−/MR/MC)
+  // bridge the basket to the SelectionManager. Persisted in the session.
+  private selectionBasket: SelectionBasket;
+  private selectionBasketPanel!: SelectionBasketPanel;
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
@@ -132,6 +140,11 @@ export class App {
       selectionManager: this.selectionManager,
     });
 
+    // Selection Basket model (Data Insight feature 1). Constructed eagerly
+    // so session restore can rehydrate it once models are back. The panel
+    // and the 4 calculator actions are wired in start().
+    this.selectionBasket = new SelectionBasket();
+
     // Toolbar UI
     const appEl = document.getElementById('app')!;
 
@@ -161,6 +174,10 @@ export class App {
         // Drop selection bookkeeping BEFORE ModelManager disposes the meshes,
         // so SelectionManager doesn't try to restore materials on dead meshes.
         this.selectionManager.onModelRemoved(id);
+        // Prune the Selection Basket too — drop any of this model's entries
+        // (its onChange triggers a debounced session save). Constructed in
+        // the App constructor, so it's always available here.
+        this.selectionBasket.onModelRemoved(id);
         // Free memoized properties AND close the worker's model. The
         // repository's disposeModel posts the `disposeModel` worker
         // message, so we do NOT also call parser.disposeModel here.
@@ -322,9 +339,30 @@ export class App {
           return record ? { name: record.name } : undefined;
         },
         getModelCount: () => this.modelRecords.size,
+        // Selection Basket (D1) — header "Add to basket (M+)" button adds the
+        // current live selection. Same action as the panel's M+.
+        onAddToBasket: () => this.basketAdd(),
       },
       this.selectionManager,
     );
+
+    // Selection Basket panel (D1) — appears only when the basket is
+    // non-empty. The 4 calculator actions bridge the basket to the
+    // SelectionManager; M+/M− read the live selection, MR uses the
+    // lock-bypassing selectExactly path so recall spans models without
+    // touching the single-model-lock preference (D3).
+    this.selectionBasketPanel = new SelectionBasketPanel(appEl, {
+      basket: this.selectionBasket,
+      selection: this.selectionManager,
+      onAddSelection: () => this.basketAdd(),
+      onRemoveSelection: () => this.basketRemove(),
+      onRecall: () => this.basketRecall(),
+      onClear: () => this.selectionBasket.clear(),
+    });
+
+    // Persist the basket on every content change (debounced via the same
+    // scheduleSave path the camera/models use; honours the memory toggle).
+    this.selectionBasket.onChange(() => this.scheduleSave());
 
     // Contextual action tray (bottom-right). Currently hosts the Remove
     // clipping button; future contextual buttons plug in by calling
@@ -339,6 +377,19 @@ export class App {
       isVisible: () => this.clippingTool.hasClipPlane(),
       onClick: () => this.clippingTool.clearClipPlane(),
       subscribe: (refresh) => this.clippingTool.onStateChange(refresh),
+    });
+
+    // Selection Basket (D1) — "Clear basket" in the tray, so the basket can
+    // be cleared even when nothing is selected and the user's attention is
+    // elsewhere. Same idiom as Remove clipping; visible only when the basket
+    // is non-empty.
+    this.contextualActions.register({
+      id: 'clear-basket',
+      label: 'Clear basket',
+      icon: '🧺', // 🧺
+      isVisible: () => this.selectionBasket.size() > 0,
+      onClick: () => this.selectionBasket.clear(),
+      subscribe: (refresh) => this.selectionBasket.onChange(refresh),
     });
 
     const dropZone = document.getElementById('drop-zone');
@@ -366,12 +417,22 @@ export class App {
 
   private boundBeforeUnload = (): void => {
     if (this.sessionStore.isMemoryEnabled()) {
-      this.sessionStore.saveSession({
-        camera: this.viewer.getCameraState(),
-        models: Array.from(this.modelRecords.values()),
-      });
+      this.sessionStore.saveSession(this.buildSessionState());
     }
   };
+
+  /**
+   * Assemble the SessionState snapshot persisted to localStorage. Single
+   * home so every save path (debounced, beforeunload, immediate-on-load)
+   * carries the same fields — including the Selection Basket (D2).
+   */
+  private buildSessionState(): SessionState {
+    return {
+      camera: this.viewer.getCameraState(),
+      models: Array.from(this.modelRecords.values()),
+      basket: this.selectionBasket.serialize(),
+    };
+  }
 
   private scheduleSave(): void {
     if (!this.sessionStore.isMemoryEnabled()) return;
@@ -379,10 +440,7 @@ export class App {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       if (!this.sessionStore.isMemoryEnabled()) return;
-      this.sessionStore.saveSession({
-        camera: this.viewer.getCameraState(),
-        models: Array.from(this.modelRecords.values()),
-      });
+      this.sessionStore.saveSession(this.buildSessionState());
     }, 1000);
   }
 
@@ -522,6 +580,19 @@ export class App {
       this.setStatus('');
     }
 
+    // Rehydrate the Selection Basket (D2) AFTER models are restored — its
+    // identities only resolve once their models exist. Drop entries whose
+    // model didn't restore (e.g. a missing local file). The basket is
+    // metadata only (no geometry), so this is cheap and rides in the
+    // localStorage session state.
+    if (session?.basket?.length) {
+      const liveModelIds = new Set(this.modelManager.getModelIds());
+      const surviving = session.basket.filter((e) => liveModelIds.has(e.modelId));
+      if (surviving.length > 0) {
+        this.selectionBasket.deserialize(surviving);
+      }
+    }
+
     // Restore camera after fitToBox so it overrides the auto-fit
     if (session?.camera) {
       this.viewer.restoreCameraState(session.camera);
@@ -608,10 +679,7 @@ export class App {
         await this.sessionStore.saveModel(id, file.name, file.buffer);
         // Force an immediate session save (not debounced) so the record
         // is in localStorage even if the user refreshes right away
-        this.sessionStore.saveSession({
-          camera: this.viewer.getCameraState(),
-          models: Array.from(this.modelRecords.values()),
-        });
+        this.sessionStore.saveSession(this.buildSessionState());
         // Fire-and-forget geometry-cache write. Runs after the scene is
         // up so the user-perceived parse time is unaffected; a failed
         // write just means the next restore falls back to a full parse.
@@ -627,6 +695,40 @@ export class App {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
     }
+  }
+
+  // ── Selection Basket actions (M+ / M− / MR) ───────────────
+  //
+  // The four calculator keys: M+ (add live selection), M− (remove live
+  // selection), MR (recall — select the basket's contents), MC (clear,
+  // wired inline to `selectionBasket.clear()`). M+/M− read the current
+  // SelectionManager state; an empty selection is a no-op (the UI disables
+  // the buttons, but we guard here too for the header entry point).
+
+  /** M+ — add the current live selection to the basket. */
+  private basketAdd(): void {
+    const state = this.selectionManager.getState();
+    if (state.kind === 'none') return;
+    this.selectionBasket.add(state.identities);
+  }
+
+  /** M− — remove the current live selection from the basket. */
+  private basketRemove(): void {
+    const state = this.selectionManager.getState();
+    if (state.kind === 'none') return;
+    this.selectionBasket.remove(state.identities);
+  }
+
+  /**
+   * MR — recall: select the basket's contents (highlight them). Uses the
+   * lock-bypassing `selectExactly` path so a multi-model basket recalls
+   * across all its models WITHOUT mutating the single-model-lock preference
+   * (D3). No-op on an empty basket.
+   */
+  private basketRecall(): void {
+    const contents = this.selectionBasket.getContents();
+    if (contents.length === 0) return;
+    this.selectionManager.selectExactly(contents);
   }
 
   private fitSmart(): void {
@@ -743,6 +845,7 @@ export class App {
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     if (this.inspectorPanel) this.inspectorPanel.dispose();
+    if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
     this.marqueeSelector.dispose();
     this.selectionManager.dispose();
     // contextualActions must dispose BEFORE toolManager so the tray can

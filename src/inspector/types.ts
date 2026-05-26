@@ -37,6 +37,15 @@ export interface ElementIdentity {
 
 export type SelectionMode = 'replace' | 'add' | 'remove';
 
+/**
+ * A `Scope` is a set of element identities — the substrate the Data Insight
+ * features operate on. The Selection Basket is the first concrete producer
+ * (`SelectionBasket.getContents()`). Kept minimal for now (a plain readonly
+ * list); later sources (filter, model) will also expose a list and we'll
+ * generalize then. See dev/plans/handoff-selection-basket.md.
+ */
+export type Scope = readonly ElementIdentity[];
+
 export type SelectionState =
   | { kind: 'none' }
   | { kind: 'single'; identities: [ElementIdentity] }

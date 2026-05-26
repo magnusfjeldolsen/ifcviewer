@@ -359,6 +359,50 @@ export class SelectionManager {
   }
 
   /**
+   * Select EXACTLY the given identities, replacing whatever is selected —
+   * **bypassing the single-model lock**. Unlike `applyMany('replace', …)`,
+   * which collapses a cross-model batch to one model when the lock is on,
+   * this selects every identity across every model regardless of the lock,
+   * and crucially does NOT mutate the persisted lock preference.
+   *
+   * This is the recall path for the Selection Basket (MR): the basket can
+   * span models, and recalling it must highlight all of its contents without
+   * silently changing the user's "Single-model selection" setting. (See
+   * dev/plans/handoff-selection-basket.md, edge case "MR vs the
+   * single-model-lock".)
+   *
+   * Semantics:
+   *   - Clears the current selection (replace).
+   *   - Adds each identity, deduped within the batch.
+   *   - Empty input → clears (returns to none).
+   *   - Emits onChange once iff anything changed.
+   *
+   * Returns the post-call state.
+   */
+  selectExactly(identities: readonly ElementIdentity[]): SelectionState {
+    let mutated = false;
+    const seen = new Set<SelectionKey>();
+
+    if (this.selected.size > 0) {
+      this.clearInternal();
+      mutated = true;
+    }
+
+    for (const id of identities) {
+      const key = makeKey(id.modelId, id.expressId);
+      if (seen.has(key)) continue; // Dedup within the batch.
+      seen.add(key);
+      this.addInternal(key, id);
+      mutated = true;
+    }
+
+    if (mutated) {
+      this.notifyChange();
+    }
+    return this.getState();
+  }
+
+  /**
    * Return the modelId of the first selected element, or null if the
    * selection is empty. Used by the single-model-lock check in `apply`.
    */

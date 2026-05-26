@@ -38,6 +38,15 @@ export interface SessionState {
   /** @deprecated Use models instead */
   fileNames?: string[];
   models?: ModelRecord[];
+  /**
+   * Selection Basket (Data Insight feature 1, D2) — the user-curated set of
+   * elements, persisted as lightweight identity pairs. It's metadata only (no
+   * geometry), so it rides in the localStorage session state rather than IDB.
+   * Rehydrated on restore *after* models load (the identities only resolve
+   * once their models exist; entries for models that didn't restore are
+   * dropped). See dev/plans/handoff-selection-basket.md.
+   */
+  basket?: { modelId: string; expressId: number }[];
 }
 
 const TOGGLE_KEY = 'ifcviewer:memoryEnabled';
