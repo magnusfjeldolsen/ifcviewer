@@ -1,20 +1,23 @@
 /**
  * Selection Basket panel — feature 1 of the Data Insight phase.
  *
- * A small DOM-driven panel (no framework) that appears **only when the basket
- * is non-empty**. It shows "N in basket" plus the calculator cluster
- * M+ · M− · MR · MC, each with a tooltip:
+ * A small DOM-driven panel (no framework) that appears whenever there is
+ * **something to do** — a live selection (so you can add it) OR a non-empty
+ * basket (so you can recall/clear it). It shows "N in basket" plus the
+ * calculator cluster M+ · M− · MR · MC, each with a tooltip:
  *   - M+ — "Add selection to basket"
  *   - M− — "Remove selection from basket"
  *   - MR — "Select basket contents"
  *   - MC — "Clear basket"
  *
- * M+ / M− are disabled (greyed, tooltip still shown) when there is no live
- * selection; MR / MC are always enabled while the basket is non-empty. The
- * *cluster* appears/disappears with the basket (calmer than individual
- * buttons popping in and out), while the inspector's "Add to basket" header
- * button covers the very first add (the chicken-and-egg of "buttons only
- * show once a basket exists").
+ * Per-button enablement (greyed, tooltip still shown, when not applicable):
+ *   - M+ — needs a live selection.
+ *   - M− — needs a live selection AND a non-empty basket.
+ *   - MR / MC — need a non-empty basket.
+ * The *cluster* appears on any live selection, so selecting an element is the
+ * entry point for starting a basket (no separate inspector button needed).
+ * It stays hidden only when there's both no selection and an empty basket, so
+ * the screen is calm until there's something to act on.
  *
  * This component only renders + dispatches; the four actions are wired to the
  * SelectionBasket + SelectionManager by App.ts. See
@@ -62,6 +65,8 @@ export class SelectionBasketPanel {
   private countEl: HTMLElement;
   private addBtn: HTMLButtonElement;
   private removeBtn: HTMLButtonElement;
+  private recallBtn: HTMLButtonElement;
+  private clearBtn: HTMLButtonElement;
 
   private deps: BasketPanelDeps;
   private unsubscribeBasket: () => void;
@@ -111,31 +116,35 @@ export class SelectionBasketPanel {
     });
     this.addBtn = buttons[0];
     this.removeBtn = buttons[1];
+    this.recallBtn = buttons[2];
+    this.clearBtn = buttons[3];
 
     this.container.appendChild(cluster);
     parent.appendChild(this.container);
 
-    // Subscribe: basket → count + visibility; selection → M+/M− enablement.
-    this.unsubscribeBasket = deps.basket.onChange(() => this.refreshBasket());
-    this.unsubscribeSelection = deps.selection.onChange(() => this.refreshSelection());
+    // Both the basket (count + MR/MC) and the live selection (M+/M−) feed the
+    // same visibility + enablement decision, so both fire the one refresh.
+    this.unsubscribeBasket = deps.basket.onChange(() => this.refresh());
+    this.unsubscribeSelection = deps.selection.onChange(() => this.refresh());
 
     // Drive initial state.
-    this.refreshBasket();
-    this.refreshSelection();
+    this.refresh();
   }
 
-  /** Update count + visibility from the basket. */
-  private refreshBasket(): void {
+  /** Re-evaluate count, visibility, and per-button enablement. */
+  private refresh(): void {
     const n = this.deps.basket.size();
+    const hasSelection = hasLiveSelection(this.deps.selection.getState());
     this.countEl.textContent = `${n} in basket`;
-    this.container.classList.toggle('hidden', n === 0);
-  }
-
-  /** Enable/disable M+/M− based on whether a live selection exists. */
-  private refreshSelection(): void {
-    const enabled = hasLiveSelection(this.deps.selection.getState());
-    this.addBtn.disabled = !enabled;
-    this.removeBtn.disabled = !enabled;
+    // Visible whenever there's something to add (a live selection) or
+    // something to manage (a non-empty basket); hidden only when both empty.
+    this.container.classList.toggle('hidden', n === 0 && !hasSelection);
+    // M+ needs a selection; M− needs a selection AND something to remove
+    // from; MR / MC need a non-empty basket.
+    this.addBtn.disabled = !hasSelection;
+    this.removeBtn.disabled = !hasSelection || n === 0;
+    this.recallBtn.disabled = n === 0;
+    this.clearBtn.disabled = n === 0;
   }
 
   isHidden(): boolean {

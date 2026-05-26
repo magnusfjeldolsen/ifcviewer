@@ -57,7 +57,7 @@ describe('SelectionBasketPanel — visibility', () => {
     document.body.appendChild(parent);
   });
 
-  it('renders the panel hidden when the basket is empty', () => {
+  it('renders the panel hidden when the basket is empty and nothing is selected', () => {
     const deps = makeDeps();
     new SelectionBasketPanel(parent, deps);
     const panel = parent.querySelector('.basket-panel') as HTMLElement;
@@ -74,7 +74,17 @@ describe('SelectionBasketPanel — visibility', () => {
     expect(panel.classList.contains('hidden')).toBe(false);
   });
 
-  it('hides again when the basket is cleared', () => {
+  it('shows the panel on a live selection even when the basket is empty', () => {
+    const selection = makeSelectionSource({ kind: 'none' });
+    const deps = makeDeps({ selection });
+    new SelectionBasketPanel(parent, deps);
+    const panel = parent.querySelector('.basket-panel') as HTMLElement;
+    expect(panel.classList.contains('hidden')).toBe(true);
+    selection.set({ kind: 'single', identities: [identity('A', 1)] });
+    expect(panel.classList.contains('hidden')).toBe(false);
+  });
+
+  it('hides again when the basket is cleared and nothing is selected', () => {
     const basket = new SelectionBasket();
     const deps = makeDeps({ basket });
     new SelectionBasketPanel(parent, deps);
@@ -82,6 +92,17 @@ describe('SelectionBasketPanel — visibility', () => {
     basket.clear();
     const panel = parent.querySelector('.basket-panel') as HTMLElement;
     expect(panel.classList.contains('hidden')).toBe(true);
+  });
+
+  it('stays visible after the basket empties while a selection is still live', () => {
+    const basket = new SelectionBasket();
+    const selection = makeSelectionSource({ kind: 'single', identities: [identity('A', 1)] });
+    const deps = makeDeps({ basket, selection });
+    new SelectionBasketPanel(parent, deps);
+    basket.add([identity('A', 1)]);
+    basket.clear();
+    const panel = parent.querySelector('.basket-panel') as HTMLElement;
+    expect(panel.classList.contains('hidden')).toBe(false);
   });
 });
 
@@ -193,7 +214,7 @@ describe('SelectionBasketPanel — M+/M− enablement follows selection', () => 
     expect(btn(parent, 'remove').disabled).toBe(false);
   });
 
-  it('MR and MC are always enabled while the basket is non-empty', () => {
+  it('MR and MC are enabled while the basket is non-empty', () => {
     const basket = new SelectionBasket();
     const selection = makeSelectionSource({ kind: 'none' });
     const deps = makeDeps({ basket, selection });
@@ -201,6 +222,19 @@ describe('SelectionBasketPanel — M+/M− enablement follows selection', () => 
     basket.add([identity('A', 1)]);
     expect(btn(parent, 'recall').disabled).toBe(false);
     expect(btn(parent, 'clear').disabled).toBe(false);
+  });
+
+  it('with a selection but an empty basket, only M+ is enabled', () => {
+    const basket = new SelectionBasket();
+    const selection = makeSelectionSource({ kind: 'single', identities: [identity('A', 1)] });
+    const deps = makeDeps({ basket, selection });
+    new SelectionBasketPanel(parent, deps);
+    // Panel is visible (selection present) but the basket is empty: you can
+    // add, but there's nothing to remove from, recall, or clear.
+    expect(btn(parent, 'add').disabled).toBe(false);
+    expect(btn(parent, 'remove').disabled).toBe(true);
+    expect(btn(parent, 'recall').disabled).toBe(true);
+    expect(btn(parent, 'clear').disabled).toBe(true);
   });
 
   it('re-enables M+/M− when a selection arrives after the panel is shown', () => {
