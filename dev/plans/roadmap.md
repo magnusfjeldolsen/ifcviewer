@@ -38,6 +38,58 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Original design (kept for when this unblocks):** dev + preview `vite.config.ts` headers `Cross-Origin-Opener-Policy: same-origin` / `Cross-Origin-Embedder-Policy: credentialless`; a service worker for GitHub Pages prod (Pages can't set headers) that re-broadcasts them; `credentialless` (not `require-corp`) keeps cross-origin assets like the Google Analytics script working.
 - **Source:** Performance research section 3.2; blocker finding 2026-05-18.
 
+## Scope Ops + Undo phase (epic — see `dev/plans/phase-scope-ops-and-undo.md`)
+
+The reversible editing layer the Data Insight phase sits on: act on a `Scope`
+(hide / isolate / fade / select-similar) via a selection-aware right-click
+menu, with global Ctrl+Z / Ctrl+Y. Two independent keystones first
+(`bulk-property-fetch-and-cap` for data, `undo-redo` for interaction), then the
+features build on them. Confirmed decisions live in the epic doc.
+
+**Order:** `bulk-property-fetch-and-cap` ‖ `undo-redo` → `context-menu` +
+`element-appearance` → `undo-redo-retrofit` → `select-similar` → (Data Insight)
+`parameter-coloring` · `data-aggregation-tabs`.
+
+### `undo-redo` — Global undo/redo (Ctrl+Z · Ctrl+Y)
+- **Status:** queued (interaction keystone — build first, with selection undo)
+- **Effort:** M
+- **Why:** Hide/isolate/fade and bulk selection edits need to be safe to try; users will accidentally clear the basket or over-select. Nothing is reversible today.
+- **What:** A `Command` pattern + single `HistoryManager` (before/after mementos), Ctrl+Z / Ctrl+Y wiring with an input-focus guard. One command per user-perceived gesture (a 1000-element marquee = one undo). Ships with **selection undo** + **basket undo** (M+/M−/MC). Camera is never recorded; history clears on model add/remove.
+- **Risks:** the `isApplying()` re-entrancy guard (undo must not push a new command) is the correctness crux; selection mementos can be large → depth-capped.
+- **Source:** `dev/plans/handoff-undo-redo.md`.
+
+### `undo-redo-retrofit` — Make clipping + measurement undoable
+- **Status:** queued (depends on `undo-redo`)
+- **Effort:** S–M
+- **Why:** The existing tools should join the history once the contract is proven.
+- **What:** Clipping drag (pointer-down→up) = one command; create/remove plane = one each. A completed measurement = one command; delete = one. Mid-placement Ctrl+Z cancels the pending placement.
+- **Risks:** tool visual handles must re-sync on undo/redo.
+- **Source:** `dev/plans/handoff-undo-redo.md` (§ Retrofit).
+
+### `context-menu` — Selection-aware right-click menu
+- **Status:** queued (debuts with `element-appearance`)
+- **Effort:** M
+- **Why:** The unifying surface for hide/isolate/fade/select-similar/add-to-basket; no context menu exists today.
+- **What:** New `src/ui/ContextMenu.ts`; `contextmenu` → raycast target. Right-click selects its target first (Explorer/Revit convention); an element already in a multi-selection keeps the whole selection. Empty-space → recovery-only menu.
+- **Risks:** positioning/clamping; suppress during active tools.
+- **Source:** `dev/plans/handoff-context-menu.md`.
+
+### `element-appearance` — Hide / isolate / show-all + transparent / opaque
+- **Status:** queued (depends on `undo-redo` + `context-menu`; supersedes `element-visibility`)
+- **Effort:** M
+- **Why:** Act on a `Scope`'s visibility/transparency; prerequisite for filter and useful alone (isolate).
+- **What:** One `AppearanceManager` with a single mutually-exclusive state per element (normal / hidden / transparent), normalize-then-apply for robust transitions. Hide via `meshesByExpressId`; transparency reuses the highlight-variant material trick. Tray "Show N hidden" / "Clear transparency" recovery. Undo-aware; session-persisted.
+- **Risks:** the transparency + highlight overlay on one mesh; fit/raycast/marquee must respect hidden meshes.
+- **Source:** `dev/plans/handoff-element-appearance.md`.
+
+### `select-similar` — Find elements with a matching parameter
+- **Status:** queued (presets cut: no dep; value-match cut: needs `bulk-property-fetch-and-cap`)
+- **Effort:** M
+- **Why:** "Show me all the B12 beams" in one click — the inline form of `filter-by-parameter`; a `Scope` source feeding basket/visibility/coloring/aggregation.
+- **What:** Inline "⌕ Select similar" on inspector property rows + a context-menu submenu. Two cuts: same-type/same-class presets first (no dependency), parameter value-match once bulk access lands. Result drives `selectExactly` (one undoable selection).
+- **Risks:** huge match sets (reuse the bulk selection path + progress); value typing.
+- **Source:** `dev/plans/handoff-select-similar.md`.
+
 ## Data Insight phase (epic — see `dev/plans/phase-data-insight.md`)
 
 Quickly understand the data in loaded IFC model(s): select, filter, colorize,
@@ -45,29 +97,24 @@ aggregate. Built on one shared `Scope` (a set of elements) with several
 sources (model / basket / filter) and consumers (visibility / coloring /
 aggregation). Ships feature-by-feature, foundational-first.
 
-### `selection-basket` — Curated element set (M+/M−/MR/Clear)
-- **Status:** queued
-- **Effort:** M
-- **Why:** Users need a persistent, curated set of elements to act on (filter / color / aggregate). The first `Scope` source.
-- **What:** Calculator-style CRUD — M+ add current selection, M− remove, MR recall (select the basket), Clear. A "Clear basket" button in the contextual-action tray when non-empty (same idiom as "Remove clipping"). Persisted in the session.
-- **Risks:** keep the UX calm; don't conflict with the live click-selection.
-- **Source:** `dev/plans/phase-data-insight.md` (feature 1 — ships first).
+_`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
+`Scope` source; the cards below build on it._
 
 ### `element-visibility` — Hide / unhide / isolate elements
-- **Status:** queued
+- **Status:** queued — **superseded by `element-appearance`** (which adds isolate + transparency + undo); kept for the feature-2 reference.
 - **Effort:** M
 - **Why:** Prerequisite for filter ("show matching, hide the rest"); useful alone (isolate selection). Today visibility is per-model only.
 - **What:** Element-level show / hide / isolate over a `Scope`. "Show all" contextual button when anything is hidden.
 - **Risks:** selection / raycast interaction with hidden elements.
-- **Source:** `dev/plans/phase-data-insight.md` (feature 2).
+- **Source:** `dev/plans/phase-data-insight.md` (feature 2); now planned in `dev/plans/handoff-element-appearance.md`.
 
 ### `filter-by-parameter` — Show elements matching a parameter
-- **Status:** queued (needs `element-visibility` + bulk property access)
+- **Status:** queued (needs `element-visibility` + bulk property access). First, lighter form is `select-similar` (selects rather than isolates).
 - **Effort:** M
 - **Why:** From a selected element/class, show all elements sharing a parameter value and hide the rest — fast "find everything like this."
 - **What:** Pick parameter(s) + match → matching elements become a `Scope`, isolated via `element-visibility`. Predicate evaluated across the model via bulk property access (the worker).
 - **Risks:** evaluating a predicate over thousands of elements — needs the worker bulk fetch.
-- **Source:** `dev/plans/phase-data-insight.md` (feature 4).
+- **Source:** `dev/plans/phase-data-insight.md` (feature 4); inline form in `dev/plans/handoff-select-similar.md`.
 
 ### `parameter-coloring` — Color a scope by a parameter (color scale)
 - **Status:** queued
@@ -175,3 +222,6 @@ aggregation). Ships feature-by-feature, foundational-first.
 
 ### `web-worker-parse` — Move IFC parsing into a Web Worker (PR #33, merged 2026-05-21)
 - **Outcome:** All web-ifc work — geometry parsing and property queries — runs in a plain module Web Worker (no cross-origin isolation needed). `IfcParser` + `WebIfcPropertyRepository` deleted; replaced by `ifcWorker.ts`, `WorkerIfcParser`, `WorkerPropertyRepository`, the extracted `fetchElementProperties` core, and `ifcMessages`/`types`. The worker owns all web-ifc state behind a serial queue, so `App.parseQueue` and `App.modelIdMap` are gone. `ModelManager` regained `beginStream/appendMeshes/endStream`; main thread renders progressively from worker batches. Single-pass parse — fixes the medium-model slowdown; UI stays at 60 fps during loads. 403 → 432 tests. Two follow-up fixes after merge-review: (1) the buffer was being *transferred* to the worker, which detached the main-thread copy and silently broke `sessionStore.saveModel` → reloads showed "File missing"; switched to structured-clone. (2) a pre-existing flaky leaked spinner-timer in `inspector-panel.test.ts` (fired post-teardown → `document is not defined`) was surfaced by the bigger suite; fixed by disposing mounted panels in `afterEach`. Also gitignored `.claude/agent-memory/` (the feature-implementer agent had committed its scratch).
+
+### `selection-basket` — Curated element set (M+/M−/MR/MC) (PR #36, merged 2026-05-26)
+- **Outcome:** The first `Scope` source (Data Insight feature 1). `SelectionBasket` (pure model: add/remove/clear/onModelRemoved/serialize, deduped by modelId:expressId), `SelectionBasketPanel` (M+/M−/MR/MC cluster), `SelectionManager.selectExactly` (lock-bypassing recall so MR spans models without mutating the single-model-lock), session persistence via `App.buildSessionState`, and a tray "Clear basket" button. Manual testing reshaped the entry-point UX: the original subtle inspector ▲ button was dropped (it also clipped the inspector's collapse/expand button at 36px — a regression) in favour of surfacing the whole toolbar on any live selection. 432 → 481 tests. Next: the `Scope` it produces is consumed by the Scope Ops + Undo phase (visibility / appearance / select-similar) and later Data Insight coloring / aggregation.
