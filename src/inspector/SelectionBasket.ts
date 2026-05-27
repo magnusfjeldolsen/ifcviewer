@@ -20,6 +20,8 @@
  * Spec: dev/plans/handoff-selection-basket.md.
  */
 
+import type { HistoryManager } from '../core/history/HistoryManager';
+import { mementoCommand } from '../core/history/mementoCommand';
 import type { ElementIdentity, Scope } from './types';
 
 /** Serialized basket entry — the cheap session-persistence shape. */
@@ -56,6 +58,20 @@ export class SelectionBasket {
   /** Listeners notified whenever the basket contents change. */
   private changeListeners: Array<() => void> = [];
 
+  /**
+   * Optional undo/redo history. When present, the three USER actions M+ (add)
+   * / M− (remove) / MC (clear) each push exactly one command whose memento is
+   * the serialized contents before/after. SYSTEM changes (deserialize on
+   * session restore, onModelRemoved pruning) push none. When absent, the
+   * basket behaves exactly as before. Guarded by `isApplying()` so a command's
+   * own re-apply never pushes a fresh command.
+   */
+  private history?: HistoryManager;
+
+  constructor(history?: HistoryManager) {
+    this.history = history;
+  }
+
   // ── Queries ────────────────────────────────────────────────
 
   /** Number of elements currently in the basket. */
@@ -85,6 +101,7 @@ export class SelectionBasket {
    * pure no-op (no notification).
    */
   add(identities: readonly ElementIdentity[]): void {
+    const before = this.serialize();
     let mutated = false;
     for (const id of identities) {
       const key = makeKey(id.modelId, id.expressId);
@@ -92,7 +109,10 @@ export class SelectionBasket {
       this.entries.set(key, id);
       mutated = true;
     }
-    if (mutated) this.notifyChange();
+    if (mutated) {
+      this.notifyChange();
+      this.recordCommand('Add to basket', before);
+    }
   }
 
   /**
@@ -100,19 +120,25 @@ export class SelectionBasket {
    * Emits onChange once iff at least one element was actually removed.
    */
   remove(identities: readonly ElementIdentity[]): void {
+    const before = this.serialize();
     let mutated = false;
     for (const id of identities) {
       const key = makeKey(id.modelId, id.expressId);
       if (this.entries.delete(key)) mutated = true;
     }
-    if (mutated) this.notifyChange();
+    if (mutated) {
+      this.notifyChange();
+      this.recordCommand('Remove from basket', before);
+    }
   }
 
   /** Empty the basket. No-op (no notification) when already empty. */
   clear(): void {
     if (this.entries.size === 0) return;
+    const before = this.serialize();
     this.entries.clear();
     this.notifyChange();
+    this.recordCommand('Clear basket', before);
   }
 
   /**
@@ -159,6 +185,40 @@ export class SelectionBasket {
       this.entries.set(key, placeholderIdentity(modelId, expressId));
     }
     if (had || this.entries.size > 0) this.notifyChange();
+  }
+
+  // ── Undo / redo plumbing ───────────────────────────────────
+
+  /**
+   * Push one undo command capturing the transition from `before` (serialized
+   * contents) to the current contents. No-op when there's no history dep or
+   * while a command is already re-applying (the `isApplying()` guard — a
+   * restore must NOT push a fresh command). Call only AFTER the mutation +
+   * notifyChange.
+   */
+  private recordCommand(label: string, before: BasketEntry[]): void {
+    if (!this.history || this.history.isApplying()) return;
+    const after = this.serialize();
+    this.history.push(
+      mementoCommand(label, before, after, (entries) => this.restoreContents(entries)),
+    );
+  }
+
+  /**
+   * Replace contents wholesale with the given serialized entries (undo/redo
+   * apply). Fires onChange so the panel + debounced session save run, but does
+   * NOT record — the HistoryManager has `isApplying()` true while this runs.
+   * Mirrors `deserialize` but is always notifying (the restore always changed
+   * something, or the command wouldn't have been pushed).
+   */
+  private restoreContents(entries: readonly BasketEntry[]): void {
+    this.entries.clear();
+    for (const { modelId, expressId } of entries) {
+      const key = makeKey(modelId, expressId);
+      if (this.entries.has(key)) continue;
+      this.entries.set(key, placeholderIdentity(modelId, expressId));
+    }
+    this.notifyChange();
   }
 
   // ── Observer ───────────────────────────────────────────────

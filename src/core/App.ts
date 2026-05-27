@@ -13,6 +13,8 @@ import { MemoryToggle } from '../ui/MemoryToggle';
 import { Footer } from '../ui/Footer';
 import { CookieBanner } from '../ui/CookieBanner';
 import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
+import { HistoryShortcuts } from '../ui/HistoryShortcuts';
+import { HistoryManager } from './history/HistoryManager';
 import { HelpOverlay } from '../ui/HelpOverlay';
 import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
@@ -51,6 +53,12 @@ export class App {
   private urlInput: UrlInput;
   private remoteLoader: RemoteLoader;
   private keyboardShortcuts!: KeyboardShortcuts;
+  // Undo/redo: a single HistoryManager owns the stacks; the SelectionManager
+  // and SelectionBasket push commands into it. HistoryShortcuts wires the
+  // Ctrl/Cmd+Z / +Y / +Shift+Z chords (separate from KeyboardShortcuts, which
+  // only maps single keys). history.clear() runs on any model add/remove (U2).
+  private history: HistoryManager;
+  private historyShortcuts!: HistoryShortcuts;
   private helpOverlay!: HelpOverlay;
   // Bottom-right floating action tray. Currently hosts the Remove clipping
   // button; future contextual buttons (Remove measurements, Show hidden
@@ -121,6 +129,11 @@ export class App {
       this.measurementTool.update();
     });
 
+    // Undo/redo history. The single owner of the undo/redo stacks; injected
+    // into the SelectionManager and SelectionBasket so each pushes one command
+    // per user gesture. Constructed before those consumers.
+    this.history = new HistoryManager();
+
     // Element selection (Phase 2 — Inspector). Must be constructed after
     // viewer / modelManager / toolManager exist; defers clicks to active
     // tools and pivot picking via those dependencies.
@@ -128,6 +141,7 @@ export class App {
       viewer: this.viewer,
       modelManager: this.modelManager,
       toolManager: this.toolManager,
+      history: this.history,
     });
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency
@@ -142,8 +156,9 @@ export class App {
 
     // Selection Basket model (Data Insight feature 1). Constructed eagerly
     // so session restore can rehydrate it once models are back. The panel
-    // and the 4 calculator actions are wired in start().
-    this.selectionBasket = new SelectionBasket();
+    // and the 4 calculator actions are wired in start(). Shares the single
+    // HistoryManager so M+/M−/MC are undoable (U3).
+    this.selectionBasket = new SelectionBasket(this.history);
 
     // Toolbar UI
     const appEl = document.getElementById('app')!;
@@ -171,6 +186,11 @@ export class App {
         this.modelManager.setVisible(id, visible);
       },
       onRemoveModel: (id) => {
+        // Undo history may hold expressIds of the model we're about to remove;
+        // clearing it (U2) is the safe v1 — no stale-id crash on a later undo.
+        // Cleared BEFORE the selection/basket prune so those prunes (system
+        // changes) don't leave a half-relevant stack behind.
+        this.history.clear();
         // Drop selection bookkeeping BEFORE ModelManager disposes the meshes,
         // so SelectionManager doesn't try to restore materials on dead meshes.
         this.selectionManager.onModelRemoved(id);
@@ -257,6 +277,11 @@ export class App {
 
   private setupKeyboardShortcuts(): void {
     this.keyboardShortcuts = new KeyboardShortcuts();
+
+    // Undo/redo chords (Ctrl/Cmd+Z, Ctrl/Cmd+Y, Ctrl/Cmd+Shift+Z). A separate
+    // module from KeyboardShortcuts because it needs modifier chords plus a
+    // text-input focus guard so native text undo keeps working.
+    this.historyShortcuts = new HistoryShortcuts(this.history);
 
     this.keyboardShortcuts.register({
       key: 'c',
@@ -666,6 +691,9 @@ export class App {
 
       this.modelRecords.set(id, record);
       this.bufferCache.set(id, file.buffer);
+      // Adding a model invalidates undo history references (U2) — clear it so
+      // a pre-existing selection-undo can't restore against the new geometry.
+      this.history.clear();
       this.modelTreePanel.addModel(
         id, file.name, parsed.meshes.length,
         modelSource.type,
@@ -743,6 +771,11 @@ export class App {
     // Clear inspector selection before disposing meshes — keeps the highlight
     // bookkeeping from referencing materials we're about to dispose.
     this.selectionManager.clear();
+    // resetView tears down and re-adds every model; the undo history's
+    // references won't survive that, so clear it (U2). (The selectionManager
+    // .clear() above ran while history was still live; clearing now drops any
+    // command it pushed, which is what we want for a full reset.)
+    this.history.clear();
 
     // Remove all models and UI rows. propertyRepository.disposeModel posts
     // the `disposeModel` worker message, so we do not also call
@@ -839,6 +872,7 @@ export class App {
     this.urlInput.dispose();
     this.helpOverlay.dispose();
     this.keyboardShortcuts.dispose();
+    if (this.historyShortcuts) this.historyShortcuts.dispose();
     this.toolbar.dispose();
     this.modelTreePanel.dispose();
     if (this.inspectorPanel) this.inspectorPanel.dispose();

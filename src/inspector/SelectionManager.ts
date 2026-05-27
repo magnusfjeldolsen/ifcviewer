@@ -3,6 +3,8 @@ import type { Viewer } from '../viewer/Viewer';
 import type { ModelManager } from '../viewer/ModelManager';
 import type { ToolManager } from '../tools/Tool';
 import { raycastVisible } from '../utils/raycast';
+import type { HistoryManager } from '../core/history/HistoryManager';
+import { mementoCommand } from '../core/history/mementoCommand';
 import type { ElementIdentity, SelectionMode, SelectionState } from './types';
 
 /**
@@ -38,6 +40,14 @@ export interface SelectionManagerDeps {
   toolManager: ToolManager;
   /** Optional override for unit-tests that don't want to spin up a real Viewer. */
   canvas?: HTMLCanvasElement;
+  /**
+   * Optional undo/redo history. When present, each USER-initiated selection
+   * mutation (single apply, batch applyMany, recall selectExactly, user
+   * clear) pushes exactly one command; SYSTEM changes (onModelRemoved
+   * pruning, the lock-collapse) push none. When absent, behaviour is
+   * identical to before — preserving the existing test baseline.
+   */
+  history?: HistoryManager;
 }
 
 /** Color and intensity for the highlight emissive boost (brand blue). */
@@ -232,6 +242,7 @@ export class SelectionManager {
    */
   apply(mode: SelectionMode, identity: ElementIdentity): SelectionState {
     const key = makeKey(identity.modelId, identity.expressId);
+    const before = this.snapshotSelection();
 
     if (mode === 'replace') {
       if (this.selected.size === 1 && this.selected.has(key)) {
@@ -252,6 +263,7 @@ export class SelectionManager {
           this.clearInternal();
           this.addInternal(key, identity);
           this.notifyChange();
+          this.recordCommand('Change selection', before);
           return this.getState();
         }
       }
@@ -269,6 +281,7 @@ export class SelectionManager {
     }
 
     this.notifyChange();
+    this.recordCommand('Change selection', before);
     return this.getState();
   }
 
@@ -315,6 +328,7 @@ export class SelectionManager {
       }
     }
 
+    const before = this.snapshotSelection();
     let mutated = false;
     const seen = new Set<SelectionKey>();
 
@@ -354,6 +368,7 @@ export class SelectionManager {
 
     if (mutated) {
       this.notifyChange();
+      this.recordCommand('Change selection', before);
     }
     return this.getState();
   }
@@ -380,6 +395,23 @@ export class SelectionManager {
    * Returns the post-call state.
    */
   selectExactly(identities: readonly ElementIdentity[]): SelectionState {
+    const before = this.snapshotSelection();
+    const mutated = this.setExactlyInternal(identities);
+    if (mutated) {
+      this.notifyChange();
+      this.recordCommand('Recall selection', before);
+    }
+    return this.getState();
+  }
+
+  /**
+   * Core "select exactly these identities" mutation, bypassing the
+   * single-model lock and WITHOUT notifying or recording. Returns whether
+   * anything changed. Shared by the public `selectExactly` (which notifies +
+   * records) and the undo/redo `restoreSelection` path (which notifies but is
+   * guarded against recording by `history.isApplying()`).
+   */
+  private setExactlyInternal(identities: readonly ElementIdentity[]): boolean {
     let mutated = false;
     const seen = new Set<SelectionKey>();
 
@@ -396,10 +428,7 @@ export class SelectionManager {
       mutated = true;
     }
 
-    if (mutated) {
-      this.notifyChange();
-    }
-    return this.getState();
+    return mutated;
   }
 
   /**
@@ -414,11 +443,60 @@ export class SelectionManager {
     return null;
   }
 
+  // ── Undo / redo plumbing ────────────────────────────────────
+
+  /**
+   * Capture the current selection as an insertion-ordered identity list — the
+   * memento `before`/`after` for an undo command. A fresh array each call, so
+   * the command can hold it without aliasing live state.
+   */
+  private snapshotSelection(): readonly ElementIdentity[] {
+    return Array.from(this.selected, (k) => this.identities.get(k)!).filter(
+      (id): id is ElementIdentity => id !== undefined,
+    );
+  }
+
+  /**
+   * Restore the selection to exactly the given identities (undo/redo apply).
+   * Bypasses the single-model lock — a cross-model selection must restore
+   * faithfully without mutating the user's lock preference — and notifies so
+   * the panel/highlight update. Recording is suppressed because the
+   * HistoryManager has `isApplying()` true while this runs.
+   */
+  private restoreSelection(identities: readonly ElementIdentity[]): void {
+    const mutated = this.setExactlyInternal(identities);
+    if (mutated) this.notifyChange();
+  }
+
+  /**
+   * Push one undo command capturing the transition from `before` to the
+   * current selection. No-op when:
+   *   - there's no history dep,
+   *   - a command is already re-applying (the `isApplying()` guard — the
+   *     single most important correctness rule: an undo's restore must NOT
+   *     push a fresh command), or
+   *   - the selection didn't actually change (so a shift+click on an
+   *     unselected element, or a same-element re-pick, records nothing even
+   *     though the public method still notifies as before).
+   * Call only AFTER the mutation + notifyChange.
+   */
+  private recordCommand(label: string, before: readonly ElementIdentity[]): void {
+    const history = this.deps.history;
+    if (!history || history.isApplying()) return;
+    const after = this.snapshotSelection();
+    if (sameSelection(before, after)) return;
+    history.push(
+      mementoCommand(label, before, after, (ids) => this.restoreSelection(ids)),
+    );
+  }
+
   /** Drop all selection and restore materials. No-op if nothing selected. */
   clear(): void {
     if (this.selected.size === 0) return;
+    const before = this.snapshotSelection();
     this.clearInternal();
     this.notifyChange();
+    this.recordCommand('Clear selection', before);
   }
 
   /**
@@ -623,6 +701,24 @@ export class SelectionManager {
 }
 
 // ── Module-private helpers ───────────────────────────────────
+
+/**
+ * Order-insensitive equality of two selection snapshots by their
+ * `modelId:expressId` keys. Used to skip recording an undo command when a
+ * "mutation" left the selection unchanged (shift+click on an unselected
+ * element, same-element re-pick, etc.).
+ */
+function sameSelection(
+  a: readonly ElementIdentity[],
+  b: readonly ElementIdentity[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const keys = new Set(a.map((id) => makeKey(id.modelId, id.expressId)));
+  for (const id of b) {
+    if (!keys.has(makeKey(id.modelId, id.expressId))) return false;
+  }
+  return true;
+}
 
 /** Map a pointer event's modifier keys to a SelectionMode. */
 function pickMode(e: MouseEvent): SelectionMode {
