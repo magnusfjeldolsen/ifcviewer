@@ -6,10 +6,11 @@ import {
   SINGLE_MODEL_LOCK_STORAGE_KEY,
 } from '../src/inspector/SelectionManager';
 import type { SelectionManagerDeps } from '../src/inspector/SelectionManager';
+import { HistoryManager } from '../src/core/history/HistoryManager';
 import type { Tool, ToolManager } from '../src/tools/Tool';
 import type { Viewer } from '../src/viewer/Viewer';
 import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
-import type { ElementIdentity } from '../src/inspector/types';
+import type { ElementIdentity, SelectionState } from '../src/inspector/types';
 
 // ── localStorage mock — must be installed before SelectionManager is
 // constructed because its constructor reads the persisted lock flag.
@@ -1062,5 +1063,168 @@ describe('SelectionManager — selectExactly (basket recall, lock-bypassing)', (
     const bMat = bMesh.material as THREE.MeshPhongMaterial;
     expect(aMat.emissive.getHex()).toBe(0x3b82f6);
     expect(bMat.emissive.getHex()).toBe(0x3b82f6);
+  });
+});
+
+// ── Undo / redo integration (HistoryManager-backed selection) ──────────
+//
+// SelectionManager takes an OPTIONAL `history` dep. When present, each
+// USER-initiated mutation (single apply, batch applyMany, recall
+// selectExactly, user clear) pushes exactly ONE command; SYSTEM changes
+// (onModelRemoved pruning, session restore) push none; and a command's
+// own re-apply (undo/redo) must never push a fresh command. These tests use
+// a real HistoryManager so the round-trips exercise the live stacks.
+describe('SelectionManager — undo / redo (history-backed)', () => {
+  let env: ReturnType<typeof makeStubDeps>;
+  let history: HistoryManager;
+  let manager: SelectionManager;
+
+  function key(state: SelectionState): string {
+    if (state.kind === 'none') return 'none';
+    return state.identities
+      .map((i) => `${i.modelId}:${i.expressId}`)
+      .sort()
+      .join(',');
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3, 4, 5]));
+    env.modelStore.set('B', makeModelEntry('B', [10, 20, 30]));
+    history = new HistoryManager();
+    manager = new SelectionManager({ ...env.deps, history });
+    manager.setSingleModelLock(false);
+  });
+
+  it('T12: one applyMany("replace", N ids) pushes exactly ONE command', () => {
+    manager.applyMany('replace', [identity('A', 1), identity('A', 2), identity('A', 3)]);
+    expect(history.canUndo()).toBe(true);
+    // Exactly one undo step walks the whole batch back.
+    history.undo();
+    expect(history.canUndo()).toBe(false);
+    expect(manager.getState().kind).toBe('none');
+  });
+
+  it('T13: undo restores the prior selection exactly; redo re-applies exactly', () => {
+    manager.apply('replace', identity('A', 1));
+    const afterFirst = key(manager.getState());
+
+    manager.applyMany('replace', [identity('A', 2), identity('B', 10)]);
+    const afterSecond = key(manager.getState());
+    expect(afterSecond).not.toBe(afterFirst);
+
+    history.undo();
+    expect(key(manager.getState())).toBe(afterFirst);
+    expect(manager.getState().kind).toBe('single');
+
+    history.redo();
+    expect(key(manager.getState())).toBe(afterSecond);
+  });
+
+  it('T14: each single apply pushes one command; three picks → three undo steps walk back', () => {
+    manager.apply('replace', identity('A', 1)); // A:1
+    manager.apply('add', identity('A', 2)); // A:1,A:2
+    manager.apply('add', identity('A', 3)); // A:1,A:2,A:3
+    expect(key(manager.getState())).toBe('A:1,A:2,A:3');
+
+    history.undo();
+    expect(key(manager.getState())).toBe('A:1,A:2');
+    history.undo();
+    expect(key(manager.getState())).toBe('A:1');
+    history.undo();
+    expect(manager.getState().kind).toBe('none');
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('T15: onModelRemoved pruning pushes NO command', () => {
+    manager.applyMany('add', [identity('A', 1), identity('B', 10)]);
+    // Drain the stack so we can detect any spurious push from pruning.
+    history.clear();
+    expect(history.canUndo()).toBe(false);
+
+    manager.onModelRemoved('A');
+    expect(history.canUndo()).toBe(false);
+    // The prune still happened (B survives), it just wasn't recorded.
+    expect(manager.getState().kind).toBe('single');
+  });
+
+  it('T16: a command re-apply (undo/redo) does not itself push a new command', () => {
+    manager.apply('replace', identity('A', 1));
+    manager.apply('replace', identity('A', 2));
+    expect(history.canUndo()).toBe(true);
+    expect(history.canRedo()).toBe(false);
+
+    history.undo(); // restores A:1 via selectExactly — must NOT push
+    expect(history.canRedo()).toBe(true);
+    // Walk all the way back: still exactly the two original steps, no extras.
+    history.undo();
+    expect(manager.getState().kind).toBe('none');
+    expect(history.canUndo()).toBe(false);
+
+    history.redo();
+    expect(key(manager.getState())).toBe('A:1');
+    history.redo();
+    expect(key(manager.getState())).toBe('A:2');
+    expect(history.canRedo()).toBe(false);
+  });
+
+  it('T17: user clear() pushes one command; undo restores the cleared selection', () => {
+    manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
+    const before = key(manager.getState());
+
+    manager.clear();
+    expect(manager.getState().kind).toBe('none');
+
+    history.undo();
+    expect(key(manager.getState())).toBe(before);
+  });
+
+  it('T18: selectExactly (recall) pushes one command; undo restores the prior selection', () => {
+    manager.apply('replace', identity('A', 1));
+    const before = key(manager.getState());
+
+    manager.selectExactly([identity('A', 2), identity('B', 10)]);
+    const after = key(manager.getState());
+    expect(after).not.toBe(before);
+
+    history.undo();
+    expect(key(manager.getState())).toBe(before);
+    history.redo();
+    expect(key(manager.getState())).toBe(after);
+  });
+
+  it('T19: undo restoring a cross-model selection does NOT mutate the single-model-lock preference', () => {
+    // Use a fresh manager with the lock ON (default), so we can prove restore
+    // bypasses the lock without flipping the preference. Clear lsStore first:
+    // the shared beforeEach constructs a manager with the lock OFF, which
+    // persists 'false' — we need the default-ON read for this test's intent.
+    lsStore.clear();
+    const env2 = makeStubDeps();
+    env2.modelStore.set('A', makeModelEntry('A', [1, 2]));
+    env2.modelStore.set('B', makeModelEntry('B', [10]));
+    const history2 = new HistoryManager();
+    const m2 = new SelectionManager({ ...env2.deps, history: history2 });
+    expect(m2.isSingleModelLockEnabled()).toBe(true);
+
+    // Build a cross-model selection WITHOUT touching the lock preference,
+    // via the lock-bypassing recall path.
+    m2.selectExactly([identity('A', 1), identity('B', 10)]);
+    expect(m2.getState().kind).toBe('multi');
+
+    // Now replace it (single model), then undo back to the cross-model state.
+    m2.apply('replace', identity('A', 2));
+    history2.undo();
+
+    const restored = m2.getState();
+    expect(restored.kind).toBe('multi');
+    if (restored.kind === 'multi') {
+      const keys = restored.identities.map((i) => `${i.modelId}:${i.expressId}`).sort();
+      expect(keys).toEqual(['A:1', 'B:10']);
+    }
+    // The lock preference is untouched by the undo restore.
+    expect(m2.isSingleModelLockEnabled()).toBe(true);
+    const persisted = lsStore.get(SINGLE_MODEL_LOCK_STORAGE_KEY);
+    expect(persisted === undefined || persisted === 'true').toBe(true);
   });
 });

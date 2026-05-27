@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SelectionBasket } from '../src/inspector/SelectionBasket';
+import { HistoryManager } from '../src/core/history/HistoryManager';
 import type { ElementIdentity } from '../src/inspector/types';
 
 /**
@@ -244,5 +245,89 @@ describe('SelectionBasket — model-removal pruning', () => {
     b.onModelRemoved('model');
     expect(b.has('model', 1)).toBe(false);
     expect(b.has('model-2', 1)).toBe(true);
+  });
+});
+
+// ── Undo / redo integration (HistoryManager-backed basket) ─────────────
+//
+// The basket takes an OPTIONAL 2nd constructor param `history`. When present,
+// the three USER actions M+ (add) / M− (remove) / MC (clear) each push exactly
+// ONE command whose memento is the basket's serialized contents before/after.
+// SYSTEM changes (deserialize on session restore, onModelRemoved pruning) push
+// none, and a command's own re-apply must never push a fresh command.
+describe('SelectionBasket — undo / redo (history-backed)', () => {
+  let history: HistoryManager;
+  let basket: SelectionBasket;
+
+  function contents(b: SelectionBasket): string[] {
+    return b.getContents().map((i) => `${i.modelId}:${i.expressId}`);
+  }
+
+  beforeEach(() => {
+    history = new HistoryManager();
+    basket = new SelectionBasket(history);
+  });
+
+  it('T20: add / remove / clear each push exactly ONE command', () => {
+    basket.add([identity('A', 1), identity('A', 2), identity('A', 3)]);
+    expect(history.canUndo()).toBe(true);
+
+    basket.remove([identity('A', 2)]);
+    basket.clear();
+
+    // Three user actions → three undo steps available, then exhausted.
+    let steps = 0;
+    while (history.canUndo()) {
+      history.undo();
+      steps++;
+    }
+    expect(steps).toBe(3);
+  });
+
+  it('T21: undo of add removes added entries; redo re-adds; undo of clear restores all', () => {
+    basket.add([identity('A', 1), identity('A', 2)]);
+    expect(contents(basket)).toEqual(['A:1', 'A:2']);
+
+    history.undo(); // undo the add
+    expect(basket.size()).toBe(0);
+
+    history.redo(); // re-add
+    expect(contents(basket)).toEqual(['A:1', 'A:2']);
+
+    basket.clear();
+    expect(basket.size()).toBe(0);
+
+    history.undo(); // undo the clear → all contents return
+    expect(contents(basket)).toEqual(['A:1', 'A:2']);
+  });
+
+  it('T22: deserialize (session restore) and onModelRemoved push NO command', () => {
+    basket.deserialize([
+      { modelId: 'A', expressId: 1 },
+      { modelId: 'B', expressId: 2 },
+    ]);
+    expect(history.canUndo()).toBe(false); // restore is not a user action
+
+    basket.onModelRemoved('A');
+    expect(history.canUndo()).toBe(false); // prune is not a user action
+    expect(basket.has('B', 2)).toBe(true);
+  });
+
+  it('T23: restoring basket contents during undo fires onChange but pushes NO fresh command', () => {
+    basket.add([identity('A', 1)]);
+    basket.add([identity('A', 2)]);
+    expect(contents(basket)).toEqual(['A:1', 'A:2']);
+
+    const cb = vi.fn();
+    basket.onChange(cb);
+
+    history.undo(); // restore to ['A:1']
+    expect(contents(basket)).toEqual(['A:1']);
+    expect(cb).toHaveBeenCalledTimes(1); // onChange fires (session-save side effect)
+
+    // No fresh command was pushed by the restore: the redo future is intact.
+    expect(history.canRedo()).toBe(true);
+    history.redo();
+    expect(contents(basket)).toEqual(['A:1', 'A:2']);
   });
 });
