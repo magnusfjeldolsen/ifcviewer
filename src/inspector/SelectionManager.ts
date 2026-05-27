@@ -48,6 +48,19 @@ export interface SelectionManagerDeps {
    * identical to before — preserving the existing test baseline.
    */
   history?: HistoryManager;
+  /**
+   * Optional appearance-base provider (element-appearance interplay). Returns
+   * the material the highlight should compose ON TOP OF for a given mesh — the
+   * AppearanceManager's current base (a transparent clone if the element is
+   * transparent, else the pristine original). The highlight derives its
+   * emissive variant from this base and RESTORES to it on deselect, so:
+   *   - selecting a transparent element shows both (highlight of the faded base)
+   *   - deselecting a transparent element leaves it faded (not pristine).
+   * When absent, the highlight captures `mesh.material` exactly as before —
+   * preserving the existing test baseline. App wires this to AppearanceManager
+   * and calls `refreshHighlights()` after any appearance op on selected meshes.
+   */
+  appearanceBaseFor?: (mesh: THREE.Mesh) => THREE.Material | THREE.Material[];
 }
 
 /** Color and intensity for the highlight emissive boost (brand blue). */
@@ -631,11 +644,40 @@ export class SelectionManager {
     for (const mesh of matches) {
       if (this.highlights.has(mesh.uuid)) continue; // Already highlighted.
 
-      const original = mesh.material;
-      const variant = this.getHighlightVariant(original);
+      // Derive the highlight from the APPEARANCE base (transparent clone or
+      // pristine original) when a provider is wired; otherwise from the mesh's
+      // current material (legacy behaviour, preserved for the baseline).
+      const base = this.deps.appearanceBaseFor?.(mesh) ?? mesh.material;
+      const variant = this.getHighlightVariant(base);
       mesh.material = variant;
-      this.highlights.set(mesh.uuid, { mesh, originalMaterial: original });
+      this.highlights.set(mesh.uuid, { mesh, originalMaterial: base });
     }
+  }
+
+  /**
+   * Re-derive the highlight for every currently-highlighted mesh from its
+   * CURRENT appearance base. App calls this after any appearance op that
+   * touched selected meshes (e.g. make-transparent / opaque on the selection),
+   * so the highlight composes on top of the new base — keeping the
+   * hidden>transparent>highlighted>base precedence order-independent.
+   *
+   * No-op when no appearance-base provider is wired. Requests a render since
+   * material refs changed without a camera move.
+   */
+  refreshHighlights(): void {
+    const provider = this.deps.appearanceBaseFor;
+    if (!provider) return;
+    let changed = false;
+    for (const hl of this.highlights.values()) {
+      const base = provider(hl.mesh);
+      hl.originalMaterial = base; // restore target follows the appearance base
+      const variant = this.getHighlightVariant(base);
+      if (hl.mesh.material !== variant) {
+        hl.mesh.material = variant;
+        changed = true;
+      }
+    }
+    if (changed) this.deps.viewer.requestRender();
   }
 
   private unhighlightExpress(modelId: string, expressId: number): void {

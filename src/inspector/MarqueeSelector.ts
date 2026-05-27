@@ -120,6 +120,15 @@ export class MarqueeSelector {
     this.canvas.addEventListener('pointerup', this.boundOnPointerUp);
   }
 
+  /**
+   * True while a marquee drag is in progress (pending or dragging). The
+   * context-menu handler consults this to suppress the menu mid-drag — a
+   * right-click during an Alt-drag should not open the menu.
+   */
+  isDragging(): boolean {
+    return this.state.kind !== 'idle';
+  }
+
   dispose(): void {
     this.canvas.removeEventListener('pointerdown', this.boundOnPointerDown, { capture: true });
     this.canvas.removeEventListener('pointermove', this.boundOnPointerMove);

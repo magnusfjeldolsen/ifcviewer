@@ -1,5 +1,7 @@
+import * as THREE from 'three';
 import { Viewer } from '../viewer/Viewer';
 import { ModelManager } from '../viewer/ModelManager';
+import { AppearanceManager } from '../viewer/AppearanceManager';
 import { FileLoader } from '../loader/FileLoader';
 import { WorkerIfcParser } from '../parser/WorkerIfcParser';
 import { UrlInput } from '../ui/UrlInput';
@@ -27,6 +29,8 @@ import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
+import { ContextMenu } from '../ui/ContextMenu';
+import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -79,6 +83,21 @@ export class App {
   // SelectionManager via capture-phase pointerdown; bails when any tool
   // is active or pivot picking is on.
   private marqueeSelector!: MarqueeSelector;
+  // Element appearance (hide / isolate / show-all + transparent / opaque).
+  // Per-element overrides driven from the context menu + the contextual tray,
+  // made reversible by the shared HistoryManager. Constructed in the App
+  // constructor alongside SelectionManager so both share the pristine store.
+  private appearanceManager!: AppearanceManager;
+  // Write-once-per-mesh pristine-material store, SHARED by AppearanceManager
+  // and SelectionManager. Whichever subsystem touches a mesh first records its
+  // true load-time material here; both then derive their effects from this
+  // pristine base, which makes the highlight ↔ appearance reconciliation
+  // order-independent (precedence: hidden > transparent > highlighted > base).
+  private pristineMaterials = new WeakMap<THREE.Mesh, THREE.Material | THREE.Material[]>();
+  // Generic right-click menu (selection-scoped; no raycast). Constructed in
+  // start(); items built from the current selection + appearance flags.
+  private contextMenu!: ContextMenu;
+  private boundOnContextMenu!: (e: MouseEvent) => void;
   // Property repository + panel UI (Phase 3 of the Inspector). The
   // repository proxies property queries to the same worker `parser` owns.
   private propertyRepository!: WorkerPropertyRepository;
@@ -134,14 +153,41 @@ export class App {
     // per user gesture. Constructed before those consumers.
     this.history = new HistoryManager();
 
+    // Shared pristine-material accessor: write-once per mesh so the first
+    // subsystem to touch a mesh records its load-time material. Both the
+    // appearance and selection systems derive their effects from this base.
+    const pristineFor = (mesh: THREE.Mesh): THREE.Material | THREE.Material[] => {
+      let p = this.pristineMaterials.get(mesh);
+      if (!p) {
+        p = mesh.material;
+        this.pristineMaterials.set(mesh, p);
+      }
+      return p;
+    };
+
+    // Element appearance. Constructed before SelectionManager so the latter's
+    // appearanceBaseFor provider can reach it. Shares the HistoryManager (each
+    // hide/isolate/show-all/transparent/opaque = one undoable command) and the
+    // shared pristine store.
+    this.appearanceManager = new AppearanceManager({
+      modelManager: this.modelManager,
+      requestRender,
+      history: this.history,
+      pristineFor,
+    });
+
     // Element selection (Phase 2 — Inspector). Must be constructed after
     // viewer / modelManager / toolManager exist; defers clicks to active
-    // tools and pivot picking via those dependencies.
+    // tools and pivot picking via those dependencies. The appearanceBaseFor
+    // provider lets the highlight compose on top of the appearance base
+    // (transparent clone or pristine original) rather than capturing a stale
+    // material — see AppearanceManager / SelectionManager.refreshHighlights.
     this.selectionManager = new SelectionManager({
       viewer: this.viewer,
       modelManager: this.modelManager,
       toolManager: this.toolManager,
       history: this.history,
+      appearanceBaseFor: (mesh) => this.appearanceManager.getBaseForMesh(mesh, pristineFor(mesh)),
     });
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency
@@ -198,6 +244,9 @@ export class App {
         // (its onChange triggers a debounced session save). Constructed in
         // the App constructor, so it's always available here.
         this.selectionBasket.onModelRemoved(id);
+        // Prune appearance overrides for the removed model (system change,
+        // pushes no undo command). Its onChange triggers a debounced save.
+        this.appearanceManager.onModelRemoved(id);
         // Free memoized properties AND close the worker's model. The
         // repository's disposeModel posts the `disposeModel` worker
         // message, so we do NOT also call parser.disposeModel here.
@@ -386,6 +435,9 @@ export class App {
     // scheduleSave path the camera/models use; honours the memory toggle).
     this.selectionBasket.onChange(() => this.scheduleSave());
 
+    // Persist appearance overrides on every change (same debounced path).
+    this.appearanceManager.onChange(() => this.scheduleSave());
+
     // Contextual action tray (bottom-right). Currently hosts the Remove
     // clipping button; future contextual buttons plug in by calling
     // contextualActions.register(...). Disposed BEFORE clippingTool in
@@ -412,6 +464,48 @@ export class App {
       isVisible: () => this.selectionBasket.size() > 0,
       onClick: () => this.selectionBasket.clear(),
       subscribe: (refresh) => this.selectionBasket.onChange(refresh),
+    });
+
+    // Element appearance recovery (D) — always-available escape hatches so the
+    // user is never trapped with invisible or faded geometry. Same idiom as
+    // Remove clipping; visible only when the matching state is active.
+    this.contextualActions.register({
+      id: 'show-hidden',
+      label: this.showHiddenLabel(),
+      icon: '👁',
+      isVisible: () => this.appearanceManager.hasHidden(),
+      onClick: () => this.appearanceShowAll(),
+      subscribe: (refresh) =>
+        this.appearanceManager.onChange(() => {
+          this.updateShowHiddenLabel();
+          refresh();
+        }),
+    });
+    this.contextualActions.register({
+      id: 'clear-transparency',
+      label: 'Clear transparency',
+      icon: '◐',
+      isVisible: () => this.appearanceManager.hasTransparent(),
+      onClick: () => this.appearanceClearTransparency(),
+      subscribe: (refresh) => this.appearanceManager.onChange(refresh),
+    });
+
+    // Right-click context menu (C). Selection-scoped — the handler reads
+    // SelectionManager.getState() + appearance flags and builds the items; it
+    // NEVER raycasts or mutates the selection (CM2).
+    this.contextMenu = new ContextMenu(contextualParent);
+    this.boundOnContextMenu = (e) => this.onContextMenu(e);
+    this.viewer.getCanvas().addEventListener('contextmenu', this.boundOnContextMenu);
+
+    // Close the menu if the selection clears while it's open (e.g. model
+    // removed) — "menus only work for a selection".
+    this.selectionManager.onChange(() => {
+      if (this.contextMenu.isOpen() && this.selectionManager.getState().kind === 'none') {
+        // Only close when there's also nothing to recover; otherwise the menu
+        // could legitimately be a recovery-only menu. Simplest safe behaviour:
+        // close on any selection-clear while open.
+        this.contextMenu.close();
+      }
     });
 
     const dropZone = document.getElementById('drop-zone');
@@ -453,6 +547,7 @@ export class App {
       camera: this.viewer.getCameraState(),
       models: Array.from(this.modelRecords.values()),
       basket: this.selectionBasket.serialize(),
+      appearance: this.appearanceManager.serialize(),
     };
   }
 
@@ -615,6 +710,18 @@ export class App {
       }
     }
 
+    // Rehydrate appearance overrides (D, A2) AFTER models restore — same
+    // rationale as the basket: the entries only apply once their meshes exist.
+    // deserialize re-applies the visual effect (hidden/transparent) for live
+    // models; entries whose model didn't return are dropped here.
+    if (session?.appearance?.length) {
+      const liveModelIds = new Set(this.modelManager.getModelIds());
+      const surviving = session.appearance.filter((e) => liveModelIds.has(e.modelId));
+      if (surviving.length > 0) {
+        this.appearanceManager.deserialize(surviving);
+      }
+    }
+
     // Restore camera after fitToBox so it overrides the auto-fit
     if (session?.camera) {
       this.viewer.restoreCameraState(session.camera);
@@ -756,6 +863,114 @@ export class App {
     this.selectionManager.selectExactly(contents);
   }
 
+  // ── Context menu (C) ───────────────────────────────────────
+  //
+  // The menu acts ONLY on the current selection (CM2): it reads
+  // SelectionManager.getState() and the appearance flags to build its items,
+  // and NEVER raycasts or mutates the selection on right-click. To act on an
+  // element the user selects it first; to act on the basket they MR it into the
+  // selection first.
+
+  /** Right-click → build a selection-scoped menu (no raycast, no selection change). */
+  private onContextMenu(e: MouseEvent): void {
+    // Always suppress the native browser menu, on every path.
+    e.preventDefault();
+
+    // Bail (no menu) while a tool owns the pointer or a marquee drag is in
+    // progress — don't fight tool gestures (CM4).
+    if (
+      shouldSuppressContextMenu({
+        toolActive: this.toolManager.getActiveTool() !== null,
+        marqueeDragging: this.marqueeSelector.isDragging(),
+      })
+    ) {
+      return;
+    }
+
+    // Build items purely from the current selection + appearance state. Each
+    // verb dispatches to the appearance/basket collaborator on the CURRENT
+    // SELECTION scope (captured below); the element under the cursor is never
+    // read.
+    const state = this.selectionManager.getState();
+    const items = buildContextMenuItems(
+      state,
+      {
+        hasHidden: this.appearanceManager.hasHidden(),
+        hasTransparent: this.appearanceManager.hasTransparent(),
+      },
+      {
+        hide: () => this.appearanceHide(),
+        isolate: () => this.appearanceIsolate(),
+        showAll: () => this.appearanceShowAll(),
+        transparent: () => this.appearanceTransparent(),
+        opaque: () => this.appearanceOpaque(),
+        clearTransparency: () => this.appearanceClearTransparency(),
+        addToBasket: () => this.basketAdd(),
+      },
+    );
+
+    // No selection and no active recovery action → no menu.
+    if (!items || items.length === 0) return;
+
+    this.contextMenu.open(e.clientX, e.clientY, items);
+  }
+
+  // ── Appearance actions (D) ─────────────────────────────────
+  //
+  // Each wraps an AppearanceManager op on the current-selection Scope, then
+  // reconciles the highlight for any selected meshes whose base material just
+  // changed. App is the single owner of the precedence chain
+  // hidden > transparent > highlighted > base (the orchestrated reconciliation).
+
+  /** The Scope these verbs act on = the current live selection. */
+  private selectionScope(): import('../inspector/types').Scope {
+    const state = this.selectionManager.getState();
+    return state.kind === 'none' ? [] : state.identities;
+  }
+
+  private appearanceHide(): void {
+    this.appearanceManager.hide(this.selectionScope());
+    this.selectionManager.refreshHighlights();
+  }
+
+  private appearanceIsolate(): void {
+    this.appearanceManager.isolate(this.selectionScope());
+    this.selectionManager.refreshHighlights();
+  }
+
+  private appearanceShowAll(): void {
+    this.appearanceManager.showAll();
+    this.selectionManager.refreshHighlights();
+  }
+
+  private appearanceTransparent(): void {
+    this.appearanceManager.transparent(this.selectionScope());
+    this.selectionManager.refreshHighlights();
+  }
+
+  private appearanceOpaque(): void {
+    this.appearanceManager.opaque(this.selectionScope());
+    this.selectionManager.refreshHighlights();
+  }
+
+  private appearanceClearTransparency(): void {
+    this.appearanceManager.clearTransparency();
+    this.selectionManager.refreshHighlights();
+  }
+
+  /** Tray label for the "Show N hidden" button, kept in sync via onChange. */
+  private showHiddenLabel(): string {
+    const n = this.appearanceManager.hiddenCount();
+    return n > 0 ? `Show ${n} hidden` : 'Show hidden';
+  }
+
+  private updateShowHiddenLabel(): void {
+    const btn = document.querySelector<HTMLElement>(
+      '.contextual-action[data-action-id="show-hidden"] .contextual-action-label',
+    );
+    if (btn) btn.textContent = this.showHiddenLabel();
+  }
+
   private fitSmart(): void {
     // Future: if selection exists, fly to selection bounding box
     const box = this.modelManager.getBoundingBox();
@@ -771,6 +986,13 @@ export class App {
     // Clear inspector selection before disposing meshes — keeps the highlight
     // bookkeeping from referencing materials we're about to dispose.
     this.selectionManager.clear();
+    // Drop appearance overrides for every model — resetView re-creates the
+    // meshes, and the recorded state references the disposed ones. A full
+    // reset starts from a clean appearance slate, consistent with the
+    // selection clear above.
+    for (const id of this.modelManager.getModelIds()) {
+      this.appearanceManager.onModelRemoved(id);
+    }
     // resetView tears down and re-adds every model; the undo history's
     // references won't survive that, so clear it (U2). (The selectionManager
     // .clear() above ran while history was still live; clearing now drops any
@@ -879,6 +1101,12 @@ export class App {
     if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
     this.marqueeSelector.dispose();
     this.selectionManager.dispose();
+    // Context menu: detach the canvas listener + tear down the menu element.
+    // Guarded — the field is initialized in start().
+    if (this.boundOnContextMenu) {
+      this.viewer.getCanvas().removeEventListener('contextmenu', this.boundOnContextMenu);
+    }
+    if (this.contextMenu) this.contextMenu.dispose();
     // contextualActions must dispose BEFORE toolManager so the tray can
     // unsubscribe from a live ClippingTool source. (toolManager.dispose
     // calls clippingTool.dispose, which clears its listener array.) The

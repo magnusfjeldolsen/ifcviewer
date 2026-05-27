@@ -486,6 +486,29 @@ describe('MarqueeSelector — selection commit', () => {
     expect(ids.map((i) => i.expressId)).toEqual([2]);
   });
 
+  it('T16: an element hidden via appearance (all its meshes visible=false) is excluded from the marquee commit', () => {
+    // Regression-lock for element-appearance: AppearanceManager.hide sets
+    // mesh.visible=false on every mesh of an element. classifyMesh / the
+    // commit loop must skip those so a marquee over a hidden element does not
+    // re-select it. expressId 1 has two meshes (one element, two geometries);
+    // hiding both must drop the whole element.
+    const entry = env.modelStore.get('A')!;
+    // Give expressId 1 a second mesh at the same spot (decomposed geometry).
+    const second = makeMeshAt(0, 0, 0, 1);
+    entry.group.add(second);
+    entry.meshesByExpressId.get(1)!.push(second);
+    // Hide the entire element (both meshes), as AppearanceManager.hide would.
+    for (const mesh of entry.meshesByExpressId.get(1)!) mesh.visible = false;
+
+    pointerDown(env.canvas, 10, 10, { altKey: true });
+    pointerMove(env.canvas, 190, 190);
+    pointerUp(env.canvas, 190, 190);
+
+    const ids = env.applyManyCalls[0].ids;
+    // Element 1 is hidden → excluded; element 2 (still visible) remains.
+    expect(ids.map((i) => i.expressId)).toEqual([2]);
+  });
+
   it('mesh without expressID is excluded', () => {
     // Add a helper mesh with no userData.expressID.
     const helper = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial());

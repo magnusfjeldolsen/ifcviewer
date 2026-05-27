@@ -47,6 +47,15 @@ export interface SessionState {
    * dropped). See dev/plans/handoff-selection-basket.md.
    */
   basket?: { modelId: string; expressId: number }[];
+  /**
+   * Element-appearance overrides (D, A2) — per-element hidden / transparent
+   * state, persisted as lightweight {modelId, expressId, state} entries.
+   * Metadata only (no geometry), so it rides in the localStorage session state
+   * like the basket. Rehydrated on restore *after* models load; entries for
+   * models that didn't restore are dropped. See
+   * dev/plans/handoff-element-appearance.md.
+   */
+  appearance?: { modelId: string; expressId: number; state: 'hidden' | 'transparent' }[];
 }
 
 const TOGGLE_KEY = 'ifcviewer:memoryEnabled';

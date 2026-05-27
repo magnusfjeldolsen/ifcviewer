@@ -6,6 +6,7 @@ import {
   SINGLE_MODEL_LOCK_STORAGE_KEY,
 } from '../src/inspector/SelectionManager';
 import type { SelectionManagerDeps } from '../src/inspector/SelectionManager';
+import { AppearanceManager } from '../src/viewer/AppearanceManager';
 import { HistoryManager } from '../src/core/history/HistoryManager';
 import type { Tool, ToolManager } from '../src/tools/Tool';
 import type { Viewer } from '../src/viewer/Viewer';
@@ -1226,5 +1227,130 @@ describe('SelectionManager — undo / redo (history-backed)', () => {
     expect(m2.isSingleModelLockEnabled()).toBe(true);
     const persisted = lsStore.get(SINGLE_MODEL_LOCK_STORAGE_KEY);
     expect(persisted === undefined || persisted === 'true').toBe(true);
+  });
+});
+
+// ── Highlight ↔ appearance interplay (T12-T14b) ────────────────────────
+//
+// Decision (orchestrator): App-orchestrated reconciliation. App owns the
+// precedence chain hidden > transparent > highlighted > base. The pieces:
+//   - A single App-owned `pristine` WeakMap captures each mesh's load-time
+//     material the FIRST time either manager touches it (write-once → the true
+//     pristine regardless of which manager runs first).
+//   - AppearanceManager derives its base (pristine OR transparent clone) from
+//     that pristine; never from "whatever is currently on the mesh".
+//   - SelectionManager's highlight derives its emissive variant from the
+//     APPEARANCE base (via the `appearanceBaseFor` provider) and restores to
+//     that base on deselect — never to the pristine original.
+//   - After any appearance op touching selected meshes, App calls
+//     `selectionManager.refreshHighlights()` so the highlight re-derives from
+//     the new base. This makes the result identical regardless of op order.
+//
+// These tests wire a REAL AppearanceManager + SelectionManager exactly the way
+// App will, plus a tiny App-like reconcile shim, and pin order independence.
+describe('SelectionManager ↔ AppearanceManager interplay', () => {
+  function makeInterplayEnv() {
+    lsStore.clear();
+    const base = makeStubDeps();
+    base.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+
+    // App-owned pristine store: write-once per mesh, so whichever manager
+    // touches a mesh first records the true load-time material.
+    const pristine = new WeakMap<THREE.Mesh, THREE.Material | THREE.Material[]>();
+    const pristineFor = (mesh: THREE.Mesh): THREE.Material | THREE.Material[] => {
+      let p = pristine.get(mesh);
+      if (!p) {
+        p = mesh.material;
+        pristine.set(mesh, p);
+      }
+      return p;
+    };
+
+    const modelManager = {
+      getModel: (id: string) => base.modelStore.get(id),
+      getAllModels: () => Array.from(base.modelStore.values()),
+    } as unknown as import('../src/viewer/ModelManager').ModelManager;
+
+    const appearance = new AppearanceManager({ modelManager, pristineFor });
+
+    const manager = new SelectionManager({
+      ...base.deps,
+      modelManager,
+      appearanceBaseFor: (mesh: THREE.Mesh) => appearance.getBaseForMesh(mesh, pristineFor(mesh)),
+    });
+    manager.setSingleModelLock(false);
+
+    return { base, manager, appearance };
+  }
+
+  it('T12: a selected element made transparent shows BOTH (highlight re-derived from the transparent base)', () => {
+    const { base, manager, appearance } = makeInterplayEnv();
+    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+
+    // transparent FIRST, then select.
+    appearance.transparent([identity('A', 1)]);
+    manager.apply('replace', identity('A', 1));
+
+    const mat = mesh.material as THREE.MeshPhongMaterial;
+    // Highlight present (brand-blue emissive) AND transparent (faded).
+    expect(mat.emissive.getHex()).toBe(0x3b82f6);
+    expect(mat.transparent).toBe(true);
+    expect(mat.opacity).toBeCloseTo(0.25);
+  });
+
+  it('T13: opaque on a still-selected mesh keeps the highlight (emissive variant of the original)', () => {
+    const { base, manager, appearance } = makeInterplayEnv();
+    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+
+    appearance.transparent([identity('A', 1)]);
+    manager.apply('replace', identity('A', 1));
+
+    // Make opaque while still selected; App reconciles the highlight.
+    appearance.opaque([identity('A', 1)]);
+    manager.refreshHighlights();
+
+    const mat = mesh.material as THREE.MeshPhongMaterial;
+    expect(mat.emissive.getHex()).toBe(0x3b82f6); // still highlighted
+    expect(mat.opacity).toBe(1); // no longer faded
+  });
+
+  it('T14: deselecting a transparent mesh keeps it transparent (restore targets the appearance base)', () => {
+    const { base, manager, appearance } = makeInterplayEnv();
+    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+
+    appearance.transparent([identity('A', 1)]);
+    manager.apply('replace', identity('A', 1));
+    manager.clear(); // deselect
+
+    const mat = mesh.material as THREE.MeshPhongMaterial;
+    // Highlight gone, but transparency remains (restore → appearance base).
+    expect(mat.transparent).toBe(true);
+    expect(mat.opacity).toBeCloseTo(0.25);
+    // And it must NOT carry the emissive boost anymore.
+    expect(mat.emissive.getHex()).not.toBe(0x3b82f6);
+  });
+
+  it('T14b: ORDER INDEPENDENCE — select FIRST, THEN make transparent → shows both, and on deselect stays transparent', () => {
+    const { base, manager, appearance } = makeInterplayEnv();
+    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+
+    // select FIRST (mesh now carries the highlight variant)…
+    manager.apply('replace', identity('A', 1));
+    // …THEN transparent. App reconciles by recomputing from pristine + state.
+    appearance.transparent([identity('A', 1)]);
+    manager.refreshHighlights();
+
+    const mat = mesh.material as THREE.MeshPhongMaterial;
+    expect(mat.emissive.getHex()).toBe(0x3b82f6); // shows highlight
+    expect(mat.transparent).toBe(true); // shows transparency
+    expect(mat.opacity).toBeCloseTo(0.25);
+
+    // On deselect it stays transparent (proves AppearanceManager captured the
+    // PRISTINE original, not the highlight variant, as its base).
+    manager.clear();
+    const after = mesh.material as THREE.MeshPhongMaterial;
+    expect(after.transparent).toBe(true);
+    expect(after.opacity).toBeCloseTo(0.25);
+    expect(after.emissive.getHex()).not.toBe(0x3b82f6);
   });
 });
