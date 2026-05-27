@@ -992,6 +992,63 @@ html, body {
   white-space: nowrap;
 }
 
+/* Right-click context menu (selection-scoped). Matches the panel/tray idiom:
+   semi-transparent white, 8px radius, soft shadow. Positioned at the cursor by
+   ContextMenu.open (inline position:fixed + left/top), clamped to the
+   viewport. */
+.context-menu {
+  position: fixed;
+  z-index: 100;                              /* above panels + tray */
+  min-width: 180px;
+  padding: 4px 0;
+  background: rgba(255, 255, 255, 0.98);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  font-family: inherit;
+  font-size: 13px;
+  color: #374151;
+  user-select: none;
+}
+
+.context-menu-item {
+  padding: 6px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.context-menu-item:hover {
+  background: #eff6ff;                        /* light brand-blue tint */
+}
+
+/* Header row — the current selection. Non-interactive. */
+.context-menu-item.context-menu-header {
+  cursor: default;
+  font-weight: 600;
+  color: #111827;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.context-menu-item.context-menu-header:hover {
+  background: transparent;
+}
+
+/* Disabled verb (e.g. "Show all" with nothing hidden). */
+.context-menu-item.disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.context-menu-item.disabled:hover {
+  background: transparent;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: rgba(0, 0, 0, 0.08);
+}
+
 /* Selection Basket panel (top-left, below the Models tree). Appears only
    when the basket is non-empty. Matches the existing panel idiom:
    semi-transparent white, 8px radius, soft shadow. */

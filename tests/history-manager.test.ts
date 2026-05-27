@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as THREE from 'three';
 import { HistoryManager, MAX_HISTORY } from '../src/core/history/HistoryManager';
 import type { Command } from '../src/core/history/Command';
+import { AppearanceManager } from '../src/viewer/AppearanceManager';
+import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
+import type { ElementIdentity, Scope } from '../src/inspector/types';
 
 /**
  * HistoryManager is pure (no DOM, no THREE) so it gets strong unit coverage
@@ -217,5 +221,144 @@ describe('HistoryManager — push / undo / redo', () => {
     history.onChange(cb);
     history.clear();
     expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Element-appearance undo (T17-T20) ──────────────────────────────────
+//
+// AppearanceManager takes an OPTIONAL `history` dep (mirroring SelectionManager
+// / SelectionBasket). Each USER op (hide / isolate / show-all / transparent /
+// opaque) over a Scope pushes exactly ONE mementoCommand; SYSTEM changes
+// (onModelRemoved prune, deserialize session restore) push NONE; and a no-op op
+// pushes none. The memento is the serialized appearance state; undo restores
+// the prior PER-ELEMENT appearance in one step.
+describe('AppearanceManager — undo / redo (history-backed)', () => {
+  function makeMeshUnderGroup(group: THREE.Group, expressId: number): THREE.Mesh {
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshPhongMaterial());
+    mesh.userData.expressID = expressId;
+    group.add(mesh);
+    return mesh;
+  }
+  function makeModelEntry(modelId: string, expressIds: number[]): ModelEntry {
+    const group = new THREE.Group();
+    group.name = modelId;
+    const meshesByExpressId = new Map<number, THREE.Mesh[]>();
+    for (const id of expressIds) {
+      meshesByExpressId.set(id, [makeMeshUnderGroup(group, id)]);
+    }
+    return { id: modelId, group, visible: true, meshesByExpressId };
+  }
+  function identity(modelId: string, expressId: number): ElementIdentity {
+    return { modelId, expressId, ifcClass: '', ifcTypeCode: 0 };
+  }
+  function scope(...pairs: Array<[string, number]>): Scope {
+    return pairs.map(([m, e]) => identity(m, e));
+  }
+  function setup() {
+    const store = new Map<string, ModelEntry>();
+    store.set('A', makeModelEntry('A', [1, 2, 3, 4]));
+    const modelManager = {
+      getModel: (id: string) => store.get(id),
+      getAllModels: () => Array.from(store.values()),
+    } as unknown as ModelManager;
+    const history = new HistoryManager();
+    const manager = new AppearanceManager({ modelManager, history });
+    return { store, modelManager, history, manager };
+  }
+
+  it('T17: hide(scope of N) pushes exactly ONE command; undo restores all N in one step; redo re-hides', () => {
+    const { store, history, manager } = setup();
+    manager.hide(scope(['A', 1], ['A', 2], ['A', 3]));
+    expect(history.canUndo()).toBe(true);
+
+    // Exactly one command for the whole batch.
+    history.undo();
+    expect(history.canUndo()).toBe(false);
+    // All three restored to visible/normal in one step.
+    for (const id of [1, 2, 3]) {
+      expect(manager.getStateFor('A', id)).toBe('normal');
+      expect(store.get('A')!.meshesByExpressId.get(id)![0].visible).toBe(true);
+    }
+
+    history.redo();
+    for (const id of [1, 2, 3]) {
+      expect(manager.getStateFor('A', id)).toBe('hidden');
+      expect(store.get('A')!.meshesByExpressId.get(id)![0].visible).toBe(false);
+    }
+  });
+
+  it('T18: isolate undo restores prior PER-ELEMENT visibility (already-hidden stays hidden), not a blanket show-all', () => {
+    const { manager, history } = setup();
+    // Pre-hide element 4 (its own command).
+    manager.hide(scope(['A', 4]));
+    // Now isolate element 1 → hides 2, 3, (4 already hidden), keeps 1.
+    manager.isolate(scope(['A', 1]));
+    expect(manager.getStateFor('A', 1)).toBe('normal');
+    expect(manager.getStateFor('A', 2)).toBe('hidden');
+    expect(manager.getStateFor('A', 3)).toBe('hidden');
+    expect(manager.getStateFor('A', 4)).toBe('hidden');
+
+    // Undo the isolate: 2 and 3 return to normal, but 4 (hidden BEFORE the
+    // isolate) must STAY hidden — not blanket-shown.
+    history.undo();
+    expect(manager.getStateFor('A', 1)).toBe('normal');
+    expect(manager.getStateFor('A', 2)).toBe('normal');
+    expect(manager.getStateFor('A', 3)).toBe('normal');
+    expect(manager.getStateFor('A', 4)).toBe('hidden');
+  });
+
+  it('T19: a no-op appearance op pushes NO command', () => {
+    const { manager, history } = setup();
+    manager.hide(scope(['A', 1]));
+    history.clear(); // drain so we can detect spurious pushes
+
+    // hide an already-hidden element → no-op.
+    manager.hide(scope(['A', 1]));
+    expect(history.canUndo()).toBe(false);
+
+    // opaque when nothing is transparent → no-op.
+    manager.opaque(scope(['A', 2]));
+    expect(history.canUndo()).toBe(false);
+
+    // showAll when nothing hidden? element 1 IS hidden, so this would mutate.
+    // Use a fresh, all-normal element set: opaque/showAll on normal = no-op.
+    manager.showAll(); // this DOES mutate (1 is hidden) → records once
+    expect(history.canUndo()).toBe(true);
+    history.clear();
+    manager.showAll(); // now nothing hidden → no-op
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('T20: onModelRemoved prune and deserialize (session restore) push NO command', () => {
+    const { manager, history } = setup();
+    manager.hide(scope(['A', 1], ['A', 2]));
+    history.clear();
+
+    // System change 1: prune on model removal.
+    manager.onModelRemoved('A');
+    expect(history.canUndo()).toBe(false);
+
+    // System change 2: deserialize (session restore).
+    manager.deserialize([{ modelId: 'A', expressId: 3, state: 'hidden' }]);
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('a command re-apply (undo/redo) does not itself push a new command', () => {
+    const { manager, history } = setup();
+    manager.transparent(scope(['A', 1]));
+    manager.hide(scope(['A', 2]));
+    expect(history.canUndo()).toBe(true);
+
+    history.undo(); // un-hide 2 via restore — must NOT push
+    history.undo(); // un-transparent 1 via restore — must NOT push
+    expect(manager.getStateFor('A', 1)).toBe('normal');
+    expect(manager.getStateFor('A', 2)).toBe('normal');
+    expect(history.canUndo()).toBe(false);
+
+    history.redo();
+    expect(manager.getStateFor('A', 1)).toBe('transparent');
+    history.redo();
+    expect(manager.getStateFor('A', 2)).toBe('hidden');
+    expect(history.canRedo()).toBe(false);
   });
 });

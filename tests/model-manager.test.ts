@@ -100,6 +100,58 @@ describe('ModelManager', () => {
     expect(box.isEmpty()).toBe(false);
   });
 
+  describe('getBoundingBox — fit-to-visible (T15)', () => {
+    // Element appearance: hidden elements set mesh.visible=false. Fit-to-view
+    // must frame what's visible, so getBoundingBox ignores hidden meshes even
+    // when the model group itself is visible.
+    function modelAtPositions(id: string, positions: THREE.Vector3[]): ParsedModel {
+      return {
+        id,
+        meshes: positions.map((p, i) => ({
+          expressID: i + 1,
+          // Single point at origin in local space; placed via transform.
+          vertices: new Float32Array([0, 0, 0, 0, 0, 0, 0, 0, 0]),
+          normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+          indices: new Uint32Array([0, 1, 2]),
+          transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, p.x,p.y,p.z,1],
+          color: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+        })),
+      };
+    }
+
+    it('ignores meshes with visible=false (per-mesh hidden does not leak into the box)', () => {
+      const scene = new THREE.Scene();
+      const manager = new ModelManager(scene);
+      // One mesh at origin, one far away at x=100.
+      const entry = manager.addModel(
+        modelAtPositions('m1', [new THREE.Vector3(0, 0, 0), new THREE.Vector3(100, 0, 0)]),
+      );
+      const far = entry.meshesByExpressId.get(2)![0];
+
+      // With both visible, the box reaches the far mesh.
+      expect(manager.getBoundingBox().max.x).toBeCloseTo(100);
+
+      // Hide the far mesh: the box must shrink to exclude it.
+      far.visible = false;
+      const box = manager.getBoundingBox();
+      expect(box.max.x).toBeCloseTo(0);
+    });
+
+    it('a fully-hidden model contributes nothing to the all-models box', () => {
+      const scene = new THREE.Scene();
+      const manager = new ModelManager(scene);
+      const entry = manager.addModel(
+        modelAtPositions('m1', [new THREE.Vector3(0, 0, 0), new THREE.Vector3(50, 0, 0)]),
+      );
+      // Hide every mesh in the model (all elements hidden via appearance).
+      for (const bucket of entry.meshesByExpressId.values()) {
+        for (const mesh of bucket) mesh.visible = false;
+      }
+      const box = manager.getBoundingBox();
+      expect(box.isEmpty()).toBe(true);
+    });
+  });
+
   it('should clear all models', () => {
     const scene = new THREE.Scene();
     const manager = new ModelManager(scene);

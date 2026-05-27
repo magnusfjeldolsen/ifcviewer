@@ -182,19 +182,39 @@ export class ModelManager {
     return Array.from(this.models.keys());
   }
 
+  /**
+   * Bounding box of the loaded geometry — fit-to-VISIBLE. Hidden elements
+   * (`mesh.visible === false`, set by AppearanceManager.hide) and hidden model
+   * groups (`entry.visible === false`) are excluded so "Fit" frames what the
+   * user can actually see. `THREE.Box3.expandByObject` does NOT honour per-mesh
+   * `.visible`, so we expand mesh-by-mesh and skip invisible ones.
+   *
+   * When `id` is given, that single model's visible meshes are framed
+   * regardless of the group's `visible` flag (callers ask for a specific model
+   * to frame it). When omitted, only visible model groups contribute.
+   */
   getBoundingBox(id?: string): THREE.Box3 {
     const box = new THREE.Box3();
 
     if (id) {
       const entry = this.models.get(id);
-      if (entry) box.expandByObject(entry.group);
+      if (entry) this.expandByVisibleMeshes(box, entry.group);
     } else {
       for (const entry of this.models.values()) {
-        if (entry.visible) box.expandByObject(entry.group);
+        if (entry.visible) this.expandByVisibleMeshes(box, entry.group);
       }
     }
 
     return box;
+  }
+
+  /** Expand `box` by every visible mesh under `group` (skips visible=false). */
+  private expandByVisibleMeshes(box: THREE.Box3, group: THREE.Object3D): void {
+    group.traverseVisible((child) => {
+      if (child instanceof THREE.Mesh) {
+        box.expandByObject(child);
+      }
+    });
   }
 
   clear(): void {
