@@ -22,6 +22,7 @@
 
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
+import { makeKey } from './elementKey';
 import type { ElementIdentity, Scope } from './types';
 
 /** Serialized basket entry — the cheap session-persistence shape. */
@@ -32,10 +33,6 @@ export interface BasketEntry {
 
 /** Internal key: "<modelId>:<expressId>" (same scheme as SelectionManager). */
 type BasketKey = string;
-
-function makeKey(modelId: string, expressId: number): BasketKey {
-  return `${modelId}:${expressId}`;
-}
 
 /**
  * Build a minimal-but-valid ElementIdentity from a serialized entry. The

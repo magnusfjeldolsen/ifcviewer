@@ -31,6 +31,7 @@ import type {
   SelectionState,
 } from './types';
 import type { ElementPropertyRepository } from './repository/ElementPropertyRepository';
+import { makeKey } from './elementKey';
 import { intersectProperties, getDistinctValuesForPath } from './intersection';
 import {
   renderHeader as renderHeaderInto,
@@ -99,7 +100,7 @@ type RenderTag =
  * and changing that order is itself a meaningful selection change.
  */
 function multiKey(identities: readonly ElementIdentity[]): string {
-  return identities.map((i) => `${i.modelId}:${i.expressId}`).join('|');
+  return identities.map((i) => makeKey(i.modelId, i.expressId)).join('|');
 }
 
 /** Listener subscription returned by onChange. */
@@ -139,11 +140,6 @@ function writePersistedView(view: ViewMode): void {
   } catch {
     /* ignore — storage may be disabled */
   }
-}
-
-/** Identity key matching SelectionManager's internal one. */
-function makeKey(identity: { modelId: string; expressId: number }): string {
-  return `${identity.modelId}:${identity.expressId}`;
 }
 
 /** Best-effort copy via the async clipboard API, falling back to noop. */
@@ -369,7 +365,7 @@ export class InspectorPanel {
     }
     // Single
     const identity = state.identities[0];
-    const key = makeKey(identity);
+    const key = makeKey(identity.modelId, identity.expressId);
     if (this.render.kind !== 'hidden' && this.getCurrentKey() === key) {
       // Same selection re-emitted; ignore to avoid flicker.
       return;
