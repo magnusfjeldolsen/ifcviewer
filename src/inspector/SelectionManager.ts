@@ -5,6 +5,7 @@ import type { ToolManager } from '../tools/Tool';
 import { raycastVisible } from '../utils/raycast';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
+import { makeKey } from './elementKey';
 import type { ElementIdentity, SelectionMode, SelectionState } from './types';
 
 /**
@@ -86,10 +87,6 @@ interface MeshHighlight {
 
 /** Internal key: "<modelId>:<expressId>". */
 type SelectionKey = string;
-
-function makeKey(modelId: string, expressId: number): SelectionKey {
-  return `${modelId}:${expressId}`;
-}
 
 function placeholderIdentity(modelId: string, expressId: number): ElementIdentity {
   // Phase 2 carries only modelId + expressId meaningfully. ifcClass /

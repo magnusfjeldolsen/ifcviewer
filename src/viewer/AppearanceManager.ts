@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { ModelManager } from './ModelManager';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
+import { makeKey } from '../inspector/elementKey';
 import type { Scope } from '../inspector/types';
 
 /**
@@ -86,10 +87,6 @@ export interface AppearanceManagerDeps {
 
 /** Internal key: "<modelId>:<expressId>" (same scheme as SelectionManager). */
 type AppearanceKey = string;
-
-function makeKey(modelId: string, expressId: number): AppearanceKey {
-  return `${modelId}:${expressId}`;
-}
 
 export class AppearanceManager {
   private deps: AppearanceManagerDeps;
