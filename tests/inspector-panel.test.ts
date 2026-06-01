@@ -11,6 +11,7 @@ import type {
   SelectionState,
 } from '../src/inspector/types';
 import type { ElementPropertyRepository } from '../src/inspector/repository/ElementPropertyRepository';
+import { intersectProperties as batchIntersect } from '../src/inspector/intersection';
 
 // ── localStorage mock (Phase 3 persists view choice here) ──────
 
@@ -185,6 +186,19 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
       return new Promise<ElementProperties>((resolve, reject) => {
         pending.push({ resolve, reject });
       });
+    },
+    intersectProperties(identities) {
+      // Reuse the per-element pending mechanism so existing tests' control
+      // flow (resolveNext / rejectNext) works unchanged. Real impl reduces
+      // in the worker; the test stub simulates the same OUTPUT by running
+      // the batch on per-element results.
+      const promises = identities.map(() => {
+        calls++;
+        return new Promise<ElementProperties>((resolve, reject) => {
+          pending.push({ resolve, reject });
+        });
+      });
+      return Promise.all(promises).then((results) => batchIntersect(results));
     },
     cancel() {
       /* no-op */
@@ -981,6 +995,14 @@ describe('InspectorPanel', () => {
             pending.push({ resolve, reject, eid: expressId });
           });
         },
+        intersectProperties(identities) {
+          const promises = identities.map((id) => {
+            return new Promise<ElementProperties>((resolve, reject) => {
+              pending.push({ resolve, reject, eid: id.expressId });
+            });
+          });
+          return Promise.all(promises).then((results) => batchIntersect(results));
+        },
         cancel: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
@@ -1075,6 +1097,14 @@ describe('InspectorPanel', () => {
             allPending.push({ resolve, reject });
           });
         },
+        intersectProperties(identities) {
+          const promises = identities.map(() => {
+            return new Promise<ElementProperties>((resolve, reject) => {
+              allPending.push({ resolve, reject });
+            });
+          });
+          return Promise.all(promises).then((results) => batchIntersect(results));
+        },
         cancel: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
@@ -1144,6 +1174,120 @@ describe('InspectorPanel', () => {
       panel.setView('tree');
       const sections = parent.querySelectorAll('.inspector-section-label');
       expect(sections.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Phase 1 of dev/plans/handoff-bulk-property-access.md — the panel
+  // routes multi-select reductions through the worker via
+  // repository.intersectProperties and shows a live "Processing N / M"
+  // overlay driven by onProgress.
+  // ───────────────────────────────────────────────────────────────────
+
+  describe('multi-select bulk intersect (Phase 1)', () => {
+    it('routes the reduction through repository.intersectProperties', async () => {
+      // Custom repo that tracks both get() and intersectProperties() calls.
+      const getCalls: number[] = [];
+      const intersectCalls: number[] = [];
+      let pendingIntersect: Array<{ resolve: (p: ElementProperties) => void }> = [];
+      const repo: ElementPropertyRepository = {
+        get(_modelId, expressId) {
+          getCalls.push(expressId);
+          return Promise.resolve(makeProperties({ identity: identity({ expressId }) }));
+        },
+        intersectProperties(identities) {
+          intersectCalls.push(identities.length);
+          return new Promise<ElementProperties>((resolve) => {
+            pendingIntersect.push({ resolve });
+          });
+        },
+        cancel: () => undefined,
+        disposeModel: () => undefined,
+        enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        describeSchema: () => {
+          throw new Error('not implemented');
+        },
+      };
+      const parent = document.createElement('div');
+      document.body.appendChild(parent);
+      const sel = makeStubSelection();
+      const panel = new InspectorPanel(parent, { repository: repo }, sel);
+      void panel;
+
+      sel.emit({
+        kind: 'multi',
+        identities: [identity({ expressId: 1 }), identity({ expressId: 2 }), identity({ expressId: 3 })],
+      });
+      // The panel should NOT have called get() for the multi-select path.
+      expect(getCalls).toEqual([]);
+      // It SHOULD have called intersectProperties once with all three.
+      expect(intersectCalls).toEqual([3]);
+
+      // Settle so async error handlers don't leak into other tests.
+      const queue = pendingIntersect;
+      pendingIntersect = [];
+      for (const p of queue) p.resolve(makeProperties());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    it('renders a live "Processing N / M" overlay from onProgress', async () => {
+      // Custom repo: intersect captures the onProgress callback so the
+      // test can drive it manually.
+      let capturedOnProgress: ((d: number, t: number) => void) | undefined;
+      let resolveIntersect!: (p: ElementProperties) => void;
+      const repo: ElementPropertyRepository = {
+        get() {
+          throw new Error('should not be called');
+        },
+        intersectProperties(_identities, onProgress) {
+          capturedOnProgress = onProgress;
+          return new Promise<ElementProperties>((resolve) => {
+            resolveIntersect = resolve;
+          });
+        },
+        cancel: () => undefined,
+        disposeModel: () => undefined,
+        enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        describeSchema: () => {
+          throw new Error('not implemented');
+        },
+      };
+      const parent = document.createElement('div');
+      document.body.appendChild(parent);
+      const sel = makeStubSelection();
+      const panel = new InspectorPanel(parent, { repository: repo }, sel);
+      void panel;
+
+      sel.emit({
+        kind: 'multi',
+        identities: Array.from({ length: 5 }, (_, i) => identity({ expressId: i + 1 })),
+      });
+      expect(capturedOnProgress).toBeDefined();
+
+      // Drive a progress update — overlay should appear with "1 / 5".
+      capturedOnProgress!(1, 5);
+      const overlay1 = parent.querySelector('.inspector-progress');
+      expect(overlay1).not.toBeNull();
+      expect(overlay1!.textContent).toBe('Processing 1 / 5');
+
+      // Update again — overlay must update in place (same node).
+      capturedOnProgress!(3, 5);
+      const overlay2 = parent.querySelector('.inspector-progress');
+      expect(overlay2).toBe(overlay1);
+      expect(overlay2!.textContent).toBe('Processing 3 / 5');
+
+      // Final completion clears the overlay (the body re-renders to the tree).
+      capturedOnProgress!(5, 5);
+      resolveIntersect(makeProperties());
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(parent.querySelector('.inspector-progress')).toBeNull();
     });
   });
 });

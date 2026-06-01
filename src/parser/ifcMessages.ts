@@ -35,6 +35,14 @@ export type ToWorker =
   | { type: 'openForProps'; id: string; buffer: ArrayBuffer }
   /** Fetch normalized properties for one element. */
   | { type: 'getProps'; reqId: number; id: string; expressId: number }
+  /**
+   * Fold properties of N elements into a single synthetic intersection
+   * result. The worker reads each id, runs an incremental fold (O(1)
+   * memory in N), and posts ONE `intersection` reply plus throttled
+   * `progress` messages along the way. Phase 1 of
+   * dev/plans/handoff-bulk-property-access.md.
+   */
+  | { type: 'intersect'; reqId: number; id: string; expressIds: number[] }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -51,6 +59,14 @@ export type FromWorker =
   | { type: 'parsed'; id: string }
   /** A `getProps` completed successfully. */
   | { type: 'props'; reqId: number; props: ElementProperties }
+  /**
+   * Throttled progress for a long-running property reduction (currently
+   * `intersect`; reused by future `findMatching` / aggregate). Per-chunk,
+   * not per-element; `done` is monotonic and ends at `total`.
+   */
+  | { type: 'progress'; reqId: number; done: number; total: number }
+  /** A `intersect` reduction completed successfully — single synthetic result. */
+  | { type: 'intersection'; reqId: number; props: ElementProperties }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.

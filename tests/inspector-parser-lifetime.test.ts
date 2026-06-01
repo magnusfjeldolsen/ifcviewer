@@ -76,3 +76,78 @@ describe('ParsedModel shape (web-worker-parse)', () => {
     expect(sample.meshes).toEqual([]);
   });
 });
+
+/**
+ * Phase 1 of dev/plans/handoff-bulk-property-access.md — bulk intersect in
+ * the worker. We can't black-box-execute the worker (web-ifc WASM is not
+ * available in unit tests), but we CAN guard the invariants at the source
+ * level: the handler exists, dispatches via the queue, uses the fold (not
+ * the batch), chunks at 200, yields a macrotask between chunks, and
+ * throttles progress. These are the architectural properties the rest of
+ * the implementation rides on.
+ */
+describe('ifcWorker.handleIntersect (Phase 1 — bulk reduce)', () => {
+  it('exists and is dispatched via the serial queue (like getProps)', () => {
+    expect(workerSrc).toMatch(/async function handleIntersect\(/);
+    // Dispatch case calls enqueue + handleIntersect with the standard
+    // try/catch → error reply pattern.
+    expect(workerSrc).toMatch(
+      /case 'intersect':[\s\S]*?enqueue\([\s\S]*?await handleIntersect\(/,
+    );
+  });
+
+  it('uses the incremental fold, not the batch intersectProperties', () => {
+    // The fold is what gives us O(1) memory in N. Importing the batch
+    // would let an incremental call sneak in — guard against that.
+    expect(workerSrc).toMatch(/intersectSeed/);
+    expect(workerSrc).toMatch(/intersectStep/);
+    expect(workerSrc).toMatch(/intersectFinalize/);
+    // The batch wrapper is allowed to be imported nowhere in the worker
+    // (it would materialize all inputs in memory).
+    const importLines = workerSrc.match(/from\s+'[^']*intersection'/g) ?? [];
+    for (const line of importLines) void line; // assertion below
+    // Specifically: the symbol intersectProperties must not appear in
+    // the worker source.
+    expect(workerSrc).not.toMatch(/\bintersectProperties\b/);
+  });
+
+  it('chunks expressIds with a CHUNK constant (default 200)', () => {
+    expect(workerSrc).toMatch(/INTERSECT_CHUNK\s*=\s*200/);
+  });
+
+  it('macrotask-yields between chunks (await setTimeout(0))', () => {
+    // The fold body must yield a macrotask between chunks so progress
+    // delivery (and, in Phase 2, cancel observation) can interleave.
+    // We expect `await new Promise(... setTimeout(r, 0)`.
+    expect(workerSrc).toMatch(/await\s+new\s+Promise[\s\S]*?setTimeout\(r,\s*0\)/);
+  });
+
+  it('throttles progress to ~10/sec via PROGRESS_MIN_INTERVAL_MS', () => {
+    expect(workerSrc).toMatch(/PROGRESS_MIN_INTERVAL_MS\s*=\s*100/);
+    expect(workerSrc).toMatch(/lastProgressAt/);
+  });
+
+  it('posts intersection (not props) on completion', () => {
+    const fn = workerSrc.match(/async function handleIntersect\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/post\(\{\s*type:\s*'intersection'/);
+  });
+
+  it('reuses getOne — the single normalization path', () => {
+    // getOne was extracted from handleGetProps; handleIntersect uses it
+    // so single and bulk reads normalize identically.
+    expect(workerSrc).toMatch(/async function getOne\(/);
+    const fn = workerSrc.match(/async function handleIntersect\([\s\S]*?\n\}/);
+    expect(fn![0]).toMatch(/getOne\(/);
+  });
+
+  it('handleGetProps still works — getOne extraction is behaviour-preserving', () => {
+    // handleGetProps must still post `props` and must call getOne (the
+    // shared extraction). Catches a regression where the extraction
+    // accidentally changed handleGetProps semantics.
+    const fn = workerSrc.match(/async function handleGetProps\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/getOne\(/);
+    expect(fn![0]).toMatch(/post\(\{\s*type:\s*'props'/);
+  });
+});

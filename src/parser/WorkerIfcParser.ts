@@ -183,7 +183,10 @@ export class WorkerIfcParser {
         break;
       }
       case 'props':
-        // Property-query reply — belongs to WorkerPropertyRepository.
+      case 'intersection':
+      case 'progress':
+        // Property-query / intersection / progress reply — belongs to
+        // WorkerPropertyRepository.
         this.extraSink?.(msg);
         break;
     }

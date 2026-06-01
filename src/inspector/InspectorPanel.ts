@@ -32,7 +32,7 @@ import type {
 } from './types';
 import type { ElementPropertyRepository } from './repository/ElementPropertyRepository';
 import { makeKey } from './elementKey';
-import { intersectProperties, getDistinctValuesForPath } from './intersection';
+import { getDistinctValuesForPath } from './intersection';
 import {
   renderHeader as renderHeaderInto,
   renderMultiHeader as renderMultiHeaderInto,
@@ -374,17 +374,21 @@ export class InspectorPanel {
   }
 
   /**
-   * Phase 4 — multi-element selection path.
+   * Phase 4 — multi-element selection path. Phase 1 of
+   * dev/plans/handoff-bulk-property-access.md routes the reduction through
+   * the worker via `repository.intersectProperties` and shows a live
+   * "Processing N / M" overlay driven by the per-progress callback.
    *
    * Behaviour:
    *   1. Identity summary in the header renders synchronously from the
    *      identity list (no fetch needed for the count / class mix).
    *   2. If `identities.length > MULTI_SELECT_SOFT_CAP`, body shows the
-   *      "Too many selected" message and we don't fetch anything.
-   *   3. Otherwise, fetch all elements in parallel via repository.get.
-   *      When the last fetch resolves, run `intersectProperties` and feed
-   *      the synthetic result into the same Tree / Flat renderers used
-   *      for single-select.
+   *      "Too many selected" message and we don't fetch anything. The
+   *      1 000 cap stays in place until Phase 2.
+   *   3. Otherwise, post ONE intersect to the worker per model. As the
+   *      worker yields between chunks the panel updates a "Processing …
+   *      N / M" counter. When the reduction resolves, feed the synthetic
+   *      result into the same Tree / Flat renderers used for single-select.
    *   4. Stale guarding: each multi-fetch tags itself with the identity-
    *      list key. If a newer selection arrives mid-flight, the older
    *      result is discarded.
@@ -409,7 +413,8 @@ export class InspectorPanel {
     this.countPill.textContent = '';
     this.renderMultiHeader(identities);
 
-    // Soft cap.
+    // Soft cap (unchanged for Phase 1 — Phase 2 raises this to the
+    // 10 000 sanity guard with a "compute anyway" affordance).
     if (identities.length > MULTI_SELECT_SOFT_CAP) {
       this.render = { kind: 'multi-cap', key, identities: [...identities] };
       this.renderMultiCap();
@@ -423,20 +428,19 @@ export class InspectorPanel {
       }
     }, SPINNER_DELAY_MS);
 
-    // Per-element fetches. The repository memoizes per (modelId, expressId)
-    // so repeated multi-fetches over overlapping selections are cheap.
-    const fetches = identities.map((id) =>
-      this.repository.get(id.modelId, id.expressId),
-    );
+    const onProgress = (done: number, total: number): void => {
+      if (this.inflightKey !== key) return; // Stale.
+      this.renderProgress(done, total);
+    };
 
-    Promise.all(fetches)
-      .then((results) => {
+    this.repository
+      .intersectProperties(identities, onProgress)
+      .then((synthetic) => {
         if (this.inflightKey !== key) return; // Stale.
         if (this.spinnerTimer) {
           clearTimeout(this.spinnerTimer);
           this.spinnerTimer = null;
         }
-        const synthetic = intersectProperties(results);
         this.render = {
           kind: 'multi-loaded',
           props: synthetic,
@@ -597,6 +601,31 @@ export class InspectorPanel {
     spinner.className = 'inspector-spinner';
     spinner.textContent = 'Loading...';
     this.body.appendChild(spinner);
+  }
+
+  /**
+   * Render the live "Processing … N / M" overlay during a multi-element
+   * intersection reduction. Replaces the spinner once the first progress
+   * message arrives; updated in place to keep DOM churn minimal.
+   *
+   * Phase 1 of dev/plans/handoff-bulk-property-access.md — the overlay is
+   * what makes a 1 000-element reduction feel responsive on every model.
+   */
+  private renderProgress(done: number, total: number): void {
+    if (this.spinnerTimer) {
+      clearTimeout(this.spinnerTimer);
+      this.spinnerTimer = null;
+    }
+    // Re-use the existing overlay node if we've already rendered one;
+    // otherwise create it.
+    let overlay = this.body.querySelector<HTMLDivElement>('.inspector-progress');
+    if (!overlay) {
+      this.body.textContent = '';
+      overlay = document.createElement('div');
+      overlay.className = 'inspector-progress';
+      this.body.appendChild(overlay);
+    }
+    overlay.textContent = `Processing ${done} / ${total}`;
   }
 
   private renderError(message: string): void {
