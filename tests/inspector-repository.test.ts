@@ -19,6 +19,7 @@ import {
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
 import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { stripAuthoringIdSuffix } from '../src/inspector/repository/propertyNormalizer';
 import { buildFlatRows } from '../src/inspector/repository/flatRows';
 import { buildUnitTable, type UnitTable } from '../src/inspector/format';
 
@@ -231,6 +232,42 @@ describe('fetchElementProperties — identity', () => {
     expect(keys).toContain('GlobalId');
     expect(keys).toContain('Tag');
     expect(keys).toContain('PredefinedType');
+  });
+});
+
+describe('stripAuthoringIdSuffix', () => {
+  // Revit exports Name as "Family:Type:<ElementId>" and repeats that id in
+  // Tag. Left alone, every element's Name is unique, so matching by Name can
+  // only ever find the element you started from.
+  it('strips the trailing id when it is exactly the Tag', () => {
+    expect(stripAuthoringIdSuffix('Wall Foundation:Såle 1500x300:667171', '667171')).toBe(
+      'Wall Foundation:Såle 1500x300',
+    );
+  });
+
+  it('leaves a colon-number alone when it is NOT the Tag', () => {
+    // Self-verifying: without the model confirming the number is the id, a
+    // name that genuinely ends in one keeps it.
+    expect(stripAuthoringIdSuffix('Grid:100', 'W-12A')).toBe('Grid:100');
+    expect(stripAuthoringIdSuffix('Level:200', '999')).toBe('Level:200');
+  });
+
+  it('leaves non-numeric tags alone', () => {
+    expect(stripAuthoringIdSuffix('Wall:Type:W-12A', 'W-12A')).toBe('Wall:Type:W-12A');
+  });
+
+  it('never strips the entire name', () => {
+    expect(stripAuthoringIdSuffix(':667171', '667171')).toBe(':667171');
+  });
+
+  it('passes through when either side is missing', () => {
+    expect(stripAuthoringIdSuffix(undefined, '1')).toBeUndefined();
+    expect(stripAuthoringIdSuffix('Wall:1', undefined)).toBe('Wall:1');
+  });
+
+  it('keeps the id available — it is still the Tag row', async () => {
+    const props = await fetchWall(mkFake());
+    expect(props.flat.find((r) => r.path === 'Identity.Tag')).toBeDefined();
   });
 });
 

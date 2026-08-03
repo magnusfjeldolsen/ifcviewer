@@ -33,6 +33,10 @@ import type { ElementIdentity, PropertyFlatRow, PropertyValue } from './types';
 /**
  * A resolved "find everything like this" request. `kind` picks the worker
  * primitive: `class` needs only id enumeration, `value` runs the predicate.
+ *
+ * `ifcTypeCode` scopes the candidate set and is the NUMERIC code off the
+ * source element. `null` means "every product" — used when the source is a
+ * multi-selection whose members may not share a type.
  */
 export type SimilarQuery =
   | {
@@ -47,7 +51,7 @@ export type SimilarQuery =
       kind: 'value';
       modelId: string;
       ifcClass: string;
-      ifcTypeCode: number;
+      ifcTypeCode: number | null;
       selector: PropertySelector;
       value: PropertyValue;
       label: string;
@@ -61,14 +65,40 @@ export function canSelectSimilar(row: Pick<PropertyFlatRow, 'path' | 'rawValue'>
   return row.path.length > 0 && isMatchable(row.rawValue);
 }
 
-/** "Select every element of this element's class." */
+/**
+ * "Select every element like this one, by kind."
+ *
+ * When the element has a `PredefinedType` this narrows to it, because the
+ * IFC class alone is coarser than what people mean by "the same kind of
+ * thing": a Revit floor and a Revit structural foundation are BOTH IfcSlab,
+ * separated only by PredefinedType (FLOOR vs BASESLAB). Selecting a
+ * foundation and getting every floor slab in the model is not the ask. With
+ * PredefinedType present this becomes a value match on `Identity.
+ * PredefinedType`, still scoped to the class, so the extra precision costs
+ * one property read per candidate of that class and nothing more.
+ *
+ * Without a PredefinedType, the plain class enumeration stands.
+ */
 export function classQuery(identity: ElementIdentity): SimilarQuery {
+  const cls = identity.ifcClass || 'elements';
+  const predefined = identity.predefinedType;
+  if (predefined) {
+    return {
+      kind: 'value',
+      modelId: identity.modelId,
+      ifcClass: identity.ifcClass,
+      ifcTypeCode: identity.ifcTypeCode,
+      selector: { path: 'Identity.PredefinedType' },
+      value: { kind: 'single', value: predefined, raw: { typeCode: 0, value: predefined } },
+      label: `all ${cls} · ${predefined}`,
+    };
+  }
   return {
     kind: 'class',
     modelId: identity.modelId,
     ifcClass: identity.ifcClass,
     ifcTypeCode: identity.ifcTypeCode,
-    label: `all ${identity.ifcClass || 'elements'}`,
+    label: `all ${cls}`,
   };
 }
 
@@ -76,17 +106,23 @@ export function classQuery(identity: ElementIdentity): SimilarQuery {
  * "Select every element whose property at this path holds this value."
  * Returns null when the row can't drive a match, so callers can't
  * accidentally build a query that would select nothing.
+ *
+ * `scope` overrides the candidate set. It exists for the multi-selection
+ * case: the rows there come from an intersection whose members may span
+ * types, so there is no single type code to scope by and the search widens
+ * to every product. The predicate is unchanged — only the candidate set is.
  */
 export function valueQuery(
-  identity: ElementIdentity,
+  identity: Pick<ElementIdentity, 'modelId' | 'ifcClass' | 'ifcTypeCode'>,
   row: Pick<PropertyFlatRow, 'path' | 'name' | 'rawValue' | 'displayValue'>,
+  scope: { ifcTypeCode: number | null } = { ifcTypeCode: identity.ifcTypeCode },
 ): SimilarQuery | null {
   if (!canSelectSimilar(row)) return null;
   return {
     kind: 'value',
     modelId: identity.modelId,
     ifcClass: identity.ifcClass,
-    ifcTypeCode: identity.ifcTypeCode,
+    ifcTypeCode: scope.ifcTypeCode,
     selector: { path: row.path },
     value: row.rawValue,
     label: `${row.name} = ${row.displayValue || '—'}`,
@@ -101,11 +137,15 @@ export function valueQuery(
  * leave them blank for the inspector to fill in later.
  */
 export function identitiesFromIds(query: SimilarQuery, ids: readonly number[]): ElementIdentity[] {
+  // An all-products query (ifcTypeCode null) genuinely doesn't know each
+  // match's class, so it leaves the placeholders the marquee path also uses;
+  // the inspector fills them in when the element is fetched.
+  const typeCode = query.ifcTypeCode;
   return ids.map((expressId) => ({
     modelId: query.modelId,
     expressId,
-    ifcClass: query.ifcClass,
-    ifcTypeCode: query.ifcTypeCode,
+    ifcClass: typeCode === null ? '' : query.ifcClass,
+    ifcTypeCode: typeCode ?? 0,
   }));
 }
 

@@ -262,6 +262,35 @@ function quantityMeasureType(typeCode: number | undefined): number {
 // Identity + direct rows
 // ---------------------------------------------------------------------------
 
+/**
+ * Strip the authoring-tool element id that Revit's IFC exporter appends to
+ * `Name`.
+ *
+ * Revit writes `Family:Type:<ElementId>` — e.g.
+ * `Wall Foundation:Såle 1500x300:667171` — and puts that same id in `Tag`.
+ * The consequence is that every element's Name is unique, so "select
+ * everything with this Name" can only ever match the element you started
+ * from, and the panel title carries a number nobody reads.
+ *
+ * The rule is deliberately narrow: strip the trailing `:<digits>` ONLY when
+ * those digits are exactly the element's Tag. That makes the transform
+ * self-verifying — a name that genuinely ends in a colon-number ("Grid:100")
+ * is left alone unless the model itself confirms the number is the id — and
+ * loses nothing, since Tag still carries the id as its own row.
+ */
+export function stripAuthoringIdSuffix(
+  name: string | undefined,
+  tag: string | undefined,
+): string | undefined {
+  if (!name || !tag) return name;
+  const suffix = `:${tag}`;
+  if (!name.endsWith(suffix)) return name;
+  if (!/^\d+$/.test(tag)) return name;
+  const stripped = name.slice(0, -suffix.length);
+  // Never return an empty name — if the id was the whole thing, keep it.
+  return stripped.length > 0 ? stripped : name;
+}
+
 export function buildIdentity(
   modelId: string,
   expressId: number,
@@ -269,6 +298,7 @@ export function buildIdentity(
 ): ElementIdentity {
   const o = isObj(item) ? item : {};
   const ifcTypeCode = getRawTypeCode(o) ?? 0;
+  const tag = readString((o as Record<string, unknown>).Tag);
   return {
     modelId,
     expressId,
@@ -277,9 +307,9 @@ export function buildIdentity(
       : ifcClassFromTypeCode(ifcTypeCode),
     ifcTypeCode,
     globalId: readString((o as Record<string, unknown>).GlobalId),
-    name: readString((o as Record<string, unknown>).Name),
+    name: stripAuthoringIdSuffix(readString((o as Record<string, unknown>).Name), tag),
     objectType: readString((o as Record<string, unknown>).ObjectType),
-    tag: readString((o as Record<string, unknown>).Tag),
+    tag,
     predefinedType: readString((o as Record<string, unknown>).PredefinedType),
   };
 }

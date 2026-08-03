@@ -60,7 +60,7 @@ describe('canSelectSimilar', () => {
 });
 
 describe('classQuery', () => {
-  it('scopes to the elementic class and model', () => {
+  it('scopes to the element class and model', () => {
     const q = classQuery(identity());
     expect(q).toMatchObject({
       kind: 'class',
@@ -73,6 +73,27 @@ describe('classQuery', () => {
 
   it('degrades to a readable label when the class is unknown', () => {
     expect(classQuery(identity({ ifcClass: '' })).label).toBe('all elements');
+  });
+
+  it('narrows by PredefinedType when the element has one', () => {
+    // A Revit floor and a Revit structural foundation are BOTH IfcSlab,
+    // separated only by PredefinedType. Selecting a foundation and getting
+    // every floor slab in the model is not what "select all of this kind"
+    // means to anyone.
+    const q = classQuery(identity({ ifcClass: 'IfcSlab', predefinedType: 'BASESLAB' }));
+    expect(q.kind).toBe('value');
+    if (q.kind === 'value') {
+      expect(q.selector.path).toBe('Identity.PredefinedType');
+      expect(q.value).toEqual({
+        kind: 'single',
+        value: 'BASESLAB',
+        raw: { typeCode: 0, value: 'BASESLAB' },
+      });
+      // Still scoped to the class — PredefinedType only discriminates
+      // within it.
+      expect(q.ifcTypeCode).toBe(1234);
+    }
+    expect(q.label).toBe('all IfcSlab · BASESLAB');
   });
 });
 
@@ -97,6 +118,13 @@ describe('valueQuery', () => {
   it('labels an empty display value without pretending it is blank', () => {
     const q = valueQuery(identity(), { ...row, displayValue: '' });
     expect(q!.label).toBe('Reference = —');
+  });
+
+  it('accepts an explicit scope override for a mixed-type source', () => {
+    const q = valueQuery(identity(), row, { ifcTypeCode: null });
+    expect(q!.ifcTypeCode).toBeNull();
+    // The predicate is untouched — only the candidate set widens.
+    expect(q!.kind === 'value' && q!.selector.path).toBe('Pset_BeamCommon.Reference');
   });
 });
 

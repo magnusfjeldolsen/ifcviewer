@@ -897,10 +897,10 @@ export class App {
     try {
       const ids =
         query.kind === 'class'
-          ? await this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcClass)
+          ? await this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcTypeCode)
           : await this.propertyRepository.findMatching(
               query.modelId,
-              query.ifcClass,
+              query.ifcTypeCode,
               query.selector,
               query.value,
               (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),

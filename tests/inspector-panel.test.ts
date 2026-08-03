@@ -1398,10 +1398,14 @@ describe('InspectorPanel', () => {
       expect(parent.querySelector('.inspector-similar-btn')).toBeNull();
     });
 
-    it('offers nothing on a multi-selection', async () => {
-      // The rendered props are a synthetic intersection — its rows describe
-      // what the selection has in common, not one element's values.
-      const { parent, repo, selection } = mountPanel({ kind: 'none' }, { onSelectSimilar: () => undefined });
+    it('offers the affordance on a multi-selection too', async () => {
+      // A row that survives the intersection with a concrete value describes
+      // a value the whole selection shares, so "select everything else with
+      // this value" is exactly as well-defined as for one element. Rows that
+      // differ render as `varies`, which isn't matchable, so they're excluded
+      // without needing a separate rule.
+      const seen: SimilarQuery[] = [];
+      const { parent, repo, selection } = mountPanel({ kind: 'none' }, { onSelectSimilar: (q) => seen.push(q) });
       selection.emit({
         kind: 'multi',
         identities: [identity({ expressId: 1 }), identity({ expressId: 2 })],
@@ -1410,7 +1414,36 @@ describe('InspectorPanel', () => {
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
-      expect(parent.querySelector('.inspector-similar-btn')).toBeNull();
+
+      const btn = parent.querySelector<HTMLButtonElement>('.inspector-similar-btn');
+      expect(btn).not.toBeNull();
+      btn!.click();
+      expect(seen.length).toBe(1);
+      // Both members report the same type code, so the search stays scoped
+      // to that type rather than widening to every product.
+      expect(seen[0].ifcTypeCode).toBe(identity().ifcTypeCode);
+    });
+
+    it('widens the scope to all products when the selection spans types', async () => {
+      // Marquee identities carry a placeholder type code of 0, and a mixed
+      // selection has no single type — guessing one would silently search
+      // the wrong set, so the query scopes to every product instead.
+      const seen: SimilarQuery[] = [];
+      const { parent, repo, selection } = mountPanel({ kind: 'none' }, { onSelectSimilar: (q) => seen.push(q) });
+      selection.emit({
+        kind: 'multi',
+        identities: [
+          identity({ expressId: 1, ifcTypeCode: 1 }),
+          identity({ expressId: 2, ifcTypeCode: 2 }),
+        ],
+      });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      parent.querySelector<HTMLButtonElement>('.inspector-similar-btn')!.click();
+      expect(seen[0].ifcTypeCode).toBeNull();
     });
 
     it('clicking builds a value query from that row', async () => {

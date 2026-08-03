@@ -454,46 +454,49 @@ async function handleIntersect(
 }
 
 /**
- * Resolve the candidate expressIds for a class, or for every product when
- * `ifcClass` is undefined / null.
+ * Resolve the candidate expressIds for one IFC type, or for every product
+ * when `ifcType` is undefined / null.
  *
  * `IFCPRODUCT` with `includeInherited` is the centralized "all products"
  * definition — one supertype code rather than a hand-maintained list of
  * concrete classes that would silently rot as the schema grows.
  *
- * An explicit class is looked up with `includeInherited: false`, so
- * "IFCWALL" means IfcWall and not also IfcWallStandardCase. That matches
- * what the inspector shows as `ifcClass`, which is what the user picked
- * from — subtype-widening here would select elements whose displayed class
- * differs from the one they asked for.
+ * An explicit type is queried with `includeInherited: false`, so IfcWall
+ * means IfcWall and not also IfcWallStandardCase — subtype-widening would
+ * select elements whose displayed class differs from the one the user
+ * picked.
+ *
+ * The caller passes a NUMERIC code (`ElementIdentity.ifcTypeCode`, read off
+ * the element itself). Do NOT reintroduce `GetTypeCodeFromName` here: it
+ * hashes its argument rather than looking it up, so `'IfcSlab'` yields
+ * 200263316 while the real IFCSLAB is 1529196076 — a wrong-but-plausible
+ * code that returns an empty (or, on collision, an unrelated) result set
+ * with no error to notice.
  */
 function candidateIds(
   ifc: WebIFC.IfcAPI,
   modelID: number,
-  ifcClass: string | null | undefined,
+  ifcType: number | null | undefined,
 ): number[] {
-  const typeCode = ifcClass ? ifc.GetTypeCodeFromName(ifcClass) : WebIFC.IFCPRODUCT;
-  if (!typeCode) {
-    throw new Error(`ifcWorker: unknown IFC class "${ifcClass}"`);
-  }
-  const vec = ifc.GetLineIDsWithType(modelID, typeCode, !ifcClass);
+  const allProducts = ifcType === null || ifcType === undefined;
+  const vec = ifc.GetLineIDsWithType(modelID, allProducts ? WebIFC.IFCPRODUCT : ifcType, allProducts);
   const ids: number[] = [];
   for (let i = 0; i < vec.size(); i++) ids.push(vec.get(i));
   return ids;
 }
 
-/** List the expressIds of one class (or of every product) and post `ids`. */
+/** List the expressIds of one type (or of every product) and post `ids`. */
 async function handleEnumerateIds(
   reqId: number,
   id: string,
-  ifcClass: string | undefined,
+  ifcType: number | undefined,
 ): Promise<void> {
   const ifc = await getApi();
   const modelID = modelIds.get(id);
   if (modelID === undefined) {
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
-  post({ type: 'ids', reqId, ids: candidateIds(ifc, modelID, ifcClass) });
+  post({ type: 'ids', reqId, ids: candidateIds(ifc, modelID, ifcType) });
 }
 
 /**
@@ -505,7 +508,7 @@ async function handleEnumerateIds(
 async function handleFindMatching(
   reqId: number,
   id: string,
-  ifcClass: string | null,
+  ifcType: number | null,
   selector: PropertySelector,
   value: PropertyValue,
 ): Promise<void> {
@@ -515,7 +518,7 @@ async function handleFindMatching(
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
 
-  const candidates = candidateIds(ifc, modelID, ifcClass);
+  const candidates = candidateIds(ifc, modelID, ifcType);
   if (candidates.length === 0) {
     post({ type: 'progress', reqId, done: 0, total: 0 });
     post({ type: 'ids', reqId, ids: [] });
@@ -632,7 +635,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
     case 'enumerateIds':
       enqueue(async () => {
         try {
-          await handleEnumerateIds(msg.reqId, msg.id, msg.ifcClass);
+          await handleEnumerateIds(msg.reqId, msg.id, msg.ifcType);
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
         }
@@ -644,7 +647,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       enqueue(async () => {
         try {
           await runBulk(msg.reqId, () =>
-            handleFindMatching(msg.reqId, msg.id, msg.ifcClass, msg.selector, msg.value),
+            handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value),
           );
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });

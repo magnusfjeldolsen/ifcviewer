@@ -39,6 +39,9 @@ class MockWorker implements WorkerLike {
   }
 }
 
+/** Real IFCWALL type code. Names are not accepted — GetTypeCodeFromName hashes. */
+const IFCWALL_CODE = 2391406946;
+
 function fakeProps(modelId: string, expressId: number): ElementProperties {
   return {
     identity: { modelId, expressId, ifcClass: 'IfcWall', ifcTypeCode: 0 },
@@ -195,27 +198,27 @@ describe('WorkerPropertyRepository — lifecycle', () => {
 describe('WorkerPropertyRepository — enumerateExpressIds', () => {
   it('posts enumerateIds and resolves with the ids reply', async () => {
     const { repo, worker } = setup();
-    const promise = repo.enumerateExpressIds('m', 'IFCWALL');
+    const promise = repo.enumerateExpressIds('m', IFCWALL_CODE);
 
     const sent = lastOfType(worker, 'enumerateIds');
-    expect(sent).toMatchObject({ type: 'enumerateIds', id: 'm', ifcClass: 'IFCWALL' });
+    expect(sent).toMatchObject({ type: 'enumerateIds', id: 'm', ifcType: IFCWALL_CODE });
 
     worker.reply({ type: 'ids', reqId: sent.reqId, ids: [1, 2, 3] });
     await expect(promise).resolves.toEqual([1, 2, 3]);
   });
 
-  it('omitting the class asks for every product', async () => {
+  it('omitting the type asks for every product', async () => {
     const { repo, worker } = setup();
     void repo.enumerateExpressIds('m');
-    expect(lastOfType(worker, 'enumerateIds').ifcClass).toBeUndefined();
+    expect(lastOfType(worker, 'enumerateIds').ifcType).toBeUndefined();
   });
 
   it('rejects on an error reply for its reqId', async () => {
     const { repo, worker } = setup();
-    const promise = repo.enumerateExpressIds('m', 'IFCNOPE');
+    const promise = repo.enumerateExpressIds('m', IFCWALL_CODE);
     const sent = lastOfType(worker, 'enumerateIds');
-    worker.reply({ type: 'error', reqId: sent.reqId, message: 'unknown IFC class' });
-    await expect(promise).rejects.toThrow(/unknown IFC class/);
+    worker.reply({ type: 'error', reqId: sent.reqId, message: 'unknown modelId' });
+    await expect(promise).rejects.toThrow(/unknown modelId/);
   });
 });
 
@@ -229,10 +232,10 @@ describe('WorkerPropertyRepository — findMatching', () => {
 
   it('posts findMatching with the selector and resolves with matching ids', async () => {
     const { repo, worker } = setup();
-    const promise = repo.findMatching('m', 'IFCWALL', selector, value);
+    const promise = repo.findMatching('m', IFCWALL_CODE, selector, value);
 
     const sent = lastOfType(worker, 'findMatching');
-    expect(sent).toMatchObject({ type: 'findMatching', id: 'm', ifcClass: 'IFCWALL', selector });
+    expect(sent).toMatchObject({ type: 'findMatching', id: 'm', ifcType: IFCWALL_CODE, selector });
 
     worker.reply({ type: 'ids', reqId: sent.reqId, ids: [7, 9] });
     await expect(promise).resolves.toEqual([7, 9]);
@@ -259,7 +262,7 @@ describe('WorkerPropertyRepository — findMatching', () => {
 
   it('a worker crash rejects an in-flight findMatching', async () => {
     const { repo, worker } = setup();
-    const promise = repo.findMatching('m', 'IFCWALL', selector, value);
+    const promise = repo.findMatching('m', IFCWALL_CODE, selector, value);
     worker.crash();
     await expect(promise).rejects.toThrow(/crashed/);
   });
@@ -271,7 +274,7 @@ describe('WorkerPropertyRepository — cancelBulk', () => {
     const intersect = repo.intersectProperties([
       { modelId: 'm', expressId: 1, ifcClass: 'IfcWall', ifcTypeCode: 0 },
     ]);
-    const matching = repo.findMatching('m', 'IFCWALL', { path: 'A.B' }, {
+    const matching = repo.findMatching('m', IFCWALL_CODE, { path: 'A.B' }, {
       kind: 'single',
       value: 1,
       raw: { typeCode: 0, value: 1 },
@@ -293,7 +296,7 @@ describe('WorkerPropertyRepository — cancelBulk', () => {
 
   it('a late reply for a cancelled request is dropped', async () => {
     const { repo, worker } = setup();
-    const promise = repo.findMatching('m', 'IFCWALL', { path: 'A.B' }, {
+    const promise = repo.findMatching('m', IFCWALL_CODE, { path: 'A.B' }, {
       kind: 'single',
       value: 1,
       raw: { typeCode: 0, value: 1 },

@@ -762,27 +762,57 @@ export class InspectorPanel {
    * The row-level "select similar" handler, or undefined when the affordance
    * shouldn't be offered.
    *
-   * Two conditions, both necessary: a consumer wired `onSelectSimilar`, and
-   * the panel is showing exactly ONE element. On a multi-select the rendered
-   * props are a synthetic intersection — its rows describe what the selection
-   * has in common, not one element's values, so "select everything like this"
-   * has no well-defined source to be like.
+   * Works for a single element AND for a multi-selection. On a multi-select
+   * the rendered props are a synthetic intersection, but a row that survived
+   * it with a concrete value (not `varies`) describes a value the whole
+   * selection genuinely shares — "select everything else with this value" is
+   * exactly as well-defined as it is for one element. Rows that differ across
+   * the selection render as `varies`, which isn't matchable, so they get no
+   * affordance without any extra rule.
+   *
+   * The candidate scope differs: one element scopes to its own type, while a
+   * multi-selection may span types and so searches every product. Marquee
+   * identities carry a placeholder type code of 0, which is why the shared
+   * code is only trusted when every member reports the same non-zero one.
    */
   private similarHandler(): ((path: string, value: PropertyValue) => void) | undefined {
     const run = this.deps.onSelectSimilar;
     if (!run) return undefined;
-    if (this.render.kind !== 'loaded') return undefined;
+    if (this.render.kind !== 'loaded' && this.render.kind !== 'multi-loaded') return undefined;
+
     const identity = this.render.props.identity;
+    const scope = { ifcTypeCode: this.sharedTypeCode() };
+
     return (path, value) => {
       const row = this.currentProps?.flat.find((r) => r.path === path);
-      const query = valueQuery(identity, {
-        path,
-        name: row?.name ?? path.split('.').pop() ?? path,
-        rawValue: value,
-        displayValue: row?.displayValue ?? '',
-      });
+      const query = valueQuery(
+        identity,
+        {
+          path,
+          name: row?.name ?? path.split('.').pop() ?? path,
+          rawValue: value,
+          displayValue: row?.displayValue ?? '',
+        },
+        scope,
+      );
       if (query) run(query);
     };
+  }
+
+  /**
+   * The type code every element in the current render shares, or null when
+   * they don't share one (or it isn't known). Null widens the search to all
+   * products rather than guessing a type.
+   */
+  private sharedTypeCode(): number | null {
+    if (this.render.kind === 'loaded') {
+      return this.render.props.identity.ifcTypeCode || null;
+    }
+    if (this.render.kind !== 'multi-loaded') return null;
+    const codes = this.render.identities.map((i) => i.ifcTypeCode);
+    const first = codes[0];
+    if (!first) return null;
+    return codes.every((c) => c === first) ? first : null;
   }
 
   // ── Copy-to-clipboard with brief visual confirmation ──────
