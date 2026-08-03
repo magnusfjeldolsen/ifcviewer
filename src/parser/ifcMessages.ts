@@ -17,7 +17,8 @@
  * a buffer is transferred it is neutered; the sender must not touch it.
  */
 
-import type { ElementProperties } from '../inspector/types';
+import type { ElementProperties, PropertyValue } from '../inspector/types';
+import type { PropertySelector } from '../inspector/matchValue';
 import type { ParsedMesh, StreamProgress } from './types';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,34 @@ export type ToWorker =
    * dev/plans/handoff-bulk-property-access.md.
    */
   | { type: 'intersect'; reqId: number; id: string; expressIds: number[] }
+  /**
+   * List the expressIds of one class, or of every product when `ifcClass`
+   * is omitted. Cheap — one `GetLineIDsWithType` call, no property reads.
+   * Replies with `ids`.
+   */
+  | { type: 'enumerateIds'; reqId: number; id: string; ifcClass?: string }
+  /**
+   * Run a value-match predicate over a candidate set in the worker and
+   * reply with the matching expressIds only. `ifcClass` null means "all
+   * products". The predicate is present-and-equal: a candidate lacking
+   * the selector's path is not a match.
+   */
+  | {
+      type: 'findMatching';
+      reqId: number;
+      id: string;
+      ifcClass: string | null;
+      selector: PropertySelector;
+      value: PropertyValue;
+    }
+  /**
+   * Abandon an in-flight bulk job. NEVER enqueued — the worker's
+   * `onmessage` handles this synchronously, because the job it cancels is
+   * at the head of the queue and would otherwise gate its own cancellation.
+   * The running job observes the flag at its next chunk boundary and bails
+   * without posting a reply.
+   */
+  | { type: 'cancel'; reqId: number }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -67,6 +96,12 @@ export type FromWorker =
   | { type: 'progress'; reqId: number; done: number; total: number }
   /** A `intersect` reduction completed successfully — single synthetic result. */
   | { type: 'intersection'; reqId: number; props: ElementProperties }
+  /**
+   * An `enumerateIds` / `findMatching` completed successfully. Ids only —
+   * the whole point of running the predicate in the worker is that a 50k
+   * candidate set never ships its properties across the boundary.
+   */
+  | { type: 'ids'; reqId: number; ids: number[] }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.

@@ -92,7 +92,7 @@ describe('ifcWorker.handleIntersect (Phase 1 — bulk reduce)', () => {
     // Dispatch case calls enqueue + handleIntersect with the standard
     // try/catch → error reply pattern.
     expect(workerSrc).toMatch(
-      /case 'intersect':[\s\S]*?enqueue\([\s\S]*?await handleIntersect\(/,
+      /case 'intersect':[\s\S]*?enqueue\([\s\S]*?handleIntersect\(/,
     );
   });
 
@@ -134,11 +134,14 @@ describe('ifcWorker.handleIntersect (Phase 1 — bulk reduce)', () => {
   });
 
   it('reuses getOne — the single normalization path', () => {
-    // getOne was extracted from handleGetProps; handleIntersect uses it
-    // so single and bulk reads normalize identically.
+    // getOne was extracted from handleGetProps; the bulk path reaches it
+    // through readProps, so single and bulk reads normalize identically.
     expect(workerSrc).toMatch(/async function getOne\(/);
-    const fn = workerSrc.match(/async function handleIntersect\([\s\S]*?\n\}/);
-    expect(fn![0]).toMatch(/getOne\(/);
+    const readPropsFn = workerSrc.match(/async function readProps\([\s\S]*?\n\}/);
+    expect(readPropsFn).not.toBeNull();
+    expect(readPropsFn![0]).toMatch(/getOne\(/);
+    const intersectFn = workerSrc.match(/async function handleIntersect\([\s\S]*?\n\}/);
+    expect(intersectFn![0]).toMatch(/readProps\(/);
   });
 
   it('handleGetProps still works — getOne extraction is behaviour-preserving', () => {
@@ -149,5 +152,91 @@ describe('ifcWorker.handleIntersect (Phase 1 — bulk reduce)', () => {
     expect(fn).not.toBeNull();
     expect(fn![0]).toMatch(/getOne\(/);
     expect(fn![0]).toMatch(/post\(\{\s*type:\s*'props'/);
+  });
+});
+
+/**
+ * Phase 2 — cancellation, id enumeration and the value-match predicate.
+ * Same constraint as above: web-ifc WASM can't run in unit tests, so the
+ * invariants that would be expensive to get wrong are guarded at the source
+ * level. The behaviour these protect is verified end-to-end in the proxy
+ * tests (`worker-property-repository.test.ts`) and by manual smoke.
+ */
+describe('ifcWorker — Phase 2 bulk primitives', () => {
+  /** The body of the `self.onmessage` dispatch switch. */
+  const dispatch = (): string => {
+    const m = workerSrc.match(/self\.onmessage[\s\S]*$/);
+    expect(m).not.toBeNull();
+    return m![0];
+  };
+
+  it('handles cancel OUTSIDE the queue', () => {
+    // This is the crux: the job being cancelled sits at the head of the
+    // serial queue, so an enqueued cancel could only run after that job
+    // had already finished — i.e. never in time. If someone "tidies" this
+    // case into an enqueue like its neighbours, cancellation silently
+    // stops working with no test failure anywhere else.
+    const caseBody = dispatch().match(/case 'cancel':[\s\S]*?break;/);
+    expect(caseBody).not.toBeNull();
+    expect(caseBody![0]).not.toMatch(/enqueue\(/);
+    expect(caseBody![0]).toMatch(/markCancelled\(/);
+  });
+
+  it('registers bulk reqIds synchronously at dispatch, not when the job starts', () => {
+    // A job queued behind a long-running one is exactly the case that most
+    // needs cancelling, and it hasn't started yet — so `markPending` must
+    // run in the switch, outside the enqueued callback.
+    for (const type of ['intersect', 'findMatching']) {
+      const caseBody = dispatch().match(new RegExp(`case '${type}':[\\s\\S]*?break;`));
+      expect(caseBody).not.toBeNull();
+      const beforeEnqueue = caseBody![0].split('enqueue(')[0];
+      expect(beforeEnqueue).toMatch(/markPending\(/);
+    }
+  });
+
+  it('readProps checks the cancel flag between chunks and reports incompletion', () => {
+    const fn = workerSrc.match(/async function readProps\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/cancelled\.has\(reqId\)/);
+    expect(fn![0]).toMatch(/return false/);
+  });
+
+  it('a cancelled bulk job posts no result', () => {
+    // Committing a partial fold would be worse than silence: the panel
+    // would render a "shared properties" result computed from a fraction
+    // of the selection, indistinguishable from a real one.
+    for (const name of ['handleIntersect', 'handleFindMatching']) {
+      const fn = workerSrc.match(new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`));
+      expect(fn).not.toBeNull();
+      expect(fn![0]).toMatch(/if\s*\(!completed\)\s*return;/);
+    }
+  });
+
+  it('clears both bulk flags when a job settles, however it settles', () => {
+    // Without the finally, a throwing job leaks its reqId into pendingBulk
+    // and cancelled forever.
+    const fn = workerSrc.match(/async function runBulk\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/finally\s*\{[\s\S]*?pendingBulk\.delete\(reqId\)/);
+    expect(fn![0]).toMatch(/finally\s*\{[\s\S]*?cancelled\.delete\(reqId\)/);
+  });
+
+  it('enumerates all products via the IFCPRODUCT supertype, not a hand-listed set', () => {
+    // A hand-maintained list of concrete product classes would rot as the
+    // schema grows, and the rot would be invisible: fewer results, no error.
+    const fn = workerSrc.match(/function candidateIds\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/WebIFC\.IFCPRODUCT/);
+    expect(fn![0]).toMatch(/GetTypeCodeFromName\(ifcClass\)/);
+    expect(fn![0]).toMatch(/GetLineIDsWithType\(/);
+  });
+
+  it('findMatching runs the predicate in the worker and posts ids only', () => {
+    const fn = workerSrc.match(/async function handleFindMatching\([\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/elementMatches\(/);
+    expect(fn![0]).toMatch(/post\(\{\s*type:\s*'ids'/);
+    // The whole point is that N property bags never cross the boundary.
+    expect(fn![0]).not.toMatch(/type:\s*'props'/);
   });
 });

@@ -10,7 +10,11 @@ import type {
   PropertyNode,
   SelectionState,
 } from '../src/inspector/types';
-import type { ElementPropertyRepository } from '../src/inspector/repository/ElementPropertyRepository';
+import {
+  BulkRequestCancelled,
+  type ElementPropertyRepository,
+} from '../src/inspector/repository/ElementPropertyRepository';
+import { BULK_INTERSECT_GUARD } from '../src/inspector/limits';
 import { intersectProperties as batchIntersect } from '../src/inspector/intersection';
 
 // ── localStorage mock (Phase 3 persists view choice here) ──────
@@ -170,11 +174,14 @@ interface StubRepo extends ElementPropertyRepository {
   /** Override what's returned. */
   setProps(props: ElementProperties): void;
   getCallCount: () => number;
+  /** How many times the panel asked to abandon in-flight bulk work. */
+  getCancelBulkCount: () => number;
 }
 
 function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
   let props = initial;
   let calls = 0;
+  let cancelBulkCalls = 0;
   let pending: Array<{
     resolve: (p: ElementProperties) => void;
     reject: (e: Error) => void;
@@ -203,10 +210,16 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
     cancel() {
       /* no-op */
     },
+    cancelBulk() {
+      cancelBulkCalls++;
+    },
     disposeModel() {
       /* no-op */
     },
     enumerateExpressIds() {
+      throw new Error('not implemented');
+    },
+    findMatching() {
       throw new Error('not implemented');
     },
     describeSchema() {
@@ -226,6 +239,7 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
       props = p;
     },
     getCallCount: () => calls,
+    getCancelBulkCount: () => cancelBulkCalls,
   };
   return repo;
 }
@@ -1004,8 +1018,12 @@ describe('InspectorPanel', () => {
           return Promise.all(promises).then((results) => batchIntersect(results));
         },
         cancel: () => undefined,
+        cancelBulk: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        findMatching: () => {
           throw new Error('not implemented');
         },
         describeSchema: () => {
@@ -1043,40 +1061,91 @@ describe('InspectorPanel', () => {
       expect(variesEl.getAttribute('title')).toContain('false');
     });
 
-    it('soft cap: shows the "refine selection" message when > cap', () => {
-      const { parent, selection } = mountPanel();
-      const identities = Array.from({ length: 1001 }, (_, i) =>
+    it('past the guard: offers "Compute anyway" instead of refusing', () => {
+      const { parent, repo, selection } = mountPanel();
+      const identities = Array.from({ length: BULK_INTERSECT_GUARD + 1 }, (_, i) =>
         identity({ expressId: i + 1 }),
       );
       selection.emit({ kind: 'multi', identities });
-      const msg = parent.querySelector('.inspector-multi-cap');
-      expect(msg).not.toBeNull();
-      expect(msg!.textContent).toContain('Too many');
+
+      const guard = parent.querySelector('.inspector-multi-guard');
+      expect(guard).not.toBeNull();
+      const btn = parent.querySelector<HTMLButtonElement>('.inspector-multi-guard-btn');
+      expect(btn).not.toBeNull();
+      expect(btn!.textContent).toBe('Compute anyway');
+      // Nothing was fetched — the point of the guard is that the user
+      // opts in first.
+      expect(repo.getCallCount()).toBe(0);
       // Identity summary still shown in the header.
       const title = parent.querySelector('.inspector-title');
-      expect(title!.textContent).toBe('1001 elements selected');
+      expect(title!.textContent).toBe(`${BULK_INTERSECT_GUARD + 1} elements selected`);
     });
 
-    it('soft cap: dropping below cap re-fetches and renders body', async () => {
-      // Use a lower cap by selecting at-cap + 1, then dropping to cap.
-      // (MULTI_SELECT_SOFT_CAP is 1000; selecting 1001 then 999 exercises
-      // the boundary correctly.)
+    it('past the guard: "Compute anyway" runs the same reduction', async () => {
       const { parent, repo, selection } = mountPanel();
-      const above = Array.from({ length: 1001 }, (_, i) =>
+      const identities = Array.from({ length: BULK_INTERSECT_GUARD + 1 }, (_, i) =>
         identity({ expressId: i + 1 }),
       );
-      selection.emit({ kind: 'multi', identities: above });
-      expect(parent.querySelector('.inspector-multi-cap')).not.toBeNull();
+      selection.emit({ kind: 'multi', identities });
 
-      const within = above.slice(0, 999);
-      selection.emit({ kind: 'multi', identities: within });
+      parent.querySelector<HTMLButtonElement>('.inspector-multi-guard-btn')!.click();
+      expect(repo.getCallCount()).toBeGreaterThan(0);
+
       repo.resolveNext();
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
-      expect(parent.querySelector('.inspector-multi-cap')).toBeNull();
+
+      expect(parent.querySelector('.inspector-multi-guard')).toBeNull();
       const pill = parent.querySelector('.inspector-count-pill');
       expect(pill!.textContent).toMatch(/common/);
+    });
+
+    it('below the guard: computes immediately, no refusal', async () => {
+      // The old 1 000-element refusal is gone — a selection this size now
+      // reduces with a progress overlay instead of being turned away.
+      const { parent, repo, selection } = mountPanel();
+      const identities = Array.from({ length: 1001 }, (_, i) => identity({ expressId: i + 1 }));
+
+      selection.emit({ kind: 'multi', identities });
+      expect(parent.querySelector('.inspector-multi-guard')).toBeNull();
+      expect(repo.getCallCount()).toBeGreaterThan(0);
+
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const pill = parent.querySelector('.inspector-count-pill');
+      expect(pill!.textContent).toMatch(/common/);
+    });
+
+    it('supersede: a new multi-selection cancels the in-flight reduction', () => {
+      const { repo, selection } = mountPanel();
+      const first = Array.from({ length: 50 }, (_, i) => identity({ expressId: i + 1 }));
+      const second = Array.from({ length: 50 }, (_, i) => identity({ expressId: i + 500 }));
+
+      selection.emit({ kind: 'multi', identities: first });
+      const afterFirst = repo.getCancelBulkCount();
+      selection.emit({ kind: 'multi', identities: second });
+
+      // The second selection must have asked the worker to abandon the
+      // first — otherwise it sits at the head of the serial queue and
+      // delays the reduction the user is now waiting on.
+      expect(repo.getCancelBulkCount()).toBeGreaterThan(afterFirst);
+    });
+
+    it('a cancelled reduction renders no error banner', async () => {
+      const { parent, repo, selection } = mountPanel();
+      const identities = Array.from({ length: 50 }, (_, i) => identity({ expressId: i + 1 }));
+
+      selection.emit({ kind: 'multi', identities });
+      repo.rejectNext(new BulkRequestCancelled());
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The user moving on is not a failure.
+      expect(parent.querySelector('.inspector-error')).toBeNull();
     });
 
     it('stale multi-fetch is dropped when selection changes mid-flight', async () => {
@@ -1106,8 +1175,12 @@ describe('InspectorPanel', () => {
           return Promise.all(promises).then((results) => batchIntersect(results));
         },
         cancel: () => undefined,
+        cancelBulk: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        findMatching: () => {
           throw new Error('not implemented');
         },
         describeSchema: () => {
@@ -1202,8 +1275,12 @@ describe('InspectorPanel', () => {
           });
         },
         cancel: () => undefined,
+        cancelBulk: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        findMatching: () => {
           throw new Error('not implemented');
         },
         describeSchema: () => {
@@ -1249,8 +1326,12 @@ describe('InspectorPanel', () => {
           });
         },
         cancel: () => undefined,
+        cancelBulk: () => undefined,
         disposeModel: () => undefined,
         enumerateExpressIds: () => {
+          throw new Error('not implemented');
+        },
+        findMatching: () => {
           throw new Error('not implemented');
         },
         describeSchema: () => {

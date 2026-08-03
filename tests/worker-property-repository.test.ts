@@ -15,8 +15,9 @@
 import { describe, it, expect } from 'vitest';
 import { WorkerIfcParser, type WorkerLike } from '../src/parser/WorkerIfcParser';
 import { WorkerPropertyRepository } from '../src/inspector/repository/WorkerPropertyRepository';
+import { BulkRequestCancelled } from '../src/inspector/repository/ElementPropertyRepository';
 import type { ToWorker, FromWorker } from '../src/parser/ifcMessages';
-import type { ElementIdentity, ElementProperties } from '../src/inspector/types';
+import type { ElementIdentity, ElementProperties, PropertyValue } from '../src/inspector/types';
 
 class MockWorker implements WorkerLike {
   posted: ToWorker[] = [];
@@ -63,6 +64,16 @@ function lastGetProps(worker: MockWorker): Extract<ToWorker, { type: 'getProps' 
   const msg = [...worker.posted].reverse().find((m) => m.type === 'getProps');
   if (!msg) throw new Error('no getProps posted');
   return msg;
+}
+
+/** Last posted message of a given type, narrowed to that variant. */
+function lastOfType<T extends ToWorker['type']>(
+  worker: MockWorker,
+  type: T,
+): Extract<ToWorker, { type: T }> {
+  const msg = [...worker.posted].reverse().find((m) => m.type === type);
+  if (!msg) throw new Error(`no ${type} posted`);
+  return msg as Extract<ToWorker, { type: T }>;
 }
 
 describe('WorkerPropertyRepository — request/reply', () => {
@@ -170,18 +181,130 @@ describe('WorkerPropertyRepository — lifecycle', () => {
     await expect(pb).rejects.toThrow(/crashed/);
   });
 
-  it('enumerateExpressIds and describeSchema still throw not-implemented', async () => {
+  it('describeSchema still throws not-implemented', async () => {
     const { repo } = setup();
     await expect(repo.describeSchema('m')).rejects.toThrow(/not implemented/);
-    const iterate = async (): Promise<void> => {
-      for await (const _ of repo.enumerateExpressIds('m')) void _;
-    };
-    await expect(iterate()).rejects.toThrow(/not implemented/);
   });
 
   it('cancel is a no-op', () => {
     const { repo } = setup();
     expect(() => repo.cancel('m', 1)).not.toThrow();
+  });
+});
+
+describe('WorkerPropertyRepository — enumerateExpressIds', () => {
+  it('posts enumerateIds and resolves with the ids reply', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.enumerateExpressIds('m', 'IFCWALL');
+
+    const sent = lastOfType(worker, 'enumerateIds');
+    expect(sent).toMatchObject({ type: 'enumerateIds', id: 'm', ifcClass: 'IFCWALL' });
+
+    worker.reply({ type: 'ids', reqId: sent.reqId, ids: [1, 2, 3] });
+    await expect(promise).resolves.toEqual([1, 2, 3]);
+  });
+
+  it('omitting the class asks for every product', async () => {
+    const { repo, worker } = setup();
+    void repo.enumerateExpressIds('m');
+    expect(lastOfType(worker, 'enumerateIds').ifcClass).toBeUndefined();
+  });
+
+  it('rejects on an error reply for its reqId', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.enumerateExpressIds('m', 'IFCNOPE');
+    const sent = lastOfType(worker, 'enumerateIds');
+    worker.reply({ type: 'error', reqId: sent.reqId, message: 'unknown IFC class' });
+    await expect(promise).rejects.toThrow(/unknown IFC class/);
+  });
+});
+
+describe('WorkerPropertyRepository — findMatching', () => {
+  const selector = { path: 'Pset_WallCommon.LoadBearing' };
+  const value: PropertyValue = {
+    kind: 'single',
+    value: true,
+    raw: { typeCode: 0, value: true },
+  };
+
+  it('posts findMatching with the selector and resolves with matching ids', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.findMatching('m', 'IFCWALL', selector, value);
+
+    const sent = lastOfType(worker, 'findMatching');
+    expect(sent).toMatchObject({ type: 'findMatching', id: 'm', ifcClass: 'IFCWALL', selector });
+
+    worker.reply({ type: 'ids', reqId: sent.reqId, ids: [7, 9] });
+    await expect(promise).resolves.toEqual([7, 9]);
+  });
+
+  it('forwards progress messages to the callback', async () => {
+    const { repo, worker } = setup();
+    const seen: Array<[number, number]> = [];
+    const promise = repo.findMatching('m', null, selector, value, (done, total) =>
+      seen.push([done, total]),
+    );
+    const sent = lastOfType(worker, 'findMatching');
+
+    worker.reply({ type: 'progress', reqId: sent.reqId, done: 200, total: 500 });
+    worker.reply({ type: 'progress', reqId: sent.reqId, done: 500, total: 500 });
+    worker.reply({ type: 'ids', reqId: sent.reqId, ids: [] });
+
+    await promise;
+    expect(seen).toEqual([
+      [200, 500],
+      [500, 500],
+    ]);
+  });
+
+  it('a worker crash rejects an in-flight findMatching', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.findMatching('m', 'IFCWALL', selector, value);
+    worker.crash();
+    await expect(promise).rejects.toThrow(/crashed/);
+  });
+});
+
+describe('WorkerPropertyRepository — cancelBulk', () => {
+  it('posts a cancel per in-flight bulk request and rejects them', async () => {
+    const { repo, worker } = setup();
+    const intersect = repo.intersectProperties([
+      { modelId: 'm', expressId: 1, ifcClass: 'IfcWall', ifcTypeCode: 0 },
+    ]);
+    const matching = repo.findMatching('m', 'IFCWALL', { path: 'A.B' }, {
+      kind: 'single',
+      value: 1,
+      raw: { typeCode: 0, value: 1 },
+    });
+
+    repo.cancelBulk();
+
+    const cancels = worker.posted.filter((m) => m.type === 'cancel');
+    expect(cancels.length).toBe(2);
+    await expect(intersect).rejects.toBeInstanceOf(BulkRequestCancelled);
+    await expect(matching).rejects.toBeInstanceOf(BulkRequestCancelled);
+  });
+
+  it('is inert with nothing in flight', () => {
+    const { repo, worker } = setup();
+    repo.cancelBulk();
+    expect(worker.posted.filter((m) => m.type === 'cancel').length).toBe(0);
+  });
+
+  it('a late reply for a cancelled request is dropped', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.findMatching('m', 'IFCWALL', { path: 'A.B' }, {
+      kind: 'single',
+      value: 1,
+      raw: { typeCode: 0, value: 1 },
+    });
+    const sent = lastOfType(worker, 'findMatching');
+    repo.cancelBulk();
+    await expect(promise).rejects.toBeInstanceOf(BulkRequestCancelled);
+
+    // The worker normally posts nothing after a cancel, but a reply that
+    // was already in flight must not throw on arrival.
+    expect(() => worker.reply({ type: 'ids', reqId: sent.reqId, ids: [1] })).not.toThrow();
   });
 });
 

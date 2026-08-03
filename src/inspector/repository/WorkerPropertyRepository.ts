@@ -21,8 +21,9 @@
 import type { WorkerIfcParser } from '../../parser/WorkerIfcParser';
 import type { FromWorker } from '../../parser/ifcMessages';
 import { intersectProperties as combineIntersections } from '../intersection';
-import type { ElementIdentity, ElementProperties, ModelSchema } from '../types';
-import type { ElementPropertyRepository } from './ElementPropertyRepository';
+import type { PropertySelector } from '../matchValue';
+import type { ElementIdentity, ElementProperties, ModelSchema, PropertyValue } from '../types';
+import { BulkRequestCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
 
 /** Resolve/reject pair for one in-flight `getProps` request. */
 interface PendingProps {
@@ -38,6 +39,13 @@ interface PendingIntersect {
   onProgress?: (done: number, total: number) => void;
 }
 
+/** Resolve/reject pair + progress sink for an in-flight id-returning request. */
+interface PendingIds {
+  resolve: (ids: number[]) => void;
+  reject: (err: Error) => void;
+  onProgress?: (done: number, total: number) => void;
+}
+
 export class WorkerPropertyRepository implements ElementPropertyRepository {
   /** Per-model memo: modelId → (expressId → in-flight-or-settled promise). */
   private memo = new Map<string, Map<number, Promise<ElementProperties>>>();
@@ -45,6 +53,8 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   private inflight = new Map<number, PendingProps>();
   /** In-flight `intersect` requests, correlated by reqId. */
   private intersectInflight = new Map<number, PendingIntersect>();
+  /** In-flight `enumerateIds` / `findMatching` requests, correlated by reqId. */
+  private idsInflight = new Map<number, PendingIds>();
   /** Monotonic request id for all property messages (getProps + intersect). */
   private nextReqId = 1;
 
@@ -61,6 +71,8 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       this.inflight.clear();
       for (const p of this.intersectInflight.values()) p.reject(err);
       this.intersectInflight.clear();
+      for (const p of this.idsInflight.values()) p.reject(err);
+      this.idsInflight.clear();
       // Drop the memo too: its promises may be unsettled and the worker
       // state behind them is gone.
       this.memo.clear();
@@ -183,22 +195,69 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     return combineIntersections(perModel);
   }
 
+  /**
+   * Abandon every in-flight bulk request. Posts one out-of-queue `cancel`
+   * per reqId so the worker stops reading at its next chunk boundary, and
+   * settles the local promises immediately with `BulkRequestCancelled` —
+   * we don't wait for the worker to acknowledge, because the caller has
+   * already moved on and the worker deliberately posts nothing when it
+   * bails.
+   */
+  cancelBulk(): void {
+    const reqIds = [...this.intersectInflight.keys(), ...this.idsInflight.keys()];
+    if (reqIds.length === 0) return;
+
+    for (const reqId of reqIds) {
+      const intersect = this.intersectInflight.get(reqId);
+      if (intersect) {
+        this.intersectInflight.delete(reqId);
+        intersect.reject(new BulkRequestCancelled());
+      }
+      const ids = this.idsInflight.get(reqId);
+      if (ids) {
+        this.idsInflight.delete(reqId);
+        ids.reject(new BulkRequestCancelled());
+      }
+      this.parser.getWorker().postMessage({ type: 'cancel', reqId });
+    }
+  }
+
   disposeModel(modelId: string): void {
     this.memo.delete(modelId);
     // Tell the worker to close the model and free its unit-table cache.
     this.parser.disposeModel(modelId);
   }
 
-  // eslint-disable-next-line require-yield
-  async *enumerateExpressIds(modelId: string, ifcClass?: string): AsyncIterable<number> {
-    void modelId;
-    void ifcClass;
-    throw new Error('enumerateExpressIds: not implemented in Phase 1');
+  async enumerateExpressIds(modelId: string, ifcClass?: string): Promise<number[]> {
+    const reqId = this.nextReqId++;
+    const reply = this.trackIds(reqId);
+    this.parser.getWorker().postMessage({ type: 'enumerateIds', reqId, id: modelId, ifcClass });
+    return reply;
+  }
+
+  async findMatching(
+    modelId: string,
+    ifcClass: string | null,
+    selector: PropertySelector,
+    value: PropertyValue,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<number[]> {
+    const reqId = this.nextReqId++;
+    const reply = this.trackIds(reqId, onProgress);
+    this.parser.getWorker().postMessage({
+      type: 'findMatching',
+      reqId,
+      id: modelId,
+      ifcClass,
+      selector,
+      value,
+    });
+    return reply;
   }
 
   async describeSchema(modelId: string): Promise<ModelSchema> {
     void modelId;
-    throw new Error('describeSchema: not implemented in Phase 1');
+    throw new Error('describeSchema: not implemented yet');
   }
 
   // --- internals -------------------------------------------------------------
@@ -252,6 +311,24 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     });
   }
 
+  /**
+   * Register interest in the `ids` reply for `reqId` and return the promise
+   * for it. Callers post their own message literal so each one is checked
+   * against `ToWorker` — spreading a union payload through a shared poster
+   * would need a cast and lose exactly that check.
+   *
+   * Registration happens before the caller posts, so a reply can never
+   * arrive before there is somewhere to deliver it.
+   */
+  private trackIds(
+    reqId: number,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<number[]> {
+    return new Promise<number[]>((resolve, reject) => {
+      this.idsInflight.set(reqId, { resolve, reject, onProgress });
+    });
+  }
+
   /** Handle a `props` / property-`error` message forwarded by WorkerIfcParser. */
   private onMessage(msg: FromWorker): void {
     if (msg.type === 'props') {
@@ -268,8 +345,17 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       pending.resolve(msg.props);
       return;
     }
+    if (msg.type === 'ids') {
+      const pending = this.idsInflight.get(msg.reqId);
+      if (!pending) return;
+      this.idsInflight.delete(msg.reqId);
+      pending.resolve(msg.ids);
+      return;
+    }
     if (msg.type === 'progress') {
-      const pending = this.intersectInflight.get(msg.reqId);
+      // One generic progress message serves every bulk primitive, so look
+      // in both in-flight maps.
+      const pending = this.intersectInflight.get(msg.reqId) ?? this.idsInflight.get(msg.reqId);
       if (!pending) return;
       pending.onProgress?.(msg.done, msg.total);
       return;
@@ -285,6 +371,12 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (pendingIntersect) {
         this.intersectInflight.delete(msg.reqId);
         pendingIntersect.reject(new Error(msg.message));
+        return;
+      }
+      const pendingIds = this.idsInflight.get(msg.reqId);
+      if (pendingIds) {
+        this.idsInflight.delete(msg.reqId);
+        pendingIds.reject(new Error(msg.message));
       }
     }
   }

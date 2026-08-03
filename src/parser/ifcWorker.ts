@@ -10,6 +10,10 @@
  *  - `parse`        — open a model and stream geometry back in batches.
  *  - `openForProps` — open a model for property queries only (cache-restore).
  *  - `getProps`     — fetch + normalize one element's properties.
+ *  - `intersect`    — fold N elements' properties into one synthetic result.
+ *  - `enumerateIds` — list the expressIds of a class (or of every product).
+ *  - `findMatching` — run a value-match predicate, reply with ids only.
+ *  - `cancel`       — abandon an in-flight bulk job (NOT queued — see below).
  *  - `disposeModel` — close a model and free its per-model caches.
  *  - `dispose`      — tear down the whole web-ifc instance.
  *
@@ -18,6 +22,11 @@
  * So every request runs through `enqueue` — an explicit promise-chain
  * queue. One request completes fully before the next starts. This replaces
  * both the old `App.parseQueue` and `WebIfcPropertyRepository.enqueue`.
+ *
+ * The one deliberate exception is `cancel`, which is handled synchronously
+ * in `onmessage` and never enqueued. Queuing it would be useless: the job
+ * it cancels is at the head of the queue, so the cancel could only run
+ * after that job had already finished.
  *
  * Error handling: every failure path posts an `error` reply carrying the
  * request's correlation key (`id` or `reqId`). A handler that threw without
@@ -35,7 +44,8 @@ import {
   intersectFinalize,
   type RunningIntersection,
 } from '../inspector/intersection';
-import type { ElementProperties } from '../inspector/types';
+import { elementMatches, type PropertySelector } from '../inspector/matchValue';
+import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
 
@@ -269,10 +279,11 @@ async function handleGetProps(reqId: number, id: string, expressId: number): Pro
 }
 
 // ----------------------------------------------------------------------------
-// Phase 1 of dev/plans/handoff-bulk-property-access.md — bulk property
-// reduction in the worker. The worker reads each expressId via `getOne` and
-// folds it into a running intersection, ever holding at most ONE element's
-// props plus the running fold state. Memory is O(1) in N.
+// dev/plans/handoff-bulk-property-access.md — bulk property reduction in the
+// worker. The worker reads each expressId via `getOne` and folds it into a
+// running result, ever holding at most ONE element's props plus the fold
+// state. Memory is O(1) in N. Phase 2 adds cancellation, id enumeration and
+// the value-match predicate on top of the same `readProps` spine.
 // ----------------------------------------------------------------------------
 
 /** ExpressId batch size for `readProps`. The only remaining tuning knob. */
@@ -286,18 +297,112 @@ const INTERSECT_CHUNK = 200;
 const PROGRESS_MIN_INTERVAL_MS = 100;
 
 /**
+ * Bulk requests that have been dispatched and not yet settled. A `cancel`
+ * for a reqId that isn't here is ignored outright, which is what keeps
+ * `cancelled` from growing without bound: nothing can be flagged unless a
+ * job is actually running (or queued) under that id.
+ */
+const pendingBulk = new Set<number>();
+
+/**
+ * Bulk requests the main thread has abandoned. Written synchronously by the
+ * `cancel` message (outside the queue) and read by the running job at its
+ * chunk boundaries.
+ */
+const cancelled = new Set<number>();
+
+/**
+ * Register a bulk reqId as live. Called synchronously at dispatch, NOT when
+ * the job starts running: a job sitting in the queue behind a long-running
+ * one is exactly the case that most needs to be cancellable, and it isn't
+ * "pending" yet by any runtime measure.
+ */
+function markPending(reqId: number): void {
+  pendingBulk.add(reqId);
+}
+
+/** Record a cancel request. Only meaningful for a bulk job we know about. */
+function markCancelled(reqId: number): void {
+  if (pendingBulk.has(reqId)) cancelled.add(reqId);
+}
+
+/**
+ * Run one bulk job, guaranteeing the bookkeeping is symmetric: the reqId
+ * stops being pending and its cancel flag is dropped when the job settles,
+ * however it settles. Without the `finally`, a thrown job would leak both.
+ */
+async function runBulk(reqId: number, work: () => Promise<void>): Promise<void> {
+  try {
+    await work();
+  } finally {
+    pendingBulk.delete(reqId);
+    cancelled.delete(reqId);
+  }
+}
+
+/**
+ * Read `expressIds` in chunks, handing each element's normalized props to
+ * `onEach`. The single spine under every bulk primitive — `intersect` and
+ * `findMatching` both fold through here, so normalization, chunking,
+ * progress and cancellation have exactly one implementation.
+ *
+ * Returns `true` if the whole list was read, `false` if the job was
+ * cancelled part-way (in which case the caller must post nothing — a
+ * partial result is never committed).
+ *
+ * Between chunks it yields a **macrotask** (`setTimeout(0)`), not a
+ * microtask: incoming `postMessage`s are delivered as tasks, so a microtask
+ * await would never let a `cancel` land. The same yield is what lets
+ * `progress` posts reach the main thread in real time.
+ *
+ * Note the yield does NOT let other *queued* jobs run — they are gated
+ * behind this one by the serial queue. That head-of-line blocking is the
+ * accepted trade-off documented in the handoff doc; cancellation is what
+ * keeps it bounded, since a superseded job stops within one chunk.
+ */
+async function readProps(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  id: string,
+  expressIds: readonly number[],
+  reqId: number,
+  unitTable: UnitTable,
+  onEach: (props: ElementProperties) => void,
+): Promise<boolean> {
+  const total = expressIds.length;
+  let done = 0;
+  let lastProgressAt = 0;
+
+  for (let start = 0; start < total; start += INTERSECT_CHUNK) {
+    if (cancelled.has(reqId)) return false;
+
+    const end = Math.min(start + INTERSECT_CHUNK, total);
+    for (let i = start; i < end; i++) {
+      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable));
+      done++;
+    }
+
+    // Throttled progress: post per-chunk, but never more often than
+    // ~PROGRESS_MIN_INTERVAL_MS apart. Force the final post (done === total)
+    // through the throttle so the UI sees the terminal value.
+    const now = Date.now();
+    if (done === total || now - lastProgressAt >= PROGRESS_MIN_INTERVAL_MS) {
+      post({ type: 'progress', reqId, done, total });
+      lastProgressAt = now;
+    }
+
+    if (end < total) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+
+  return !cancelled.has(reqId);
+}
+
+/**
  * Fold the properties of `expressIds` into a single synthetic
- * `ElementProperties` and post `intersection`. Posts throttled `progress`
- * messages between chunks.
- *
- * Phase 1: NO cancel handling. Single-bulk-op-at-a-time is acceptable for
- * validating the trade-offs (drill-down latency, fold semantics) before
- * Phase 2 layers in `cancel`, the macrotask yield's second purpose.
- *
- * We DO yield a macrotask between chunks so the main thread sees `progress`
- * posts in real time (postMessage delivery is task-bound, not microtask-
- * bound). The worker's serial queue still gates other messages behind this
- * job — that's the documented trade-off in the handoff doc.
+ * `ElementProperties` and post `intersection`. Holds only the running fold
+ * state — O(1) memory in N.
  */
 async function handleIntersect(
   reqId: number,
@@ -309,12 +414,11 @@ async function handleIntersect(
   if (modelID === undefined) {
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
-  const total = expressIds.length;
 
   // Empty selection — emit an empty synthetic and bail. The proxy avoids
   // this path in practice (a 0-id model is dropped before posting), but
   // we keep the guard so the worker never crashes on a degenerate request.
-  if (total === 0) {
+  if (expressIds.length === 0) {
     post({ type: 'progress', reqId, done: 0, total: 0 });
     post({ type: 'intersection', reqId, props: makeEmpty(id) });
     return;
@@ -322,40 +426,119 @@ async function handleIntersect(
 
   const unitTable = await ensureUnitTable(ifc, id, modelID);
 
-  let running: RunningIntersection | null = null;
-  let done = 0;
-  let lastProgressAt = 0;
+  // Held in a box rather than a bare `let` so the fold state is visibly
+  // owned by this call and not re-narrowed by the closure below.
+  const acc: { running: RunningIntersection | null } = { running: null };
+  const completed = await readProps(
+    ifc,
+    modelID,
+    id,
+    expressIds,
+    reqId,
+    unitTable,
+    (props) => {
+      acc.running = acc.running === null ? intersectSeed(props) : intersectStep(acc.running, props);
+    },
+  );
 
-  for (let start = 0; start < total; start += INTERSECT_CHUNK) {
-    const end = Math.min(start + INTERSECT_CHUNK, total);
-    for (let i = start; i < end; i++) {
-      const props = await getOne(ifc, modelID, id, expressIds[i], unitTable);
-      if (running === null) {
-        running = intersectSeed(props);
-      } else {
-        running = intersectStep(running, props);
-      }
-      done++;
-    }
-    // Throttled progress: post per-chunk, but never more often than
-    // ~PROGRESS_MIN_INTERVAL_MS apart. Force the final post (done === total)
-    // through the throttle so the UI sees the terminal value.
-    const now = Date.now();
-    if (done === total || now - lastProgressAt >= PROGRESS_MIN_INTERVAL_MS) {
-      post({ type: 'progress', reqId, done, total });
-      lastProgressAt = now;
-    }
-    // Macrotask yield — lets queued messages (notably `progress` delivery
-    // to main) flow before we resume. Also the hook Phase 2 will use to
-    // observe a `cancel` flag.
-    if (end < total) {
-      await new Promise<void>((r) => setTimeout(r, 0));
-    }
+  // Cancelled — post nothing. The proxy has already settled the caller's
+  // promise; a late reply would only have to be dropped by its stale guard.
+  if (!completed) return;
+
+  // Unreachable: a completed read of a non-empty list ran at least one
+  // getOne, which seeds the fold.
+  if (acc.running === null) {
+    throw new Error('ifcWorker: intersect completed without reading any element');
+  }
+  post({ type: 'intersection', reqId, props: intersectFinalize(acc.running) });
+}
+
+/**
+ * Resolve the candidate expressIds for a class, or for every product when
+ * `ifcClass` is undefined / null.
+ *
+ * `IFCPRODUCT` with `includeInherited` is the centralized "all products"
+ * definition — one supertype code rather than a hand-maintained list of
+ * concrete classes that would silently rot as the schema grows.
+ *
+ * An explicit class is looked up with `includeInherited: false`, so
+ * "IFCWALL" means IfcWall and not also IfcWallStandardCase. That matches
+ * what the inspector shows as `ifcClass`, which is what the user picked
+ * from — subtype-widening here would select elements whose displayed class
+ * differs from the one they asked for.
+ */
+function candidateIds(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  ifcClass: string | null | undefined,
+): number[] {
+  const typeCode = ifcClass ? ifc.GetTypeCodeFromName(ifcClass) : WebIFC.IFCPRODUCT;
+  if (!typeCode) {
+    throw new Error(`ifcWorker: unknown IFC class "${ifcClass}"`);
+  }
+  const vec = ifc.GetLineIDsWithType(modelID, typeCode, !ifcClass);
+  const ids: number[] = [];
+  for (let i = 0; i < vec.size(); i++) ids.push(vec.get(i));
+  return ids;
+}
+
+/** List the expressIds of one class (or of every product) and post `ids`. */
+async function handleEnumerateIds(
+  reqId: number,
+  id: string,
+  ifcClass: string | undefined,
+): Promise<void> {
+  const ifc = await getApi();
+  const modelID = modelIds.get(id);
+  if (modelID === undefined) {
+    throw new Error(`ifcWorker: unknown modelId "${id}"`);
+  }
+  post({ type: 'ids', reqId, ids: candidateIds(ifc, modelID, ifcClass) });
+}
+
+/**
+ * Run `selector == value` over the candidate set and post the matching
+ * expressIds. The predicate runs here, not on main, so a 50 000-element
+ * class never ships 50 000 property bags across the boundary — only the
+ * matching ids come back.
+ */
+async function handleFindMatching(
+  reqId: number,
+  id: string,
+  ifcClass: string | null,
+  selector: PropertySelector,
+  value: PropertyValue,
+): Promise<void> {
+  const ifc = await getApi();
+  const modelID = modelIds.get(id);
+  if (modelID === undefined) {
+    throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
 
-  // running cannot be null here — total > 0 means at least one getOne ran.
-  const props = intersectFinalize(running as RunningIntersection);
-  post({ type: 'intersection', reqId, props });
+  const candidates = candidateIds(ifc, modelID, ifcClass);
+  if (candidates.length === 0) {
+    post({ type: 'progress', reqId, done: 0, total: 0 });
+    post({ type: 'ids', reqId, ids: [] });
+    return;
+  }
+
+  const unitTable = await ensureUnitTable(ifc, id, modelID);
+
+  const matches: number[] = [];
+  const completed = await readProps(
+    ifc,
+    modelID,
+    id,
+    candidates,
+    reqId,
+    unitTable,
+    (props) => {
+      if (elementMatches(props, selector, value)) matches.push(props.identity.expressId);
+    },
+  );
+
+  if (!completed) return;
+  post({ type: 'ids', reqId, ids: matches });
 }
 
 /** Empty synthetic ElementProperties used for the `expressIds.length === 0` case. */
@@ -436,13 +619,45 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       break;
 
     case 'intersect':
+      markPending(msg.reqId);
       enqueue(async () => {
         try {
-          await handleIntersect(msg.reqId, msg.id, msg.expressIds);
+          await runBulk(msg.reqId, () => handleIntersect(msg.reqId, msg.id, msg.expressIds));
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
         }
       });
+      break;
+
+    case 'enumerateIds':
+      enqueue(async () => {
+        try {
+          await handleEnumerateIds(msg.reqId, msg.id, msg.ifcClass);
+        } catch (err) {
+          post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
+        }
+      });
+      break;
+
+    case 'findMatching':
+      markPending(msg.reqId);
+      enqueue(async () => {
+        try {
+          await runBulk(msg.reqId, () =>
+            handleFindMatching(msg.reqId, msg.id, msg.ifcClass, msg.selector, msg.value),
+          );
+        } catch (err) {
+          post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
+        }
+      });
+      break;
+
+    // NOT enqueued — deliberately. The job being cancelled is at the head
+    // of the queue, so anything queued behind it could only be dispatched
+    // after it finished, which is precisely too late. Handling this
+    // synchronously is what makes cancellation work at all.
+    case 'cancel':
+      markCancelled(msg.reqId);
       break;
 
     case 'disposeModel':

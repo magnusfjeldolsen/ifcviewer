@@ -30,7 +30,11 @@ import type {
   ElementProperties,
   SelectionState,
 } from './types';
-import type { ElementPropertyRepository } from './repository/ElementPropertyRepository';
+import {
+  BulkRequestCancelled,
+  type ElementPropertyRepository,
+} from './repository/ElementPropertyRepository';
+import { BULK_INTERSECT_GUARD } from './limits';
 import { makeKey } from './elementKey';
 import { getDistinctValuesForPath } from './intersection';
 import {
@@ -54,12 +58,12 @@ const VALUE_TRUNCATE_AT = 80;
 const COPY_FLASH_MS = 600;
 
 /**
- * Soft cap on the number of selected elements before the panel bails out
- * of intersection rendering. Past this, body shows a "refine selection"
- * message; identity summary still renders. Exported so it's tunable from
- * tests / future config without touching the panel internals.
+ * Re-exported for convenience — the guard past which a multi-select asks
+ * before computing. Lives in `./limits` so the future settings panel has
+ * one place to read it from. See the constant's doc for why it's a guard
+ * and not a cap.
  */
-export const MULTI_SELECT_SOFT_CAP = 1000;
+export { BULK_INTERSECT_GUARD } from './limits';
 
 /**
  * Cap on the number of distinct values listed in the varies tooltip
@@ -90,7 +94,8 @@ type RenderTag =
   | { kind: 'fetching'; identity: ElementIdentity; key: string }
   | { kind: 'loaded'; props: ElementProperties; key: string }
   | { kind: 'multi-loaded'; props: ElementProperties; key: string; identities: ElementIdentity[] }
-  | { kind: 'multi-cap'; key: string; identities: ElementIdentity[] }
+  /** Selection is past `BULK_INTERSECT_GUARD`; waiting on "Compute anyway". */
+  | { kind: 'multi-guard'; key: string; identities: ElementIdentity[] }
   | { kind: 'error'; identity: ElementIdentity; message: string; key: string };
 
 /**
@@ -374,21 +379,18 @@ export class InspectorPanel {
   }
 
   /**
-   * Phase 4 — multi-element selection path. Phase 1 of
-   * dev/plans/handoff-bulk-property-access.md routes the reduction through
-   * the worker via `repository.intersectProperties` and shows a live
-   * "Processing N / M" overlay driven by the per-progress callback.
+   * Multi-element selection path. The reduction runs in the worker via
+   * `repository.intersectProperties`, with a live "Processing N / M"
+   * overlay driven by the progress callback.
    *
    * Behaviour:
    *   1. Identity summary in the header renders synchronously from the
    *      identity list (no fetch needed for the count / class mix).
-   *   2. If `identities.length > MULTI_SELECT_SOFT_CAP`, body shows the
-   *      "Too many selected" message and we don't fetch anything. The
-   *      1 000 cap stays in place until Phase 2.
-   *   3. Otherwise, post ONE intersect to the worker per model. As the
-   *      worker yields between chunks the panel updates a "Processing …
-   *      N / M" counter. When the reduction resolves, feed the synthetic
-   *      result into the same Tree / Flat renderers used for single-select.
+   *   2. Any bulk request still running for a previous selection is
+   *      cancelled — it would otherwise hold the worker's serial queue and
+   *      delay the reduction the user is now waiting on.
+   *   3. Past `BULK_INTERSECT_GUARD` the body offers "Compute anyway"
+   *      instead of starting; below it the reduction starts immediately.
    *   4. Stale guarding: each multi-fetch tags itself with the identity-
    *      list key. If a newer selection arrives mid-flight, the older
    *      result is discarded.
@@ -403,6 +405,9 @@ export class InspectorPanel {
       return;
     }
 
+    // Supersede: stop the previous reduction before starting another.
+    this.repository.cancelBulk();
+
     this.inflightKey = key;
     if (this.spinnerTimer) {
       clearTimeout(this.spinnerTimer);
@@ -413,13 +418,25 @@ export class InspectorPanel {
     this.countPill.textContent = '';
     this.renderMultiHeader(identities);
 
-    // Soft cap (unchanged for Phase 1 — Phase 2 raises this to the
-    // 10 000 sanity guard with a "compute anyway" affordance).
-    if (identities.length > MULTI_SELECT_SOFT_CAP) {
-      this.render = { kind: 'multi-cap', key, identities: [...identities] };
-      this.renderMultiCap();
+    // Past the guard, ask first — the reduction is bounded and cancellable,
+    // but large enough selections take long enough that starting one
+    // unbidden would be presumptuous.
+    if (identities.length > BULK_INTERSECT_GUARD) {
+      this.render = { kind: 'multi-guard', key, identities: [...identities] };
+      this.renderMultiGuard(identities);
       return;
     }
+
+    this.startIntersect(identities, key);
+  }
+
+  /**
+   * Kick off the worker reduction for `identities` and render its result.
+   * Split out of `beginMultiFetch` so the "Compute anyway" button can enter
+   * the exact same path the sub-guard case takes.
+   */
+  private startIntersect(identities: readonly ElementIdentity[], key: string): void {
+    this.inflightKey = key;
 
     // Spinner if the fetch takes longer than 50ms.
     this.spinnerTimer = setTimeout(() => {
@@ -451,6 +468,10 @@ export class InspectorPanel {
         this.renderBody(synthetic);
       })
       .catch((err) => {
+        // A cancelled reduction is not a failure — the user simply moved
+        // on. The stale-key guard below catches the normal supersede case;
+        // this also covers a cancel that raced the key update.
+        if (err instanceof BulkRequestCancelled) return;
         if (this.inflightKey !== key) return; // Stale.
         if (this.spinnerTimer) {
           clearTimeout(this.spinnerTimer);
@@ -477,6 +498,10 @@ export class InspectorPanel {
   }
 
   private beginFetch(identity: ElementIdentity, key: string): void {
+    // Dropping to a single element makes any running reduction stale, and
+    // the worker's queue is serial — leaving it running would make this
+    // click wait behind work whose result nobody will look at.
+    this.repository.cancelBulk();
     this.inflightKey = key;
     this.render = { kind: 'fetching', identity, key };
     this.show();
@@ -537,6 +562,9 @@ export class InspectorPanel {
 
   private hide(): void {
     this.container.classList.add('hidden');
+    // Nothing is going to read the result of an in-flight reduction once
+    // the panel is gone; let the worker stop grinding on it.
+    this.repository.cancelBulk();
     this.render = { kind: 'hidden' };
     this.inflightKey = null;
     if (this.spinnerTimer) {
@@ -644,15 +672,34 @@ export class InspectorPanel {
   }
 
   /**
-   * Soft-cap render: show the "refine selection" message in the body.
-   * The header (identity summary) stays in place.
+   * Guard render: state the cost and offer to do it anyway. Deliberately
+   * not a refusal — the reduction works at this size, it just takes a
+   * while, and only the user knows whether that's worth it. The header
+   * (identity summary) stays in place either way.
    */
-  private renderMultiCap(): void {
+  private renderMultiGuard(identities: readonly ElementIdentity[]): void {
     this.body.textContent = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'inspector-multi-guard';
+
     const msg = document.createElement('div');
-    msg.className = 'inspector-multi-cap';
-    msg.textContent = 'Too many selected for inspection — refine selection';
-    this.body.appendChild(msg);
+    msg.className = 'inspector-multi-guard-text';
+    msg.textContent = `${identities.length.toLocaleString()} elements selected. Computing their shared properties may take a while.`;
+
+    const btn = document.createElement('button');
+    btn.className = 'inspector-multi-guard-btn';
+    btn.textContent = 'Compute anyway';
+    btn.addEventListener('click', () => {
+      // Re-derive the key from the identities this render was built for,
+      // so a click that lands after a selection change is inert.
+      const key = `__multi__:${multiKey(identities)}`;
+      if (this.render.kind !== 'multi-guard' || this.render.key !== key) return;
+      this.startIntersect(identities, key);
+    });
+
+    wrap.appendChild(msg);
+    wrap.appendChild(btn);
+    this.body.appendChild(wrap);
   }
 
   private renderBody(props: ElementProperties): void {
