@@ -29,6 +29,13 @@ import * as WebIFC from 'web-ifc';
 import { fetchElementProperties } from '../inspector/repository/fetchElementProperties';
 import { computeUnitTable } from '../inspector/repository/unitTable';
 import { buildUnitTable, type UnitTable } from '../inspector/format';
+import {
+  intersectSeed,
+  intersectStep,
+  intersectFinalize,
+  type RunningIntersection,
+} from '../inspector/intersection';
+import type { ElementProperties } from '../inspector/types';
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
 
@@ -204,6 +211,51 @@ async function handleOpenForProps(id: string, buffer: ArrayBuffer): Promise<void
   post({ type: 'parsed', id });
 }
 
+/**
+ * Resolve the per-model unit table, computing and caching it on first use.
+ * Extracted so `getOne` and `readProps` share the same lazy-cache path.
+ */
+async function ensureUnitTable(
+  ifc: WebIFC.IfcAPI,
+  id: string,
+  modelID: number,
+): Promise<UnitTable> {
+  const cached = unitTables.get(id);
+  if (cached) return cached;
+  let unitTable: UnitTable;
+  try {
+    unitTable = await computeUnitTable(
+      ifc as unknown as Parameters<typeof computeUnitTable>[0],
+      modelID,
+    );
+  } catch {
+    unitTable = buildUnitTable([]);
+  }
+  unitTables.set(id, unitTable);
+  return unitTable;
+}
+
+/**
+ * Fetch + normalize one element's properties. Single normalization path
+ * shared by `getProps` and `intersect` — the worker has one and only one
+ * way of producing an `ElementProperties` from web-ifc data.
+ */
+async function getOne(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  id: string,
+  expressId: number,
+  unitTable: UnitTable,
+): Promise<ElementProperties> {
+  return fetchElementProperties(
+    ifc as unknown as Parameters<typeof fetchElementProperties>[0],
+    modelID,
+    id,
+    expressId,
+    unitTable,
+  );
+}
+
 /** Fetch + normalize one element's properties and post them back. */
 async function handleGetProps(reqId: number, id: string, expressId: number): Promise<void> {
   const ifc = await getApi();
@@ -211,29 +263,112 @@ async function handleGetProps(reqId: number, id: string, expressId: number): Pro
   if (modelID === undefined) {
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
+  const unitTable = await ensureUnitTable(ifc, id, modelID);
+  const props = await getOne(ifc, modelID, id, expressId, unitTable);
+  post({ type: 'props', reqId, props });
+}
 
-  // Per-model unit table — computed once, then reused.
-  let unitTable = unitTables.get(id);
-  if (!unitTable) {
-    try {
-      unitTable = await computeUnitTable(
-        ifc as unknown as Parameters<typeof computeUnitTable>[0],
-        modelID,
-      );
-    } catch {
-      unitTable = buildUnitTable([]);
-    }
-    unitTables.set(id, unitTable);
+// ----------------------------------------------------------------------------
+// Phase 1 of dev/plans/handoff-bulk-property-access.md — bulk property
+// reduction in the worker. The worker reads each expressId via `getOne` and
+// folds it into a running intersection, ever holding at most ONE element's
+// props plus the running fold state. Memory is O(1) in N.
+// ----------------------------------------------------------------------------
+
+/** ExpressId batch size for `readProps`. The only remaining tuning knob. */
+const INTERSECT_CHUNK = 200;
+
+/**
+ * Minimum interval (ms) between successive `progress` posts. Keeps the
+ * postMessage cost negligible at high throughput while still feeling live
+ * (~10/sec). Per-chunk granularity also bounds it from above.
+ */
+const PROGRESS_MIN_INTERVAL_MS = 100;
+
+/**
+ * Fold the properties of `expressIds` into a single synthetic
+ * `ElementProperties` and post `intersection`. Posts throttled `progress`
+ * messages between chunks.
+ *
+ * Phase 1: NO cancel handling. Single-bulk-op-at-a-time is acceptable for
+ * validating the trade-offs (drill-down latency, fold semantics) before
+ * Phase 2 layers in `cancel`, the macrotask yield's second purpose.
+ *
+ * We DO yield a macrotask between chunks so the main thread sees `progress`
+ * posts in real time (postMessage delivery is task-bound, not microtask-
+ * bound). The worker's serial queue still gates other messages behind this
+ * job — that's the documented trade-off in the handoff doc.
+ */
+async function handleIntersect(
+  reqId: number,
+  id: string,
+  expressIds: number[],
+): Promise<void> {
+  const ifc = await getApi();
+  const modelID = modelIds.get(id);
+  if (modelID === undefined) {
+    throw new Error(`ifcWorker: unknown modelId "${id}"`);
+  }
+  const total = expressIds.length;
+
+  // Empty selection — emit an empty synthetic and bail. The proxy avoids
+  // this path in practice (a 0-id model is dropped before posting), but
+  // we keep the guard so the worker never crashes on a degenerate request.
+  if (total === 0) {
+    post({ type: 'progress', reqId, done: 0, total: 0 });
+    post({ type: 'intersection', reqId, props: makeEmpty(id) });
+    return;
   }
 
-  const props = await fetchElementProperties(
-    ifc as unknown as Parameters<typeof fetchElementProperties>[0],
-    modelID,
-    id,
-    expressId,
-    unitTable,
-  );
-  post({ type: 'props', reqId, props });
+  const unitTable = await ensureUnitTable(ifc, id, modelID);
+
+  let running: RunningIntersection | null = null;
+  let done = 0;
+  let lastProgressAt = 0;
+
+  for (let start = 0; start < total; start += INTERSECT_CHUNK) {
+    const end = Math.min(start + INTERSECT_CHUNK, total);
+    for (let i = start; i < end; i++) {
+      const props = await getOne(ifc, modelID, id, expressIds[i], unitTable);
+      if (running === null) {
+        running = intersectSeed(props);
+      } else {
+        running = intersectStep(running, props);
+      }
+      done++;
+    }
+    // Throttled progress: post per-chunk, but never more often than
+    // ~PROGRESS_MIN_INTERVAL_MS apart. Force the final post (done === total)
+    // through the throttle so the UI sees the terminal value.
+    const now = Date.now();
+    if (done === total || now - lastProgressAt >= PROGRESS_MIN_INTERVAL_MS) {
+      post({ type: 'progress', reqId, done, total });
+      lastProgressAt = now;
+    }
+    // Macrotask yield — lets queued messages (notably `progress` delivery
+    // to main) flow before we resume. Also the hook Phase 2 will use to
+    // observe a `cancel` flag.
+    if (end < total) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+
+  // running cannot be null here — total > 0 means at least one getOne ran.
+  const props = intersectFinalize(running as RunningIntersection);
+  post({ type: 'intersection', reqId, props });
+}
+
+/** Empty synthetic ElementProperties used for the `expressIds.length === 0` case. */
+function makeEmpty(modelId: string): ElementProperties {
+  return {
+    identity: { modelId, expressId: 0, ifcClass: '(mixed)', ifcTypeCode: 0 },
+    direct: [],
+    psets: [],
+    qtos: [],
+    materials: [],
+    flat: [],
+    fetchedAt: Date.now(),
+  };
 }
 
 /** Close a model in web-ifc and free its per-model caches. */
@@ -294,6 +429,16 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       enqueue(async () => {
         try {
           await handleGetProps(msg.reqId, msg.id, msg.expressId);
+        } catch (err) {
+          post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
+        }
+      });
+      break;
+
+    case 'intersect':
+      enqueue(async () => {
+        try {
+          await handleIntersect(msg.reqId, msg.id, msg.expressIds);
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
         }

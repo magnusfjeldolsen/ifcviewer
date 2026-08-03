@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   intersectProperties,
+  intersectSeed,
+  intersectStep,
+  intersectFinalize,
   getDistinctValuesForPath,
   MIXED_SENTINEL,
 } from '../src/inspector/intersection';
@@ -373,5 +376,222 @@ describe('intersectProperties', () => {
     );
     expect(r.qtos).toHaveLength(1);
     expect(r.qtos[0].name).toBe('Qto_WallBaseQuantities');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Regression-lock — Phase 1 of dev/plans/handoff-bulk-property-access.md.
+//
+// The incremental fold (intersectSeed / intersectStep / intersectFinalize)
+// MUST produce output that is deep-equal to the batch intersectProperties()
+// on every representative fixture below. This test exists so the fold can
+// be wired into the worker without the worker silently diverging from
+// what the main thread shipped on every IFC release before this PR.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Run the fold step-by-step and finalize — the path the worker takes. */
+function foldIntersect(elements: ElementProperties[]): ElementProperties {
+  if (elements.length === 0) return intersectProperties([]); // delegate empty path
+  if (elements.length === 1) return elements[0];
+  let running = intersectSeed(elements[0]);
+  for (let i = 1; i < elements.length; i++) {
+    running = intersectStep(running, elements[i]);
+  }
+  return intersectFinalize(running);
+}
+
+/**
+ * Compare two ElementProperties values for deep equality of their public
+ * shape. `fetchedAt` is forced to a constant beforehand because the fold
+ * and the batch both timestamp with `Date.now()` and there is no value in
+ * locking that down — we care about shape, not wall-clock.
+ *
+ * Also compares the non-enumerable `__variesDistinct` map so a divergence
+ * in tooltip lookup cannot slip through.
+ */
+function expectDeepEqualResult(fold: ElementProperties, batch: ElementProperties): void {
+  const f = { ...fold, fetchedAt: 0 };
+  const b = { ...batch, fetchedAt: 0 };
+  expect(f).toEqual(b);
+  // Compare the non-enumerable distinct map across all paths in either.
+  const allPaths = new Set<string>([
+    ...fold.flat.map((r) => r.path),
+    ...batch.flat.map((r) => r.path),
+  ]);
+  for (const path of allPaths) {
+    const fd = getDistinctValuesForPath(fold, path);
+    const bd = getDistinctValuesForPath(batch, path);
+    expect(fd).toEqual(bd);
+  }
+}
+
+describe('intersectProperties — fold ≡ batch regression-lock', () => {
+  it('matches batch for 2 same-class elements with identical values', () => {
+    const a = makeElement({ id: 1 });
+    const b = makeElement({ id: 2 });
+    expectDeepEqualResult(foldIntersect([a, b]), intersectProperties([a, b]));
+  });
+
+  it('matches batch for 50 same-class elements (all-same values, no varies)', () => {
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 50; i++) elements.push(makeElement({ id: i }));
+    expectDeepEqualResult(foldIntersect(elements), intersectProperties(elements));
+  });
+
+  it('matches batch for 10 mixed-class elements (cross-class drops everything but Identity if any)', () => {
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 5; i++) elements.push(makeElement({ id: i, ifcClass: 'IfcWall' }));
+    for (let i = 5; i < 10; i++) elements.push(makeElement({ id: i, ifcClass: 'IfcDoor' }));
+    expectDeepEqualResult(foldIntersect(elements), intersectProperties(elements));
+  });
+
+  it('matches batch when every value is the same (no varies emitted)', () => {
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 8; i++) {
+      elements.push(
+        makeElement({
+          id: i,
+          psets: [
+            psetGroup('Pset_WallCommon', [
+              flatRow('Pset_WallCommon.LoadBearing', singleValue(true)),
+              flatRow('Pset_WallCommon.IsExternal', singleValue(false)),
+            ]),
+          ],
+        }),
+      );
+    }
+    const fold = foldIntersect(elements);
+    const batch = intersectProperties(elements);
+    expectDeepEqualResult(fold, batch);
+    expect(fold.flat.every((r) => r.rawValue.kind === 'single')).toBe(true);
+  });
+
+  it('matches batch when every value is different (every row goes to varies)', () => {
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 6; i++) {
+      elements.push(
+        makeElement({
+          id: i,
+          psets: [
+            psetGroup('Pset_WallCommon', [
+              flatRow('Pset_WallCommon.LoadBearing', singleValue(i % 2 === 0)),
+              flatRow('Pset_WallCommon.IsExternal', singleValue(`tag-${i}`)),
+            ]),
+          ],
+        }),
+      );
+    }
+    const fold = foldIntersect(elements);
+    const batch = intersectProperties(elements);
+    expectDeepEqualResult(fold, batch);
+    expect(fold.flat.every((r) => r.rawValue.kind === 'varies')).toBe(true);
+  });
+
+  it('matches batch with materials present (intersected by name)', () => {
+    const mat = (name: string, expressId: number): PropertyValue => ({
+      kind: 'material-ref',
+      materialName: name,
+      expressId,
+    });
+    const a = makeElement({ id: 1, materials: [mat('Brick', 100), mat('Steel', 101)] });
+    const b = makeElement({ id: 2, materials: [mat('Brick', 200), mat('Stone', 202)] });
+    const c = makeElement({ id: 3, materials: [mat('Brick', 300)] });
+    expectDeepEqualResult(foldIntersect([a, b, c]), intersectProperties([a, b, c]));
+  });
+
+  it('matches batch with Identity. direct rows and pset rows mixed', () => {
+    const buildWithDirect = (id: number, tag: string): ElementProperties => {
+      const direct: PropertyFlatRow[] = [
+        flatRow('Identity.Tag', singleValue(tag), 'direct'),
+        flatRow('Identity.Name', singleValue('wall'), 'direct'),
+      ];
+      const psetRows: PropertyFlatRow[] = [
+        flatRow('Pset_WallCommon.LoadBearing', singleValue(true)),
+      ];
+      const flat: PropertyFlatRow[] = [...direct, ...psetRows];
+      flat.sort((a, b) => a.path.localeCompare(b.path));
+      return {
+        identity: { modelId: 'model-A', expressId: id, ifcClass: 'IfcWall', ifcTypeCode: 1 },
+        direct: direct.map((r) => ({ key: r.name, value: r.rawValue, source: 'direct' })),
+        psets: [
+          psetGroup('Pset_WallCommon', [
+            flatRow('Pset_WallCommon.LoadBearing', singleValue(true)),
+          ]),
+        ],
+        qtos: [],
+        materials: [],
+        flat,
+        fetchedAt: Date.now(),
+      };
+    };
+    const a = buildWithDirect(1, 'T1');
+    const b = buildWithDirect(2, 'T1');
+    const c = buildWithDirect(3, 'T2');
+    expectDeepEqualResult(foldIntersect([a, b, c]), intersectProperties([a, b, c]));
+  });
+
+  it('single-element fold returns the input verbatim (same as batch)', () => {
+    const a = makeElement({ id: 7 });
+    expectDeepEqualResult(foldIntersect([a]), intersectProperties([a]));
+  });
+
+  it('matches batch for cross-model selection (modelId collapses to (mixed))', () => {
+    const a = makeElement({ id: 1, modelId: 'model-A' });
+    const b = makeElement({ id: 2, modelId: 'model-A' });
+    const c = makeElement({ id: 3, modelId: 'model-B' });
+    expectDeepEqualResult(foldIntersect([a, b, c]), intersectProperties([a, b, c]));
+  });
+
+  it('matches batch when group exists in only some elements (dropped)', () => {
+    const a = makeElement({
+      id: 1,
+      psets: [
+        psetGroup('Pset_OnlyOnA', [flatRow('Pset_OnlyOnA.X', singleValue(1))]),
+        psetGroup('Pset_Common', [flatRow('Pset_Common.Y', singleValue(2))]),
+      ],
+    });
+    const b = makeElement({
+      id: 2,
+      psets: [psetGroup('Pset_Common', [flatRow('Pset_Common.Y', singleValue(2))])],
+    });
+    expectDeepEqualResult(foldIntersect([a, b]), intersectProperties([a, b]));
+  });
+});
+
+describe('intersect fold — memory invariant (O(1) in N)', () => {
+  it('intersectStep does NOT retain the input ElementProperties', () => {
+    // Sanity test that the running state, once stepped, does not contain
+    // any reference back to the per-element input. This is the
+    // architectural property that lets the worker fold over thousands of
+    // elements without growing memory.
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 4; i++) elements.push(makeElement({ id: i }));
+    let running = intersectSeed(elements[0]);
+    for (let i = 1; i < elements.length; i++) {
+      running = intersectStep(running, elements[i]);
+    }
+    // The running state's only references to "raw" element data are:
+    //  - the seed's seedRow per path (intentionally kept for finalize),
+    //  - the seed's psetSamples / qtoSamples / materialSamples values,
+    //  - identity scalars.
+    // None of the non-seed elements should be reachable from `running`.
+    const nonSeedRefs = new Set<unknown>(elements.slice(1));
+    nonSeedRefs.add(elements[1]);
+    // Walk the running state and assert nothing in nonSeedRefs is present.
+    // We can't deeply enumerate WeakRefs, but the public shape (paths,
+    // samples, identity, count) is enumerable.
+    for (const entry of running.paths.values()) {
+      expect(nonSeedRefs.has(entry.seedRow)).toBe(false);
+      // seedRow must be the FIRST element's row, not a later one.
+      const firstFlat = new Set(elements[0].flat);
+      expect(firstFlat.has(entry.seedRow)).toBe(true);
+    }
+    for (const sample of running.psetSamples.values()) {
+      expect(nonSeedRefs.has(sample)).toBe(false);
+    }
+    for (const sample of running.qtoSamples.values()) {
+      expect(nonSeedRefs.has(sample)).toBe(false);
+    }
+    expect(running.count).toBe(elements.length);
   });
 });

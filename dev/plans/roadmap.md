@@ -133,7 +133,7 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
 ### `bulk-property-fetch-and-cap` — Unblock the inspector soft cap
-- **Status:** queued
+- **Status:** queued — **planned in `dev/plans/handoff-bulk-property-access.md`** (worker-based; the main-thread `web-ifc.GetLines` detail below is superseded — web-ifc moved into the worker in PR #33).
 - **Effort:** M
 - **Why:** Multi-select with the inspector panel open serialises `repository.get(modelId, expressId)` per element through `App.parseQueue`. For 1000+ elements this is the actual bottleneck (not the highlight — that's already O(N) after PR #21). Today the panel just refuses to render via `MULTI_SELECT_SOFT_CAP = 1000`.
 - **What:**

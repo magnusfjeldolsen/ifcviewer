@@ -6,7 +6,7 @@
  * proxy a worker, cache to IndexedDB, or back onto a different engine.
  */
 
-import type { ElementProperties, ModelSchema } from '../types';
+import type { ElementIdentity, ElementProperties, ModelSchema } from '../types';
 
 export interface ElementPropertyRepository {
   /**
@@ -15,6 +15,22 @@ export interface ElementPropertyRepository {
    * calls for the same key share a single in-flight promise.
    */
   get(modelId: string, expressId: number): Promise<ElementProperties>;
+
+  /**
+   * Compute the intersection of properties across N elements and return
+   * a single synthetic `ElementProperties`. The reduction runs in the
+   * worker (O(1) memory in N) and only the small result crosses the
+   * thread boundary. `onProgress` is called with monotonic `done` / `total`
+   * counters for the live overlay; intermediate values are throttled.
+   *
+   * Does NOT populate the single-`get()` memo — drill-down clicks after a
+   * bulk intersection pay one round-trip per click (milliseconds). Phase 1
+   * of dev/plans/handoff-bulk-property-access.md.
+   */
+  intersectProperties(
+    identities: readonly ElementIdentity[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ElementProperties>;
 
   /**
    * Abort or simply ignore the result of a queued fetch. Implementations
