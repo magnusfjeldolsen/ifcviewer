@@ -184,8 +184,9 @@ export class WorkerIfcParser {
       }
       case 'props':
       case 'intersection':
+      case 'ids':
       case 'progress':
-        // Property-query / intersection / progress reply — belongs to
+        // Property-query / bulk-reduction / progress reply — belongs to
         // WorkerPropertyRepository.
         this.extraSink?.(msg);
         break;
