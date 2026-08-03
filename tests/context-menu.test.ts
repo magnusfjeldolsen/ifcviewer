@@ -182,6 +182,7 @@ describe('buildContextMenuItems', () => {
       opaque: () => calls.push('opaque'),
       clearTransparency: () => calls.push('clearTransparency'),
       addToBasket: () => calls.push('addToBasket'),
+      selectSimilarClass: () => calls.push('selectSimilarClass'),
     };
   }
 
@@ -192,7 +193,7 @@ describe('buildContextMenuItems', () => {
       .map((i) => i.label ?? '');
   }
 
-  it('T26: SINGLE selection → element-line header; verbs Hide, Isolate, Show all, Make transparent, Make opaque, Add to basket (M+); "Select similar" ABSENT', () => {
+  it('T26: SINGLE selection → element-line header; verbs Hide, Isolate, Show all, Make transparent, Make opaque, Select all <class>, Add to basket (M+)', () => {
     const items = buildContextMenuItems(singleState(), { hasHidden: true, hasTransparent: true }, makeActions())!;
     expect(items).not.toBeNull();
     // First item is a header (no onClick).
@@ -204,17 +205,28 @@ describe('buildContextMenuItems', () => {
     expect(verbs).toContain('Make transparent');
     expect(verbs).toContain('Make opaque');
     expect(verbs.some((v) => /add to basket/i.test(v))).toBe(true);
-    expect(verbs.some((v) => /select similar/i.test(v))).toBe(false);
+    // Select-similar's class preset, named after the element's own class so
+    // the row says what it will do.
+    expect(verbs.some((v) => /^select all /i.test(v))).toBe(true);
   });
 
-  it('T27: MULTI selection → header "N elements"; same verb set; still NO "Select similar"', () => {
+  it('T26b: the class preset dispatches selectSimilarClass', () => {
+    const actions = makeActions();
+    const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, actions)!;
+    items.find((i) => /^select all /i.test(i.label ?? ''))!.onClick!();
+    expect(actions.calls).toEqual(['selectSimilarClass']);
+  });
+
+  it('T27: MULTI selection → header "N elements"; same verbs, but NO class preset', () => {
+    // A multi-selection can span classes, so "select all of this class" has
+    // no referent — offering it would have to pick one arbitrarily.
     const items = buildContextMenuItems(multiState(3), { hasHidden: true, hasTransparent: true }, makeActions())!;
     expect(items[0].label).toMatch(/3 elements/);
     const verbs = verbLabels(items);
     expect(verbs).toEqual(
       expect.arrayContaining(['Hide', 'Isolate', 'Show all', 'Make transparent', 'Make opaque']),
     );
-    expect(verbs.some((v) => /select similar/i.test(v))).toBe(false);
+    expect(verbs.some((v) => /^select all /i.test(v))).toBe(false);
   });
 
   it('T28: "Show all" disabled iff nothing hidden; "Make opaque" disabled iff nothing transparent', () => {

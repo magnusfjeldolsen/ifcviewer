@@ -15,6 +15,7 @@ import {
   type ElementPropertyRepository,
 } from '../src/inspector/repository/ElementPropertyRepository';
 import { BULK_INTERSECT_GUARD } from '../src/inspector/limits';
+import type { SimilarQuery } from '../src/inspector/selectSimilar';
 import { intersectProperties as batchIntersect } from '../src/inspector/intersection';
 
 // ── localStorage mock (Phase 3 persists view choice here) ──────
@@ -322,6 +323,7 @@ function mountPanel(
     repository: repo,
     getModelInfo: depsOverrides.getModelInfo,
     getModelCount: depsOverrides.getModelCount,
+    onSelectSimilar: depsOverrides.onSelectSimilar,
   };
   const panel = new InspectorPanel(parent, deps, selection);
   mountedPanels.push(panel);
@@ -1369,6 +1371,80 @@ describe('InspectorPanel', () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(parent.querySelector('.inspector-progress')).toBeNull();
+    });
+  });
+
+  describe('select similar affordance', () => {
+    /** Mount, select one element, resolve its props, return the rendered DOM. */
+    async function mountWithElement(onSelectSimilar?: (q: SimilarQuery) => void) {
+      const mounted = mountPanel({ kind: 'none' }, { onSelectSimilar });
+      mounted.selection.emit({ kind: 'single', identities: [identity()] });
+      mounted.repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      return mounted;
+    }
+
+    it('offers the affordance on matchable rows when a handler is wired', async () => {
+      const { parent } = await mountWithElement(() => undefined);
+      expect(parent.querySelectorAll('.inspector-similar-btn').length).toBeGreaterThan(0);
+    });
+
+    it('offers nothing when no handler is wired', async () => {
+      // The panel is usable without a SelectionManager behind it; the
+      // affordance must not appear as a dead control in that case.
+      const { parent } = await mountWithElement(undefined);
+      expect(parent.querySelector('.inspector-similar-btn')).toBeNull();
+    });
+
+    it('offers nothing on a multi-selection', async () => {
+      // The rendered props are a synthetic intersection — its rows describe
+      // what the selection has in common, not one element's values.
+      const { parent, repo, selection } = mountPanel({ kind: 'none' }, { onSelectSimilar: () => undefined });
+      selection.emit({
+        kind: 'multi',
+        identities: [identity({ expressId: 1 }), identity({ expressId: 2 })],
+      });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(parent.querySelector('.inspector-similar-btn')).toBeNull();
+    });
+
+    it('clicking builds a value query from that row', async () => {
+      const seen: SimilarQuery[] = [];
+      const { parent } = await mountWithElement((q) => seen.push(q));
+
+      const btn = parent.querySelector<HTMLButtonElement>('.inspector-similar-btn')!;
+      btn.click();
+
+      expect(seen.length).toBe(1);
+      const q = seen[0];
+      expect(q.kind).toBe('value');
+      expect(q.modelId).toBe('model-A');
+      expect(q.ifcClass).toBe('IfcWall');
+      if (q.kind === 'value') {
+        expect(q.selector.path.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('does not also copy the value when the affordance is clicked', async () => {
+      // The button sits next to a value cell whose own click copies to
+      // clipboard; the affordance must not trigger both.
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const original = navigator.clipboard;
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      });
+
+      const { parent } = await mountWithElement(() => undefined);
+      parent.querySelector<HTMLButtonElement>('.inspector-similar-btn')!.click();
+      expect(writeText).not.toHaveBeenCalled();
+
+      Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
     });
   });
 });

@@ -21,9 +21,6 @@ export { TRANSPARENCY_OPACITY } from '../viewer/AppearanceManager';
  * Callbacks the menu verbs dispatch to. Each acts on the CURRENT SELECTION
  * scope (the caller closes over the live selection); the menu never targets a
  * hit-tested element. `addToBasket` is M+ (add the selection to the basket).
- *
- * NOTE: "Select similar" is intentionally OMITTED this slice — it depends on
- * the unbuilt bulk-property feature (A). Seam only; do not add it here yet.
  */
 export interface ContextMenuActions {
   hide: () => void;
@@ -33,6 +30,17 @@ export interface ContextMenuActions {
   opaque: () => void;
   clearTransparency: () => void;
   addToBasket: () => void;
+  /**
+   * "Select all of this element's class" — the one select-similar preset that
+   * needs no property read. Only offered for a single-element selection: a
+   * multi-selection may span classes, so "this class" has no referent.
+   *
+   * The by-parameter form lives on the inspector's property rows, where the
+   * value you're selecting by is the thing you're already looking at. A menu
+   * submenu listing every parameter is a later slice — `ContextMenu` has no
+   * flyout rendering yet.
+   */
+  selectSimilarClass: () => void;
 }
 
 export interface AppearanceFlags {
@@ -78,7 +86,17 @@ export function buildContextMenuItems(
   items.push({ label: 'Make opaque', onClick: actions.opaque, disabled: !flags.hasTransparent });
   items.push({ separator: true });
 
-  // Basket. ("Select similar ▸" goes here in a future slice — see header note.)
+  // Select similar — single-element only (see ContextMenuActions).
+  if (state.kind === 'single') {
+    const cls = state.identities[0].ifcClass;
+    items.push({
+      label: cls ? `Select all ${cls}` : 'Select all of this class',
+      onClick: actions.selectSimilarClass,
+    });
+    items.push({ separator: true });
+  }
+
+  // Basket.
   items.push({ label: 'Add to basket (M+)', onClick: actions.addToBasket });
 
   return items;

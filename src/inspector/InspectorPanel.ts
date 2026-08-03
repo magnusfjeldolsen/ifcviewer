@@ -28,8 +28,10 @@
 import type {
   ElementIdentity,
   ElementProperties,
+  PropertyValue,
   SelectionState,
 } from './types';
+import { valueQuery, type SimilarQuery } from './selectSimilar';
 import {
   BulkRequestCancelled,
   type ElementPropertyRepository,
@@ -75,6 +77,13 @@ export type ViewMode = 'tree' | 'flat';
 
 export interface InspectorPanelDeps {
   repository: ElementPropertyRepository;
+  /**
+   * Run a "select similar" query built from a property row. Wiring this in
+   * turns on the per-row "⌕" affordance (single-element selections only).
+   * Omitted → no affordance, which is how every existing test fixture and
+   * any consumer that doesn't own a SelectionManager behaves.
+   */
+  onSelectSimilar?: (query: SimilarQuery) => void;
   /**
    * Called when the panel needs to show a model-name row in the header
    * (i.e. when more than one model is loaded). Returns undefined if no
@@ -724,6 +733,7 @@ export class InspectorPanel {
       },
       formatVariesTooltip: (path) => this.formatVariesTooltip(path),
       hasCurrentProps: () => this.currentProps !== null,
+      onSelectSimilar: this.similarHandler(),
     };
   }
 
@@ -744,6 +754,34 @@ export class InspectorPanel {
       setDebounceTimer: (handle) => {
         this.filterDebounce = handle;
       },
+      onSelectSimilar: this.similarHandler(),
+    };
+  }
+
+  /**
+   * The row-level "select similar" handler, or undefined when the affordance
+   * shouldn't be offered.
+   *
+   * Two conditions, both necessary: a consumer wired `onSelectSimilar`, and
+   * the panel is showing exactly ONE element. On a multi-select the rendered
+   * props are a synthetic intersection — its rows describe what the selection
+   * has in common, not one element's values, so "select everything like this"
+   * has no well-defined source to be like.
+   */
+  private similarHandler(): ((path: string, value: PropertyValue) => void) | undefined {
+    const run = this.deps.onSelectSimilar;
+    if (!run) return undefined;
+    if (this.render.kind !== 'loaded') return undefined;
+    const identity = this.render.props.identity;
+    return (path, value) => {
+      const row = this.currentProps?.flat.find((r) => r.path === path);
+      const query = valueQuery(identity, {
+        path,
+        name: row?.name ?? path.split('.').pop() ?? path,
+        rawValue: value,
+        displayValue: row?.displayValue ?? '',
+      });
+      if (query) run(query);
     };
   }
 

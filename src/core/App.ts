@@ -31,8 +31,18 @@ import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
 import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
+import { BulkRequestCancelled } from '../inspector/repository/ElementPropertyRepository';
+import {
+  classQuery,
+  describeSimilarResult,
+  identitiesFromIds,
+  type SimilarQuery,
+} from '../inspector/selectSimilar';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
+
+/** How long a transient status message stays up before clearing. */
+const STATUS_CLEAR_MS = 4000;
 
 export class App {
   private viewer: Viewer;
@@ -413,6 +423,7 @@ export class App {
           return record ? { name: record.name } : undefined;
         },
         getModelCount: () => this.modelRecords.size,
+        onSelectSimilar: (query) => void this.runSelectSimilar(query),
       },
       this.selectionManager,
     );
@@ -863,6 +874,53 @@ export class App {
     this.selectionManager.selectExactly(contents);
   }
 
+  // ── Select similar (F) ─────────────────────────────────────
+
+  /**
+   * Run a "select similar" query and make its result the selection.
+   *
+   * The predicate runs in the worker (`findMatching`) or, for the class
+   * preset, is just an id enumeration — either way only ids cross the thread
+   * boundary, so a class with tens of thousands of members costs a small
+   * message rather than a property dump. The result lands through
+   * `selectExactly`, which bypasses the single-model lock and records ONE
+   * undo command for the whole set.
+   *
+   * See dev/plans/handoff-select-similar.md.
+   */
+  private async runSelectSimilar(query: SimilarQuery): Promise<void> {
+    // A previous query (or an inspector intersection) still running would
+    // sit ahead of this one in the worker's serial queue.
+    this.propertyRepository.cancelBulk();
+    this.setStatus(`Finding ${query.label}…`);
+
+    try {
+      const ids =
+        query.kind === 'class'
+          ? await this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcClass)
+          : await this.propertyRepository.findMatching(
+              query.modelId,
+              query.ifcClass,
+              query.selector,
+              query.value,
+              (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+            );
+
+      const identities = identitiesFromIds(query, ids);
+      if (identities.length > 0) {
+        this.selectionManager.selectExactly(identities);
+      }
+      this.setStatus(describeSimilarResult(query, identities.length));
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    } catch (err) {
+      // Superseded by a newer query — the user moved on, not an error.
+      if (err instanceof BulkRequestCancelled) return;
+      console.error('App: select similar failed', err);
+      this.setStatus('Could not complete the search');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    }
+  }
+
   // ── Context menu (C) ───────────────────────────────────────
   //
   // The menu acts ONLY on the current selection (CM2): it reads
@@ -906,6 +964,10 @@ export class App {
         opaque: () => this.appearanceOpaque(),
         clearTransparency: () => this.appearanceClearTransparency(),
         addToBasket: () => this.basketAdd(),
+        selectSimilarClass: () => {
+          if (state.kind !== 'single') return;
+          void this.runSelectSimilar(classQuery(state.identities[0]));
+        },
       },
     );
 
