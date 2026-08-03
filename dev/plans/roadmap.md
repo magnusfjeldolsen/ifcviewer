@@ -29,6 +29,18 @@ When a new card is created, default to `queued` and give it a stable slug (kebab
 - **Risks:** if the user closes the tab during the 2–5 s async save, that model isn't persisted — acceptable tradeoff, but maybe show a "saving..." indicator until the write resolves.
 - **Source:** Performance research from the `claude conversation 2026-05-12`, summarized in `feature/element-inspector` audit. Section 3.1 + 3.10 of the original design doc.
 
+### `worker-type-property-cache` — Stop re-reading type properties per element
+- **Status:** queued
+- **Effort:** S–M
+- **Why:** Bulk property throughput measures **~100–200 elements/sec** (observed on PR #42 manual smoke, 2026-08-03). Much of the per-element cost is irreducible, but the **type-side work is repeated for every instance**. `fetchElementProperties` calls `getTypeProperties` twice per element — once directly for type psets, and again inside `getMaterialsProperties(..., includeTypeMaterials=true)`, which re-fetches the type objects itself (`node_modules/web-ifc/web-ifc-api.js:71224`) — and then re-resolves that type's psets and materials recursively for each instance. 2 000 walls sharing 5 types do the type-side work 2 000 times instead of 5. Typical Revit-exported IFC is type-pset-heavy, so this is likely a large share of the per-element cost.
+- **What:**
+  - Per-model cache in the worker: type-object expressId → resolved raw type psets / type materials. Cleared in `disposeModel` alongside `unitTables`.
+  - Fetch the element's type objects **once** and serve both psets and materials from them, instead of `includeTypeMaterials=true` re-deriving them.
+  - Cache the **raw** resolved lines, not built `PropertyGroup`s: the normalizer mutates what it builds (`markInheritedRecursively`, `group.inheritedFromType`), so sharing built objects would cross-contaminate elements. Rebuilding groups per element from cached raw stays safe.
+  - Measure before/after against RIB.ifc and record the numbers — the win is proportional to how type-heavy the model is, so it needs measuring rather than predicting.
+- **Risks:** output must be byte-identical; add a test asserting cached and uncached fetches deep-equal. Cache lifetime must follow the model, or a re-loaded model serves stale type data.
+- **Source:** PR #42 manual smoke + reading `web-ifc-api.js` `getRelatedProperties` / `getMaterialsProperties`.
+
 ### `mt-wasm-coop-coep` — Multi-thread web-ifc via cross-origin isolation
 - **Status:** blocked (web-ifc 0.0.77 MT build is incompatible with our Vite/ESM bundling — see Blocker)
 - **Effort:** L (header plumbing is trivial; the blocker below makes the real fix a large change)
@@ -46,17 +58,9 @@ menu, with global Ctrl+Z / Ctrl+Y. Two independent keystones first
 (`bulk-property-fetch-and-cap` for data, `undo-redo` for interaction), then the
 features build on them. Confirmed decisions live in the epic doc.
 
-**Order:** `bulk-property-fetch-and-cap` ‖ `undo-redo` → `context-menu` +
-`element-appearance` → `undo-redo-retrofit` → `select-similar` → (Data Insight)
-`parameter-coloring` · `data-aggregation-tabs`.
-
-### `undo-redo` — Global undo/redo (Ctrl+Z · Ctrl+Y)
-- **Status:** queued (interaction keystone — build first, with selection undo)
-- **Effort:** M
-- **Why:** Hide/isolate/fade and bulk selection edits need to be safe to try; users will accidentally clear the basket or over-select. Nothing is reversible today.
-- **What:** A `Command` pattern + single `HistoryManager` (before/after mementos), Ctrl+Z / Ctrl+Y wiring with an input-focus guard. One command per user-perceived gesture (a 1000-element marquee = one undo). Ships with **selection undo** + **basket undo** (M+/M−/MC). Camera is never recorded; history clears on model add/remove.
-- **Risks:** the `isApplying()` re-entrancy guard (undo must not push a new command) is the correctness crux; selection mementos can be large → depth-capped.
-- **Source:** `dev/plans/handoff-undo-redo.md`.
+**Order:** ~~`bulk-property-fetch-and-cap` ‖ `undo-redo` → `context-menu` +
+`element-appearance`~~ (all shipped) → `undo-redo-retrofit` → **`select-similar`
+(next)** → (Data Insight) `parameter-coloring` · `data-aggregation-tabs`.
 
 ### `undo-redo-retrofit` — Make clipping + measurement undoable
 - **Status:** queued (depends on `undo-redo`)
@@ -66,28 +70,13 @@ features build on them. Confirmed decisions live in the epic doc.
 - **Risks:** tool visual handles must re-sync on undo/redo.
 - **Source:** `dev/plans/handoff-undo-redo.md` (§ Retrofit).
 
-### `context-menu` — Selection-aware right-click menu
-- **Status:** queued (debuts with `element-appearance`)
-- **Effort:** M
-- **Why:** The unifying surface for hide/isolate/fade/select-similar/add-to-basket; no context menu exists today.
-- **What:** New `src/ui/ContextMenu.ts`; `contextmenu` opens a menu scoped to the **current selection** — no raycast, no select-on-right-click. To act on an element, select it first; to act on the basket, MR it into the selection first. No selection (and no active recovery action) → no menu.
-- **Risks:** positioning/clamping; suppress during active tools.
-- **Source:** `dev/plans/handoff-context-menu.md`.
-
-### `element-appearance` — Hide / isolate / show-all + transparent / opaque
-- **Status:** queued (depends on `undo-redo` + `context-menu`; supersedes `element-visibility`)
-- **Effort:** M
-- **Why:** Act on a `Scope`'s visibility/transparency; prerequisite for filter and useful alone (isolate).
-- **What:** One `AppearanceManager` with a single mutually-exclusive state per element (normal / hidden / transparent), normalize-then-apply for robust transitions. Hide via `meshesByExpressId`; transparency reuses the highlight-variant material trick. Tray "Show N hidden" / "Clear transparency" recovery. Undo-aware; session-persisted.
-- **Risks:** the transparency + highlight overlay on one mesh; fit/raycast/marquee must respect hidden meshes.
-- **Source:** `dev/plans/handoff-element-appearance.md`.
-
 ### `select-similar` — Find elements with a matching parameter
-- **Status:** queued (presets cut: no dep; value-match cut: needs `bulk-property-fetch-and-cap`)
+- **Status:** queued — **next up.** Both cuts are unblocked: `findMatching` + `enumerateExpressIds` shipped in PR #42.
 - **Effort:** M
 - **Why:** "Show me all the B12 beams" in one click — the inline form of `filter-by-parameter`; a `Scope` source feeding basket/visibility/coloring/aggregation.
-- **What:** Inline "⌕ Select similar" on inspector property rows + a context-menu submenu. Two cuts: same-type/same-class presets first (no dependency), parameter value-match once bulk access lands. Result drives `selectExactly` (one undoable selection).
-- **Risks:** huge match sets (reuse the bulk selection path + progress); value typing.
+- **What:** Inline "⌕ Select similar" on inspector property rows + a context-menu submenu. Same-type/same-class presets plus parameter value-match. Result drives `selectExactly` (one undoable selection).
+- **Note:** the plan doc's mechanism section predates PR #42 and still says `getMany(ids)` + a main-thread filter. That's superseded: `repository.findMatching(modelId, ifcClass, selector, value)` runs the predicate in the worker and returns ids only. `getMany` was deliberately never built.
+- **Risks:** huge match sets (reuse the bulk selection path + progress); value typing. Also the first real exercise of the `IFCPRODUCT`-with-`includeInherited` assumption in `candidateIds`.
 - **Source:** `dev/plans/handoff-select-similar.md`.
 
 ## Data Insight phase (epic — see `dev/plans/phase-data-insight.md`)
@@ -100,16 +89,8 @@ aggregation). Ships feature-by-feature, foundational-first.
 _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 `Scope` source; the cards below build on it._
 
-### `element-visibility` — Hide / unhide / isolate elements
-- **Status:** queued — **superseded by `element-appearance`** (which adds isolate + transparency + undo); kept for the feature-2 reference.
-- **Effort:** M
-- **Why:** Prerequisite for filter ("show matching, hide the rest"); useful alone (isolate selection). Today visibility is per-model only.
-- **What:** Element-level show / hide / isolate over a `Scope`. "Show all" contextual button when anything is hidden.
-- **Risks:** selection / raycast interaction with hidden elements.
-- **Source:** `dev/plans/phase-data-insight.md` (feature 2); now planned in `dev/plans/handoff-element-appearance.md`.
-
 ### `filter-by-parameter` — Show elements matching a parameter
-- **Status:** queued (needs `element-visibility` + bulk property access). First, lighter form is `select-similar` (selects rather than isolates).
+- **Status:** queued (bulk property access shipped in PR #42; `element-appearance` shipped in PR #39). First, lighter form is `select-similar` (selects rather than isolates).
 - **Effort:** M
 - **Why:** From a selected element/class, show all elements sharing a parameter value and hide the rest — fast "find everything like this."
 - **What:** Pick parameter(s) + match → matching elements become a `Scope`, isolated via `element-visibility`. Predicate evaluated across the model via bulk property access (the worker).
@@ -132,18 +113,6 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 - **Risks:** the pivot authoring UX and the tab / session-persistence model are the design risk — each gets its own hand-off doc.
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
-### `bulk-property-fetch-and-cap` — Unblock the inspector soft cap
-- **Status:** queued — **planned in `dev/plans/handoff-bulk-property-access.md`** (worker-based; the main-thread `web-ifc.GetLines` detail below is superseded — web-ifc moved into the worker in PR #33).
-- **Effort:** M
-- **Why:** Multi-select with the inspector panel open serialises `repository.get(modelId, expressId)` per element through `App.parseQueue`. For 1000+ elements this is the actual bottleneck (not the highlight — that's already O(N) after PR #21). Today the panel just refuses to render via `MULTI_SELECT_SOFT_CAP = 1000`.
-- **What:**
-  - Add `repository.getMany(ids: ElementIdentity[]): Promise<ElementProperties[]>` that batches via `web-ifc.GetLines(modelID, expressIDs[])` (`node_modules/web-ifc/web-ifc-api.d.ts:312`) in one WASM round trip per group.
-  - `InspectorPanel.beginMultiFetch` uses `getMany`.
-  - Raise `MULTI_SELECT_SOFT_CAP` to 5 000 with a progress spinner, or remove entirely with a "Computing intersection... N / M" overlay. User has asked for this to be tunable in a future settings panel.
-- **Risks:** Bulk property data can be megabytes for large selections — memory peak during the call. Stream the result instead of materialising everything at once if it's a problem.
-- **Also feature 3 of the Data Insight phase** (`phase-data-insight.md`): the same `getMany` (plus real `enumerateExpressIds` / `describeSchema`, now running in the worker) is the enabler for `filter-by-parameter` and `data-aggregation-tabs`. Plan them together.
-- **Source:** Performance research section 6.
-
 ### `settings-panel` — User-tunable caps and preferences
 - **Status:** queued
 - **Effort:** M
@@ -152,6 +121,7 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
   - New `src/ui/SettingsPanel.ts` mounted in `src/core/App.ts`.
   - Keys persisted in localStorage under `ifcviewer:settings:*`.
   - Each surfaced setting reads from a central `Settings` module so internals can subscribe.
+  - First candidate already centralized for this: `BULK_INTERSECT_GUARD` in `src/inspector/limits.ts` (PR #42).
 - **Risks:** scope creep — limit v1 to caps the user has explicitly asked for.
 - **Source:** PR #21 discussion (multi-select cap request).
 
@@ -225,3 +195,18 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 
 ### `selection-basket` — Curated element set (M+/M−/MR/MC) (PR #36, merged 2026-05-26)
 - **Outcome:** The first `Scope` source (Data Insight feature 1). `SelectionBasket` (pure model: add/remove/clear/onModelRemoved/serialize, deduped by modelId:expressId), `SelectionBasketPanel` (M+/M−/MR/MC cluster), `SelectionManager.selectExactly` (lock-bypassing recall so MR spans models without mutating the single-model-lock), session persistence via `App.buildSessionState`, and a tray "Clear basket" button. Manual testing reshaped the entry-point UX: the original subtle inspector ▲ button was dropped (it also clipped the inspector's collapse/expand button at 36px — a regression) in favour of surfacing the whole toolbar on any live selection. 432 → 481 tests. Next: the `Scope` it produces is consumed by the Scope Ops + Undo phase (visibility / appearance / select-similar) and later Data Insight coloring / aggregation.
+
+### `undo-redo` — Global undo/redo (Ctrl+Z · Ctrl+Y) (PR #38, merged 2026-05-27)
+- **Outcome:** The interaction keystone of the Scope Ops phase. `Command` pattern + a single `HistoryManager` over before/after mementos, Ctrl+Z / Ctrl+Y with an input-focus guard, one command per user-perceived gesture (a 1000-element marquee is one undo). Shipped with selection undo + basket undo. The `isApplying()` re-entrancy guard — undo must not push a new command — was the correctness crux as predicted. Camera is never recorded; history clears on model add/remove.
+
+### `context-menu` + `element-appearance` — Right-click menu, hide / isolate / transparent (PR #39, merged 2026-05-27)
+- **Outcome:** Shipped together as planned. `src/ui/ContextMenu.ts` opens scoped to the **current selection** (CM2: no raycast, no select-on-right-click — correcting the original draft, see commit 81cbeda). `AppearanceManager` holds one mutually-exclusive state per element (normal / hidden / transparent) with normalize-then-apply transitions; transparency reuses the highlight-variant material mechanism; tray recovery actions for hidden / transparent elements. Undo-aware and session-persisted. Supersedes the old `element-visibility` card, which is now deleted rather than kept as a stale reference.
+
+### `element-key-codec` — Centralize makeKey (PR #40, merged 2026-05-29)
+- **Outcome:** Pure refactor ahead of the bulk work. `src/inspector/elementKey.ts` owns `makeKey(modelId, expressId)`; all five former copies (four `makeKey` locals + the inline codec in `InspectorPanel.multiKey`) are gone.
+
+### `bulk-property-access` Phase 1 — Worker-side intersection fold (PR #41, merged 2026-08-03)
+- **Outcome:** The risk slice of `handoff-bulk-property-access.md`, validating both architectural bets in production before building on them. `intersection.ts` became an incremental fold (`intersectSeed` / `intersectStep` / `intersectFinalize`) with the batch function kept as a thin wrapper and a regression-lock test asserting fold ≡ batch across same-class / mixed-class / all-equal / all-distinct / materials / direct-rows / cross-model. The worker reads each element through `getOne` and folds it, holding only the running result (O(1) memory in N), and posts one synthetic result plus throttled progress. Both go/no-go criteria held on manual test: drill-down after a bulk intersect stayed in **ms** (the no-memo-populate trade-off is fine), and the intersected display matched the old main-thread result. 481 → 592 tests.
+
+### `bulk-property-access` Phase 2 — Cancel, guard, enumerate, findMatching (PR #42, merged 2026-08-03)
+- **Outcome:** Completes the data keystone. **Cancellation:** `cancel` is handled synchronously in the worker's `onmessage` and never enqueued (queuing it would be useless — the job it cancels is at the head of the queue); bulk reqIds register at *dispatch*, so a job queued behind a long-running one is cancellable too; the running job bails at its next chunk boundary and posts nothing, so a partial fold is never committed. `BulkRequestCancelled` lets the panel tell "you asked me to stop" from a real failure. **The 1 000 refusal is gone** — below `BULK_INTERSECT_GUARD` (10 000, in the new `src/inspector/limits.ts`) it just computes; above it, "Compute anyway" rather than a wall. The chunk loop became a shared `readProps` so chunking / yield / progress / cancel have one implementation. `enumerateExpressIds` now returns `Promise<number[]>` (the stubbed AsyncIterable is gone) and resolves "all products" through the `IFCPRODUCT` supertype rather than a hand-listed class set. `findMatching` runs the predicate in the worker and returns ids only; the predicate lives in the pure `matchValue.ts` (single + enumerated matchable, quantity excluded as fragile, present-and-equal, exact-path). 592 → 626 tests. **Surprise:** `getMany` was never built — the reduce-in-worker design removed every near-term consumer, so it stays deferred to whichever feature first genuinely needs full props on main. **Follow-up spawned:** `worker-type-property-cache` (bulk throughput measured ~100–200 elements/sec; type-side work repeats per instance).
