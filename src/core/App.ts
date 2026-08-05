@@ -33,9 +33,10 @@ import { ContextMenu } from '../ui/ContextMenu';
 import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
 import { BulkRequestCancelled } from '../inspector/repository/ElementPropertyRepository';
 import {
-  classQuery,
+  categoryQuery,
   describeSimilarResult,
   identitiesFromIds,
+  typeQuery,
   type SimilarQuery,
 } from '../inspector/selectSimilar';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
@@ -964,9 +965,14 @@ export class App {
         opaque: () => this.appearanceOpaque(),
         clearTransparency: () => this.appearanceClearTransparency(),
         addToBasket: () => this.basketAdd(),
-        selectSimilarClass: () => {
+        selectSimilarCategory: () => {
           if (state.kind !== 'single') return;
-          void this.runSelectSimilar(classQuery(state.identities[0]));
+          void this.runSelectSimilar(categoryQuery(state.identities[0]));
+        },
+        selectSimilarType: () => {
+          if (state.kind !== 'single') return;
+          const query = typeQuery(state.identities[0]);
+          if (query) void this.runSelectSimilar(query);
         },
       },
     );

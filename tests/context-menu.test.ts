@@ -182,7 +182,8 @@ describe('buildContextMenuItems', () => {
       opaque: () => calls.push('opaque'),
       clearTransparency: () => calls.push('clearTransparency'),
       addToBasket: () => calls.push('addToBasket'),
-      selectSimilarClass: () => calls.push('selectSimilarClass'),
+      selectSimilarCategory: () => calls.push('selectSimilarCategory'),
+      selectSimilarType: () => calls.push('selectSimilarType'),
     };
   }
 
@@ -205,16 +206,68 @@ describe('buildContextMenuItems', () => {
     expect(verbs).toContain('Make transparent');
     expect(verbs).toContain('Make opaque');
     expect(verbs.some((v) => /add to basket/i.test(v))).toBe(true);
-    // Select-similar's class preset, named after the element's own class so
-    // the row says what it will do.
-    expect(verbs.some((v) => /^select all /i.test(v))).toBe(true);
+    // Select-similar's category option, named after the element's own
+    // category so the row says what it will do.
+    expect(verbs.some((v) => /this category · IfcWall/.test(v))).toBe(true);
   });
 
-  it('T26b: the class preset dispatches selectSimilarClass', () => {
+  it('T26b: the category option dispatches selectSimilarCategory', () => {
     const actions = makeActions();
     const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, actions)!;
-    items.find((i) => /^select all /i.test(i.label ?? ''))!.onClick!();
-    expect(actions.calls).toEqual(['selectSimilarClass']);
+    items.find((i) => /this category/.test(i.label ?? ''))!.onClick!();
+    expect(actions.calls).toEqual(['selectSimilarCategory']);
+  });
+
+  it('T26c: category and type are separate options at their own grain', () => {
+    // "every beam" and "every beam of this section" are different questions;
+    // the menu answers both rather than picking one.
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [
+        {
+          modelId: 'A',
+          expressId: 1,
+          ifcClass: 'IfcBeam',
+          ifcTypeCode: 7,
+          objectType: 'SHS (EN 10210-2):SHS100x6.3',
+        },
+      ],
+    };
+    const actions = makeActions();
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, actions)!;
+
+    const category = items.find((i) => /this category/.test(i.label ?? ''));
+    const type = items.find((i) => /this type/.test(i.label ?? ''));
+    expect(category!.label).toBe('Select all of this category · IfcBeam');
+    expect(type!.label).toBe('Select all of this type · SHS (EN 10210-2):SHS100x6.3');
+
+    type!.onClick!();
+    expect(actions.calls).toEqual(['selectSimilarType']);
+  });
+
+  it('T26d: no type option when the element declares no ObjectType', () => {
+    // A row that could only ever find nothing is worse than no row.
+    const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this type/.test(i.label ?? ''))).toBe(false);
+  });
+
+  it('T26e: a long type name is elided so the menu keeps its width', () => {
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [
+        {
+          modelId: 'A',
+          expressId: 1,
+          ifcClass: 'IfcBeam',
+          ifcTypeCode: 7,
+          objectType: 'Dekkeelement skrå 280 med lang beskrivelse:2345x280',
+        },
+      ],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    const type = items.find((i) => /this type/.test(i.label ?? ''))!;
+    expect(type.label!.endsWith('…')).toBe(true);
+    expect(type.label!.length).toBeLessThan(70);
   });
 
   it('T27: MULTI selection → header "N elements"; same verbs, but NO class preset', () => {
@@ -226,7 +279,7 @@ describe('buildContextMenuItems', () => {
     expect(verbs).toEqual(
       expect.arrayContaining(['Hide', 'Isolate', 'Show all', 'Make transparent', 'Make opaque']),
     );
-    expect(verbs.some((v) => /^select all /i.test(v))).toBe(false);
+    expect(verbs.some((v) => /this category|this type/.test(v))).toBe(false);
   });
 
   it('T28: "Show all" disabled iff nothing hidden; "Make opaque" disabled iff nothing transparent', () => {

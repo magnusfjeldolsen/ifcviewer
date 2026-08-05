@@ -9,9 +9,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   canSelectSimilar,
-  classQuery,
+  categoryMenuLabel,
+  categoryQuery,
   describeSimilarResult,
   identitiesFromIds,
+  typeMenuLabel,
+  typeQuery,
   valueQuery,
 } from '../src/inspector/selectSimilar';
 import type { ElementIdentity, PropertyValue } from '../src/inspector/types';
@@ -59,9 +62,9 @@ describe('canSelectSimilar', () => {
   });
 });
 
-describe('classQuery', () => {
+describe('categoryQuery', () => {
   it('scopes to the element class and model', () => {
-    const q = classQuery(identity());
+    const q = categoryQuery(identity());
     expect(q).toMatchObject({
       kind: 'class',
       modelId: 'model-a',
@@ -72,7 +75,7 @@ describe('classQuery', () => {
   });
 
   it('degrades to a readable label when the class is unknown', () => {
-    expect(classQuery(identity({ ifcClass: '' })).label).toBe('all elements');
+    expect(categoryQuery(identity({ ifcClass: '' })).label).toBe('all elements');
   });
 
   it('narrows by PredefinedType when the element has one', () => {
@@ -80,7 +83,7 @@ describe('classQuery', () => {
     // separated only by PredefinedType. Selecting a foundation and getting
     // every floor slab in the model is not what "select all of this kind"
     // means to anyone.
-    const q = classQuery(identity({ ifcClass: 'IfcSlab', predefinedType: 'BASESLAB' }));
+    const q = categoryQuery(identity({ ifcClass: 'IfcSlab', predefinedType: 'BASESLAB' }));
     expect(q.kind).toBe('value');
     if (q.kind === 'value') {
       expect(q.selector.path).toBe('Identity.PredefinedType');
@@ -94,6 +97,56 @@ describe('classQuery', () => {
       expect(q.ifcTypeCode).toBe(1234);
     }
     expect(q.label).toBe('all IfcSlab · BASESLAB');
+  });
+});
+
+describe('typeQuery', () => {
+  // Measured on RIB.ifc: ObjectType groups the 121 beams into the same 8
+  // buckets as the linked IfcTypeObject, with the same counts.
+  const beam = identity({ objectType: 'SHS (EN 10210-2):SHS100x6.3' });
+
+  it('matches the authoring-tool type, scoped to the class', () => {
+    const q = typeQuery(beam)!;
+    expect(q.kind).toBe('value');
+    if (q.kind === 'value') {
+      expect(q.selector.path).toBe('Identity.ObjectType');
+      expect(q.value).toEqual({
+        kind: 'single',
+        value: 'SHS (EN 10210-2):SHS100x6.3',
+        raw: { typeCode: 0, value: 'SHS (EN 10210-2):SHS100x6.3' },
+      });
+      expect(q.ifcTypeCode).toBe(1234);
+    }
+  });
+
+  it('is not offered when the element declares no ObjectType', () => {
+    // An option that can only ever find nothing is worse than no option.
+    expect(typeQuery(identity())).toBeNull();
+    expect(typeQuery(identity({ objectType: '' }))).toBeNull();
+  });
+
+  it('is a strictly narrower question than the category', () => {
+    const cat = categoryQuery(beam);
+    const type = typeQuery(beam)!;
+    expect(cat.label).toBe('all IfcBeam');
+    expect(type.label).toBe('all SHS (EN 10210-2):SHS100x6.3');
+  });
+});
+
+describe('menu labels', () => {
+  it('name the value so the row says what it will do', () => {
+    const beam = identity({ objectType: 'SHS100x6.3' });
+    expect(categoryMenuLabel(beam)).toBe('Select all of this category · IfcBeam');
+    expect(typeMenuLabel(beam)).toBe('Select all of this type · SHS100x6.3');
+  });
+
+  it('include PredefinedType in the category when present', () => {
+    const slab = identity({ ifcClass: 'IfcSlab', predefinedType: 'BASESLAB' });
+    expect(categoryMenuLabel(slab)).toBe('Select all of this category · IfcSlab · BASESLAB');
+  });
+
+  it('return null for the type row when there is no type', () => {
+    expect(typeMenuLabel(identity())).toBeNull();
   });
 });
 
@@ -132,7 +185,7 @@ describe('identitiesFromIds', () => {
   it('carries the queried class onto every match', () => {
     // The matches all came from that class, so unlike the marquee path we
     // don't have to leave class/type blank for a later fetch to fill in.
-    const ids = identitiesFromIds(classQuery(identity()), [1, 2, 3]);
+    const ids = identitiesFromIds(categoryQuery(identity()), [1, 2, 3]);
     expect(ids).toEqual([
       { modelId: 'model-a', expressId: 1, ifcClass: 'IfcBeam', ifcTypeCode: 1234 },
       { modelId: 'model-a', expressId: 2, ifcClass: 'IfcBeam', ifcTypeCode: 1234 },
@@ -141,7 +194,7 @@ describe('identitiesFromIds', () => {
   });
 
   it('maps an empty result to an empty selection', () => {
-    expect(identitiesFromIds(classQuery(identity()), [])).toEqual([]);
+    expect(identitiesFromIds(categoryQuery(identity()), [])).toEqual([]);
   });
 });
 

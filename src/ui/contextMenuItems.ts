@@ -11,6 +11,7 @@
  */
 
 import type { MenuItem } from './ContextMenu';
+import { categoryMenuLabel, typeMenuLabel } from '../inspector/selectSimilar';
 import type { ElementIdentity, SelectionState } from '../inspector/types';
 
 // Re-export so callers have a single import site for the menu's opacity
@@ -31,16 +32,21 @@ export interface ContextMenuActions {
   clearTransparency: () => void;
   addToBasket: () => void;
   /**
-   * "Select all of this element's class" — the one select-similar preset that
-   * needs no property read. Only offered for a single-element selection: a
-   * multi-selection may span classes, so "this class" has no referent.
+   * Select similar at two grains — "every beam" vs "every beam of this
+   * section". Both are offered only for a single-element selection: a
+   * multi-selection may span categories and types, so neither has a referent.
+   *
+   * `selectSimilarType` is skipped entirely when the element declares no
+   * ObjectType (see `typeMenuLabel`), rather than shown as a row that can
+   * only ever find nothing.
    *
    * The by-parameter form lives on the inspector's property rows, where the
    * value you're selecting by is the thing you're already looking at. A menu
    * submenu listing every parameter is a later slice — `ContextMenu` has no
    * flyout rendering yet.
    */
-  selectSimilarClass: () => void;
+  selectSimilarCategory: () => void;
+  selectSimilarType: () => void;
 }
 
 export interface AppearanceFlags {
@@ -88,11 +94,15 @@ export function buildContextMenuItems(
 
   // Select similar — single-element only (see ContextMenuActions).
   if (state.kind === 'single') {
-    const cls = state.identities[0].ifcClass;
+    const identity = state.identities[0];
     items.push({
-      label: cls ? `Select all ${cls}` : 'Select all of this class',
-      onClick: actions.selectSimilarClass,
+      label: categoryMenuLabel(identity),
+      onClick: actions.selectSimilarCategory,
     });
+    const typeRow = typeMenuLabel(identity);
+    if (typeRow) {
+      items.push({ label: typeRow, onClick: actions.selectSimilarType });
+    }
     items.push({ separator: true });
   }
 

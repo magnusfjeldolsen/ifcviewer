@@ -35,12 +35,14 @@ import { promises as fs, existsSync } from 'node:fs';
 // @ts-expect-error -- node:path has no bundled types here
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { IfcAPI } from 'web-ifc';
+import { IfcAPI, IFCBEAM } from 'web-ifc';
 import {
   fetchElementProperties,
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
 import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { elementMatches } from '../src/inspector/matchValue';
+import { typeQuery } from '../src/inspector/selectSimilar';
 
 // @ts-expect-error -- `process` is a Node global, no bundled types in this project
 const IFC_PATH = path.resolve(process.cwd(), 'assets/ifcs/RIB.ifc');
@@ -117,4 +119,74 @@ describe.skipIf(!FILE_PRESENT)('fetchElementProperties (RIB.ifc regression)', ()
       api.CloseModel(modelID);
     }
   }, 30_000);
+});
+
+/**
+ * End-to-end regression for select-similar against the real file.
+ *
+ * The unit tests mock web-ifc, which is exactly why two select-similar bugs
+ * reached manual testing: `GetTypeCodeFromName` hashing instead of looking up,
+ * and Revit's element id riding along in `Name`. Both were invisible to a mock
+ * and obvious against the actual model. This test exercises the real chain —
+ * enumerate candidates, normalize each one, run the predicate — and pins the
+ * counts measured on RIB.ifc.
+ */
+describe.skipIf(!FILE_PRESENT)('select similar (RIB.ifc end-to-end)', () => {
+  /** Beam counts measured on the file: 121 beams across 8 ObjectTypes. */
+  const TOTAL_BEAMS = 121;
+  const SAMPLE_TYPE = 'SHS (EN 10210-2):SHS100x6.3';
+  const SAMPLE_TYPE_COUNT = 30;
+
+  it('matches by type without matching the whole category', async () => {
+    const api = new IfcAPI();
+    await api.Init();
+    const buf = await fs.readFile(IFC_PATH);
+    const modelID = api.OpenModel(new Uint8Array(buf));
+
+    try {
+      const propApi = api as unknown as PropertyApi;
+      const unitTable = await computeUnitTable(
+        api as unknown as Parameters<typeof computeUnitTable>[0],
+        modelID,
+      );
+
+      // Enumerate exactly as the worker does — by NUMERIC type code. Passing
+      // the class name here would silently target the wrong type.
+      const vec = api.GetLineIDsWithType(modelID, IFCBEAM, false);
+      const beamIds: number[] = [];
+      for (let i = 0; i < vec.size(); i++) beamIds.push(vec.get(i));
+      expect(beamIds.length).toBe(TOTAL_BEAMS);
+
+      const allProps = [];
+      for (const id of beamIds) {
+        allProps.push(await fetchElementProperties(propApi, modelID, MODEL_UUID, id, unitTable));
+      }
+
+      // A beam of the sample type drives the query, exactly as the UI does.
+      const source = allProps.find((p) => p.identity.objectType === SAMPLE_TYPE);
+      expect(source, `a beam with ObjectType ${SAMPLE_TYPE}`).toBeDefined();
+
+      const typeQ = typeQuery(source!.identity)!;
+      expect(typeQ).not.toBeNull();
+      const matches = allProps.filter((p) =>
+        elementMatches(p, typeQ.kind === 'value' ? typeQ.selector : { path: '' },
+          typeQ.kind === 'value' ? typeQ.value : { kind: 'varies' }),
+      );
+
+      // The point of having two grains: type is strictly narrower than
+      // category. If these ever converge, the type option is pointless.
+      expect(matches.length).toBe(SAMPLE_TYPE_COUNT);
+      expect(matches.length).toBeLessThan(TOTAL_BEAMS);
+
+      // Revit's element id must not ride along in Name, or every element is
+      // unique and matching by Name finds only its own source.
+      const names = new Set(allProps.map((p) => p.identity.name));
+      expect(
+        names.size,
+        `Name should group beams by type (~8 distinct), got ${names.size} of ${TOTAL_BEAMS}`,
+      ).toBeLessThan(TOTAL_BEAMS);
+    } finally {
+      api.CloseModel(modelID);
+    }
+  }, 120_000);
 });

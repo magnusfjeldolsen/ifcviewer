@@ -66,21 +66,60 @@ export function canSelectSimilar(row: Pick<PropertyFlatRow, 'path' | 'rawValue'>
 }
 
 /**
- * "Select every element like this one, by kind."
+ * Two grains of "like this one", because they answer different questions:
  *
- * When the element has a `PredefinedType` this narrows to it, because the
- * IFC class alone is coarser than what people mean by "the same kind of
- * thing": a Revit floor and a Revit structural foundation are BOTH IfcSlab,
- * separated only by PredefinedType (FLOOR vs BASESLAB). Selecting a
- * foundation and getting every floor slab in the model is not the ask. With
- * PredefinedType present this becomes a value match on `Identity.
- * PredefinedType`, still scoped to the class, so the extra precision costs
- * one property read per candidate of that class and nothing more.
+ *  - **category** — every beam in the model (IfcBeam, 121 of them in
+ *    RIB.ifc). The IFC class, narrowed by `PredefinedType` where the element
+ *    has one, since class alone is coarser than a Revit category: a floor and
+ *    a structural foundation are BOTH IfcSlab, split only by FLOOR vs
+ *    BASESLAB.
+ *  - **type** — every beam of this section (SHS100x6.3, 30 of them). The
+ *    authoring-tool family type, carried in `ObjectType`.
  *
- * Without a PredefinedType, the plain class enumeration stands.
+ * Measured on `assets/ifcs/RIB.ifc`: `ObjectType` and the linked
+ * `IfcTypeObject.Name` group the 121 beams into the same 8 buckets with the
+ * same counts, so `ObjectType` is a faithful stand-in for the type object and
+ * needs no extra worker round-trip — it is already an identity field and a
+ * flat row. An exporter that leaves `ObjectType` empty gets no type option
+ * rather than a wrong one.
  */
-export function classQuery(identity: ElementIdentity): SimilarQuery {
+
+/** Longest property value shown inline in a menu label before eliding. */
+const MENU_VALUE_MAX = 40;
+
+function elide(s: string): string {
+  return s.length <= MENU_VALUE_MAX ? s : `${s.slice(0, MENU_VALUE_MAX - 1)}…`;
+}
+
+/** "IfcSlab · BASESLAB", or just "IfcBeam" when there's no PredefinedType. */
+export function categoryLabel(identity: ElementIdentity): string {
   const cls = identity.ifcClass || 'elements';
+  return identity.predefinedType ? `${cls} · ${identity.predefinedType}` : cls;
+}
+
+/** The element's authoring-tool type, or null when it doesn't declare one. */
+export function typeLabel(identity: ElementIdentity): string | null {
+  return identity.objectType ? identity.objectType : null;
+}
+
+/** Menu row text for the category option. */
+export function categoryMenuLabel(identity: ElementIdentity): string {
+  return `Select all of this category · ${elide(categoryLabel(identity))}`;
+}
+
+/** Menu row text for the type option, or null when there's no type to offer. */
+export function typeMenuLabel(identity: ElementIdentity): string | null {
+  const label = typeLabel(identity);
+  return label === null ? null : `Select all of this type · ${elide(label)}`;
+}
+
+/**
+ * "Select every element of this element's category." With a PredefinedType
+ * this is a value match on `Identity.PredefinedType` scoped to the class, so
+ * the extra precision reuses the existing predicate rather than adding a
+ * second mechanism; without one, the plain class enumeration stands.
+ */
+export function categoryQuery(identity: ElementIdentity): SimilarQuery {
   const predefined = identity.predefinedType;
   if (predefined) {
     return {
@@ -90,7 +129,7 @@ export function classQuery(identity: ElementIdentity): SimilarQuery {
       ifcTypeCode: identity.ifcTypeCode,
       selector: { path: 'Identity.PredefinedType' },
       value: { kind: 'single', value: predefined, raw: { typeCode: 0, value: predefined } },
-      label: `all ${cls} · ${predefined}`,
+      label: `all ${categoryLabel(identity)}`,
     };
   }
   return {
@@ -98,7 +137,30 @@ export function classQuery(identity: ElementIdentity): SimilarQuery {
     modelId: identity.modelId,
     ifcClass: identity.ifcClass,
     ifcTypeCode: identity.ifcTypeCode,
-    label: `all ${cls}`,
+    label: `all ${categoryLabel(identity)}`,
+  };
+}
+
+/**
+ * "Select every element of this element's authoring-tool type." Null when the
+ * element declares no `ObjectType` — there is nothing to match on, and an
+ * option that always finds nothing is worse than no option.
+ *
+ * Scoped to the element's own class: two different classes sharing an
+ * ObjectType string would otherwise be conflated, and the class scope also
+ * keeps the candidate set small.
+ */
+export function typeQuery(identity: ElementIdentity): SimilarQuery | null {
+  const objectType = identity.objectType;
+  if (!objectType) return null;
+  return {
+    kind: 'value',
+    modelId: identity.modelId,
+    ifcClass: identity.ifcClass,
+    ifcTypeCode: identity.ifcTypeCode,
+    selector: { path: 'Identity.ObjectType' },
+    value: { kind: 'single', value: objectType, raw: { typeCode: 0, value: objectType } },
+    label: `all ${objectType}`,
   };
 }
 
