@@ -13,6 +13,7 @@ import {
   categoryQuery,
   describeSimilarResult,
   identitiesFromIds,
+  typeLabel,
   typeMenuLabel,
   typeQuery,
   valueQuery,
@@ -101,15 +102,13 @@ describe('categoryQuery', () => {
 });
 
 describe('typeQuery', () => {
-  // Measured on RIB.ifc: ObjectType groups the 121 beams into the same 8
-  // buckets as the linked IfcTypeObject, with the same counts.
-  const beam = identity({ objectType: 'SHS (EN 10210-2):SHS100x6.3' });
+  const beam = identity({ typeName: 'SHS (EN 10210-2):SHS100x6.3' });
 
-  it('matches the authoring-tool type, scoped to the class', () => {
+  it('matches the linked type object, scoped to the class', () => {
     const q = typeQuery(beam)!;
     expect(q.kind).toBe('value');
     if (q.kind === 'value') {
-      expect(q.selector.path).toBe('Identity.ObjectType');
+      expect(q.selector.path).toBe('Identity.Type');
       expect(q.value).toEqual({
         kind: 'single',
         value: 'SHS (EN 10210-2):SHS100x6.3',
@@ -119,10 +118,24 @@ describe('typeQuery', () => {
     }
   });
 
-  it('is not offered when the element declares no ObjectType', () => {
+  it('prefers the type object over ObjectType when both exist', () => {
+    // RIB.ifc carries both and they agree; Snowdon carries only the type
+    // object. Preferring it means one path works everywhere measured.
+    const both = identity({ typeName: 'FromTypeObject', objectType: 'FromObjectType' });
+    const q = typeQuery(both)!;
+    expect(q.kind === 'value' && q.selector.path).toBe('Identity.Type');
+    expect(typeLabel(both)).toBe('FromTypeObject');
+  });
+
+  it('falls back to ObjectType when there is no type object', () => {
+    const q = typeQuery(identity({ objectType: 'FromObjectType' }))!;
+    expect(q.kind === 'value' && q.selector.path).toBe('Identity.ObjectType');
+  });
+
+  it('is not offered when the element declares neither', () => {
     // An option that can only ever find nothing is worse than no option.
     expect(typeQuery(identity())).toBeNull();
-    expect(typeQuery(identity({ objectType: '' }))).toBeNull();
+    expect(typeQuery(identity({ objectType: '', typeName: '' }))).toBeNull();
   });
 
   it('is a strictly narrower question than the category', () => {
@@ -135,7 +148,7 @@ describe('typeQuery', () => {
 
 describe('menu labels', () => {
   it('name the value so the row says what it will do', () => {
-    const beam = identity({ objectType: 'SHS100x6.3' });
+    const beam = identity({ typeName: 'SHS100x6.3' });
     expect(categoryMenuLabel(beam)).toBe('Select all of this category · IfcBeam');
     expect(typeMenuLabel(beam)).toBe('Select all of this type · SHS100x6.3');
   });

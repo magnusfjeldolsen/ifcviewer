@@ -74,14 +74,13 @@ export function canSelectSimilar(row: Pick<PropertyFlatRow, 'path' | 'rawValue'>
  *    a structural foundation are BOTH IfcSlab, split only by FLOOR vs
  *    BASESLAB.
  *  - **type** — every beam of this section (SHS100x6.3, 30 of them). The
- *    authoring-tool family type, carried in `ObjectType`.
+ *    authoring-tool family type, from the linked `IfcTypeObject`.
  *
- * Measured on `assets/ifcs/RIB.ifc`: `ObjectType` and the linked
- * `IfcTypeObject.Name` group the 121 beams into the same 8 buckets with the
- * same counts, so `ObjectType` is a faithful stand-in for the type object and
- * needs no extra worker round-trip — it is already an identity field and a
- * flat row. An exporter that leaves `ObjectType` empty gets no type option
- * rather than a wrong one.
+ * Measured across the sample models: RIB.ifc carries both `ObjectType` and a
+ * type object on all 121 beams, grouping them identically into 8 buckets;
+ * Snowdon Towers carries a type object on all 54 columns and all 917 beams
+ * and `ObjectType` on NONE of them. So the type object is the discriminator
+ * and `ObjectType` is the fallback — see `typeSelector`.
  */
 
 /** Longest property value shown inline in a menu label before eliding. */
@@ -97,9 +96,27 @@ export function categoryLabel(identity: ElementIdentity): string {
   return identity.predefinedType ? `${cls} · ${identity.predefinedType}` : cls;
 }
 
+/**
+ * How to match "the same type", resolved against what this element actually
+ * carries. Null when it carries neither.
+ *
+ * The linked `IfcTypeObject` is preferred because it is the only
+ * discriminator present in every model measured: Snowdon Towers has a type
+ * object on all 54 columns and all 917 beams but `ObjectType` on none of
+ * them, while RIB.ifc has both (agreeing exactly). `ObjectType` remains as a
+ * fallback for exports that carry it without a type object.
+ */
+export function typeSelector(
+  identity: ElementIdentity,
+): { path: string; value: string } | null {
+  if (identity.typeName) return { path: 'Identity.Type', value: identity.typeName };
+  if (identity.objectType) return { path: 'Identity.ObjectType', value: identity.objectType };
+  return null;
+}
+
 /** The element's authoring-tool type, or null when it doesn't declare one. */
 export function typeLabel(identity: ElementIdentity): string | null {
-  return identity.objectType ? identity.objectType : null;
+  return typeSelector(identity)?.value ?? null;
 }
 
 /** Menu row text for the category option. */
@@ -151,16 +168,16 @@ export function categoryQuery(identity: ElementIdentity): SimilarQuery {
  * keeps the candidate set small.
  */
 export function typeQuery(identity: ElementIdentity): SimilarQuery | null {
-  const objectType = identity.objectType;
-  if (!objectType) return null;
+  const sel = typeSelector(identity);
+  if (!sel) return null;
   return {
     kind: 'value',
     modelId: identity.modelId,
     ifcClass: identity.ifcClass,
     ifcTypeCode: identity.ifcTypeCode,
-    selector: { path: 'Identity.ObjectType' },
-    value: { kind: 'single', value: objectType, raw: { typeCode: 0, value: objectType } },
-    label: `all ${objectType}`,
+    selector: { path: sel.path },
+    value: { kind: 'single', value: sel.value, raw: { typeCode: 0, value: sel.value } },
+    label: `all ${sel.value}`,
   };
 }
 

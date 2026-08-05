@@ -39,6 +39,7 @@ import {
   typeQuery,
   type SimilarQuery,
 } from '../inspector/selectSimilar';
+import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
@@ -946,11 +947,24 @@ export class App {
       return;
     }
 
-    // Build items purely from the current selection + appearance state. Each
-    // verb dispatches to the appearance/basket collaborator on the CURRENT
-    // SELECTION scope (captured below); the element under the cursor is never
-    // read.
-    const state = this.selectionManager.getState();
+    // Coordinates must be read before the await below — the event object is
+    // not safe to touch once the handler has yielded.
+    void this.openContextMenu(e.clientX, e.clientY);
+  }
+
+  /**
+   * Resolve the selection's full identity, then open the menu for it.
+   *
+   * `SelectionManager` stores PLACEHOLDER identities — `ifcClass: ''`,
+   * `ifcTypeCode: 0` — because it only knows what was clicked, not what it
+   * is. Building the menu straight off those produced a category query for
+   * class "" and type code 0, which enumerated nothing ("No elements match
+   * all elements") and could never offer a type row. The repository memo
+   * holds the enriched identity for anything the inspector has already
+   * fetched, so this is normally instant.
+   */
+  private async openContextMenu(x: number, y: number): Promise<void> {
+    const state = await this.enrichSelection(this.selectionManager.getState());
     const items = buildContextMenuItems(
       state,
       {
@@ -980,7 +994,27 @@ export class App {
     // No selection and no active recovery action → no menu.
     if (!items || items.length === 0) return;
 
-    this.contextMenu.open(e.clientX, e.clientY, items);
+    this.contextMenu.open(x, y, items);
+  }
+
+  /**
+   * Fill in a single selection's real class / type code / type name from the
+   * property repository. Multi and empty selections pass through untouched —
+   * the menu's per-element verbs are single-selection only.
+   *
+   * A failed fetch falls back to the placeholder rather than suppressing the
+   * menu: hide / isolate / basket don't need the enrichment, and losing the
+   * whole menu because one property read failed would be worse.
+   */
+  private async enrichSelection(state: SelectionState): Promise<SelectionState> {
+    if (state.kind !== 'single') return state;
+    const identity = state.identities[0];
+    try {
+      const props = await this.propertyRepository.get(identity.modelId, identity.expressId);
+      return { kind: 'single', identities: [{ ...identity, ...props.identity }] };
+    } catch {
+      return state;
+    }
   }
 
   // ── Appearance actions (D) ─────────────────────────────────

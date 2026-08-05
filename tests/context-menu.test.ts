@@ -376,16 +376,32 @@ describe('App contextmenu wiring (T32 — source assertions)', () => {
 
   it('the contextmenu handler does NOT call any selection-mutating method (no raycast, no select-on-right-click)', () => {
     // Per CM2: the menu reads SelectionManager.getState() only; it never
-    // applies/clears selection or raycasts on right-click.
+    // applies/clears selection or raycasts on right-click. The handler
+    // delegates to openContextMenu (which awaits the enriched identity), so
+    // the invariant spans both.
     const handler = appSrc.match(/private onContextMenu\([\s\S]*?\n {2}\}/);
+    const opener = appSrc.match(/private async openContextMenu\([\s\S]*?\n {2}\}/);
     expect(handler).not.toBeNull();
-    const body = handler![0];
+    expect(opener).not.toBeNull();
+    const body = handler![0] + opener![0];
     expect(body).not.toMatch(/\.apply\(/);
     expect(body).not.toMatch(/\.applyMany\(/);
     expect(body).not.toMatch(/\.selectExactly\(/);
     expect(body).not.toMatch(/raycast/i);
     // It DOES read the current selection state to build the menu.
     expect(body).toMatch(/getState\(\)/);
+  });
+
+  it('the menu is built from an ENRICHED identity, not the selection placeholder', () => {
+    // SelectionManager stores ifcClass:'' / ifcTypeCode:0 placeholders. Built
+    // straight off those, "select all of this category" enumerated type code
+    // 0 and matched nothing ("No elements match all elements"), and the type
+    // row could never appear.
+    const opener = appSrc.match(/private async openContextMenu\([\s\S]*?\n {2}\}/);
+    expect(opener![0]).toMatch(/enrichSelection\(/);
+    const enrich = appSrc.match(/private async enrichSelection\([\s\S]*?\n {2}\}/);
+    expect(enrich).not.toBeNull();
+    expect(enrich![0]).toMatch(/propertyRepository\.get\(/);
   });
 
   it('the contextmenu handler bails via the suppression guard', () => {

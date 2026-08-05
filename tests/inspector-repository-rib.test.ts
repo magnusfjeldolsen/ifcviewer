@@ -35,7 +35,7 @@ import { promises as fs, existsSync } from 'node:fs';
 // @ts-expect-error -- node:path has no bundled types here
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { IfcAPI, IFCBEAM } from 'web-ifc';
+import { IfcAPI, IFCBEAM, IFCCOLUMN } from 'web-ifc';
 import {
   fetchElementProperties,
   type PropertyApi,
@@ -178,6 +178,10 @@ describe.skipIf(!FILE_PRESENT)('select similar (RIB.ifc end-to-end)', () => {
       expect(matches.length).toBe(SAMPLE_TYPE_COUNT);
       expect(matches.length).toBeLessThan(TOTAL_BEAMS);
 
+      // The type came from the linked type object, which is the only
+      // discriminator present in every sample model.
+      expect(source!.identity.typeName).toBe(SAMPLE_TYPE);
+
       // Revit's element id must not ride along in Name, or every element is
       // unique and matching by Name finds only its own source.
       const names = new Set(allProps.map((p) => p.identity.name));
@@ -189,4 +193,68 @@ describe.skipIf(!FILE_PRESENT)('select similar (RIB.ifc end-to-end)', () => {
       api.CloseModel(modelID);
     }
   }, 120_000);
+});
+
+/**
+ * The same end-to-end path on a model that carries NO ObjectType.
+ *
+ * Snowdon Towers has a type object on all 54 columns and all 917 beams but
+ * ObjectType on none of them — the shape that broke select-similar on the
+ * user's 5265.ifc. RIB.ifc alone would not have caught it, which is the whole
+ * reason this second fixture is here.
+ */
+// @ts-expect-error -- `process` is a Node global, no bundled types in this project
+const SNOWDON_PATH = path.resolve(process.cwd(), 'assets/ifcs/Snowdon Towers Sample Structural.ifc');
+const SNOWDON_PRESENT = existsSync(SNOWDON_PATH);
+
+describe.skipIf(!SNOWDON_PRESENT)('select similar (Snowdon Towers — no ObjectType)', () => {
+  it('resolves the type from the type object when ObjectType is absent', async () => {
+    const api = new IfcAPI();
+    await api.Init();
+    const buf = await fs.readFile(SNOWDON_PATH);
+    const modelID = api.OpenModel(new Uint8Array(buf));
+
+    try {
+      const propApi = api as unknown as PropertyApi;
+      const unitTable = await computeUnitTable(
+        api as unknown as Parameters<typeof computeUnitTable>[0],
+        modelID,
+      );
+
+      const vec = api.GetLineIDsWithType(modelID, IFCCOLUMN, false);
+      const ids: number[] = [];
+      for (let i = 0; i < vec.size(); i++) ids.push(vec.get(i));
+      expect(ids.length).toBeGreaterThan(0);
+
+      const all = [];
+      for (const id of ids) {
+        all.push(await fetchElementProperties(propApi, modelID, MODEL_UUID, id, unitTable));
+      }
+
+      // The premise: this export really does omit ObjectType.
+      expect(all.every((p) => !p.identity.objectType)).toBe(true);
+      // ...and the type object really does fill the gap.
+      expect(all.every((p) => !!p.identity.typeName)).toBe(true);
+
+      const source = all[0];
+      const q = typeQuery(source.identity)!;
+      expect(q, 'a type query despite no ObjectType').not.toBeNull();
+      expect(q.kind === 'value' && q.selector.path).toBe('Identity.Type');
+
+      const matches = all.filter((p) =>
+        elementMatches(p, q.kind === 'value' ? q.selector : { path: '' },
+          q.kind === 'value' ? q.value : { kind: 'varies' }),
+      );
+      // Every match shares the source's type, and the source matches itself.
+      expect(matches.length).toBeGreaterThan(0);
+      expect(matches.every((p) => p.identity.typeName === source.identity.typeName)).toBe(true);
+      // Types partition the columns — matching all of them would mean the
+      // discriminator isn't discriminating.
+      const distinctTypes = new Set(all.map((p) => p.identity.typeName));
+      expect(distinctTypes.size).toBeGreaterThan(1);
+      expect(matches.length).toBeLessThan(all.length);
+    } finally {
+      api.CloseModel(modelID);
+    }
+  }, 180_000);
 });

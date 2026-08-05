@@ -110,13 +110,16 @@ export async function fetchElementProperties(
   expressId: number,
   unitTable: UnitTable,
 ): Promise<ElementProperties> {
-  const [item, rawGroups, materialsRaw] = await Promise.all([
+  const [item, groups, materialsRaw] = await Promise.all([
     api.properties.getItemProperties(webIfcId, expressId, false, false),
     fetchPropertyGroups(api, webIfcId, expressId),
     api.properties.getMaterialsProperties(webIfcId, expressId, true, true),
   ]);
+  const { rawGroups, typeName } = groups;
 
-  const identity = buildIdentity(modelId, expressId, item);
+  // The type object is resolved for its psets anyway; carrying its name onto
+  // the identity costs nothing and is what "select all of this type" matches.
+  const identity = { ...buildIdentity(modelId, expressId, item), typeName };
   const direct = buildDirect(identity, item);
 
   const { psets, qtos } = buildPsetAndQtoGroups(rawGroups, unitTable);
@@ -160,7 +163,7 @@ async function fetchPropertyGroups(
   api: PropertyApi,
   webIfcId: number,
   expressId: number,
-): Promise<RawPropertyGroup[]> {
+): Promise<{ rawGroups: RawPropertyGroup[]; typeName: string | undefined }> {
   // Branch 1: instance-level (walks IfcRelDefinesByProperties).
   const instanceRaw = await api.properties.getPropertySets(
     webIfcId,
@@ -181,8 +184,16 @@ async function fetchPropertyGroups(
   }
 
   const typeRaw: unknown[] = [];
+  let typeName: string | undefined;
   for (const t of typeObjects) {
     if (!isObj(t)) continue;
+    // First type object wins — an element has one type in practice, and a
+    // deterministic pick beats an arbitrary merge.
+    if (typeName === undefined) {
+      const n = (t as { Name?: unknown }).Name;
+      const resolved = isObj(n) ? (n as { value?: unknown }).value : n;
+      if (typeof resolved === 'string' && resolved !== '') typeName = resolved;
+    }
     const has = t.HasPropertySets;
     if (!Array.isArray(has)) continue;
     for (const ref of has) {
@@ -207,7 +218,7 @@ async function fetchPropertyGroups(
   for (const raw of typeRaw) {
     if (isObj(raw)) out.push({ raw, inheritedFromType: true });
   }
-  return out;
+  return { rawGroups: out, typeName };
 }
 
 /** Split a merged list of raw psets/qtos into our typed groups, tagging type-inherited ones. */

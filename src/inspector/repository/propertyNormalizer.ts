@@ -330,6 +330,9 @@ export function buildDirect(identity: ElementIdentity, item: unknown): PropertyN
   };
   push('Name', identity.name);
   push('GlobalId', identity.globalId);
+  // The family type. Shown as its own row so it can be read directly and so
+  // "select similar" has a path to match on (`Identity.Type`).
+  push('Type', identity.typeName);
   push('ObjectType', identity.objectType);
   push('Tag', identity.tag);
   push('PredefinedType', identity.predefinedType);
