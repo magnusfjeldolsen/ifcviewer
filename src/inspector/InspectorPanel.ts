@@ -28,8 +28,10 @@
 import type {
   ElementIdentity,
   ElementProperties,
+  PropertyValue,
   SelectionState,
 } from './types';
+import { valueQuery, type SimilarQuery } from './selectSimilar';
 import {
   BulkRequestCancelled,
   type ElementPropertyRepository,
@@ -75,6 +77,13 @@ export type ViewMode = 'tree' | 'flat';
 
 export interface InspectorPanelDeps {
   repository: ElementPropertyRepository;
+  /**
+   * Run a "select similar" query built from a property row. Wiring this in
+   * turns on the per-row "⌕" affordance (single-element selections only).
+   * Omitted → no affordance, which is how every existing test fixture and
+   * any consumer that doesn't own a SelectionManager behaves.
+   */
+  onSelectSimilar?: (query: SimilarQuery) => void;
   /**
    * Called when the panel needs to show a model-name row in the header
    * (i.e. when more than one model is loaded). Returns undefined if no
@@ -724,6 +733,7 @@ export class InspectorPanel {
       },
       formatVariesTooltip: (path) => this.formatVariesTooltip(path),
       hasCurrentProps: () => this.currentProps !== null,
+      onSelectSimilar: this.similarHandler(),
     };
   }
 
@@ -744,7 +754,65 @@ export class InspectorPanel {
       setDebounceTimer: (handle) => {
         this.filterDebounce = handle;
       },
+      onSelectSimilar: this.similarHandler(),
     };
+  }
+
+  /**
+   * The row-level "select similar" handler, or undefined when the affordance
+   * shouldn't be offered.
+   *
+   * Works for a single element AND for a multi-selection. On a multi-select
+   * the rendered props are a synthetic intersection, but a row that survived
+   * it with a concrete value (not `varies`) describes a value the whole
+   * selection genuinely shares — "select everything else with this value" is
+   * exactly as well-defined as it is for one element. Rows that differ across
+   * the selection render as `varies`, which isn't matchable, so they get no
+   * affordance without any extra rule.
+   *
+   * The candidate scope differs: one element scopes to its own type, while a
+   * multi-selection may span types and so searches every product. Marquee
+   * identities carry a placeholder type code of 0, which is why the shared
+   * code is only trusted when every member reports the same non-zero one.
+   */
+  private similarHandler(): ((path: string, value: PropertyValue) => void) | undefined {
+    const run = this.deps.onSelectSimilar;
+    if (!run) return undefined;
+    if (this.render.kind !== 'loaded' && this.render.kind !== 'multi-loaded') return undefined;
+
+    const identity = this.render.props.identity;
+    const scope = { ifcTypeCode: this.sharedTypeCode() };
+
+    return (path, value) => {
+      const row = this.currentProps?.flat.find((r) => r.path === path);
+      const query = valueQuery(
+        identity,
+        {
+          path,
+          name: row?.name ?? path.split('.').pop() ?? path,
+          rawValue: value,
+          displayValue: row?.displayValue ?? '',
+        },
+        scope,
+      );
+      if (query) run(query);
+    };
+  }
+
+  /**
+   * The type code every element in the current render shares, or null when
+   * they don't share one (or it isn't known). Null widens the search to all
+   * products rather than guessing a type.
+   */
+  private sharedTypeCode(): number | null {
+    if (this.render.kind === 'loaded') {
+      return this.render.props.identity.ifcTypeCode || null;
+    }
+    if (this.render.kind !== 'multi-loaded') return null;
+    const codes = this.render.identities.map((i) => i.ifcTypeCode);
+    const first = codes[0];
+    if (!first) return null;
+    return codes.every((c) => c === first) ? first : null;
   }
 
   // ── Copy-to-clipboard with brief visual confirmation ──────

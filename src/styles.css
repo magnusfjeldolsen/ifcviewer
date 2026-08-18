@@ -570,6 +570,35 @@ html, body {
 .inspector-empty,
 .inspector-spinner,
 .inspector-multi-placeholder,
+/* "Select similar" — per-row affordance, revealed on row hover so it doesn't
+   add permanent visual noise to every property. Kept focusable-visible so
+   keyboard users aren't locked out of a hover-only control. */
+.inspector-similar-btn {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: inherit;
+  color: #3b82f6;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.inspector-row:hover .inspector-similar-btn,
+.inspector-flat-row:hover .inspector-similar-btn,
+.inspector-similar-btn:focus-visible {
+  opacity: 1;
+}
+
+.inspector-similar-btn:hover {
+  background: #eff6ff;
+}
+
 /* Past BULK_INTERSECT_GUARD: state the cost, offer to do it anyway. */
 .inspector-multi-guard {
   display: flex;

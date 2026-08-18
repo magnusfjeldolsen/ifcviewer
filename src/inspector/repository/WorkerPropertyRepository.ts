@@ -228,16 +228,16 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     this.parser.disposeModel(modelId);
   }
 
-  async enumerateExpressIds(modelId: string, ifcClass?: string): Promise<number[]> {
+  async enumerateExpressIds(modelId: string, ifcType?: number): Promise<number[]> {
     const reqId = this.nextReqId++;
     const reply = this.trackIds(reqId);
-    this.parser.getWorker().postMessage({ type: 'enumerateIds', reqId, id: modelId, ifcClass });
+    this.parser.getWorker().postMessage({ type: 'enumerateIds', reqId, id: modelId, ifcType });
     return reply;
   }
 
   async findMatching(
     modelId: string,
-    ifcClass: string | null,
+    ifcType: number | null,
     selector: PropertySelector,
     value: PropertyValue,
     onProgress?: (done: number, total: number) => void,
@@ -248,7 +248,7 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       type: 'findMatching',
       reqId,
       id: modelId,
-      ifcClass,
+      ifcType,
       selector,
       value,
     });

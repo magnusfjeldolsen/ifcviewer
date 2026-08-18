@@ -69,14 +69,19 @@ export interface ElementPropertyRepository {
   disposeModel(modelId: string): void;
 
   /**
-   * List the expressIds of one class, or of every product when `ifcClass`
+   * List the expressIds of one IFC type, or of every product when `ifcType`
    * is omitted. Backed by one `GetLineIDsWithType` call in the worker — no
    * property reads, so it stays cheap on large models.
+   *
+   * `ifcType` is the numeric `ElementIdentity.ifcTypeCode`. Names are
+   * deliberately not accepted: web-ifc's `GetTypeCodeFromName` hashes rather
+   * than looks up, so a name API would answer confidently with the wrong
+   * type.
    */
-  enumerateExpressIds(modelId: string, ifcClass?: string): Promise<number[]>;
+  enumerateExpressIds(modelId: string, ifcType?: number): Promise<number[]>;
 
   /**
-   * Find the elements in `ifcClass` (or across every product when null)
+   * Find the elements of `ifcType` (or across every product when null)
    * whose property at `selector.path` equals `value`, and return their
    * expressIds.
    *
@@ -88,7 +93,7 @@ export interface ElementPropertyRepository {
    */
   findMatching(
     modelId: string,
-    ifcClass: string | null,
+    ifcType: number | null,
     selector: PropertySelector,
     value: PropertyValue,
     onProgress?: (done: number, total: number) => void,

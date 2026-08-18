@@ -45,14 +45,20 @@ export type ToWorker =
    */
   | { type: 'intersect'; reqId: number; id: string; expressIds: number[] }
   /**
-   * List the expressIds of one class, or of every product when `ifcClass`
-   * is omitted. Cheap — one `GetLineIDsWithType` call, no property reads.
-   * Replies with `ids`.
+   * List the expressIds of one IFC type, or of every product when
+   * `ifcType` is omitted. Cheap — one `GetLineIDsWithType` call, no
+   * property reads. Replies with `ids`.
+   *
+   * `ifcType` is the NUMERIC type code (`ElementIdentity.ifcTypeCode`), not
+   * a class name. web-ifc's `GetTypeCodeFromName` is a hash, not a lookup —
+   * it returns a plausible non-zero code for any string, including a
+   * mis-cased one, so a name-based API would silently query the wrong type
+   * instead of failing. The numeric code comes straight off the element.
    */
-  | { type: 'enumerateIds'; reqId: number; id: string; ifcClass?: string }
+  | { type: 'enumerateIds'; reqId: number; id: string; ifcType?: number }
   /**
    * Run a value-match predicate over a candidate set in the worker and
-   * reply with the matching expressIds only. `ifcClass` null means "all
+   * reply with the matching expressIds only. `ifcType` null means "all
    * products". The predicate is present-and-equal: a candidate lacking
    * the selector's path is not a match.
    */
@@ -60,7 +66,7 @@ export type ToWorker =
       type: 'findMatching';
       reqId: number;
       id: string;
-      ifcClass: string | null;
+      ifcType: number | null;
       selector: PropertySelector;
       value: PropertyValue;
     }

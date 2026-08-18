@@ -11,6 +11,7 @@
  */
 
 import type { MenuItem } from './ContextMenu';
+import { categoryMenuLabel, sharedSource, typeMenuLabel } from '../inspector/selectSimilar';
 import type { ElementIdentity, SelectionState } from '../inspector/types';
 
 // Re-export so callers have a single import site for the menu's opacity
@@ -21,9 +22,6 @@ export { TRANSPARENCY_OPACITY } from '../viewer/AppearanceManager';
  * Callbacks the menu verbs dispatch to. Each acts on the CURRENT SELECTION
  * scope (the caller closes over the live selection); the menu never targets a
  * hit-tested element. `addToBasket` is M+ (add the selection to the basket).
- *
- * NOTE: "Select similar" is intentionally OMITTED this slice — it depends on
- * the unbuilt bulk-property feature (A). Seam only; do not add it here yet.
  */
 export interface ContextMenuActions {
   hide: () => void;
@@ -33,6 +31,24 @@ export interface ContextMenuActions {
   opaque: () => void;
   clearTransparency: () => void;
   addToBasket: () => void;
+  /**
+   * Select similar at two grains — "every beam" vs "every beam of this
+   * section". Offered for any selection that HAS such a referent: one
+   * element always does, and a multi-selection does whenever its members
+   * agree (see `sharedSource`). Two floors of different types still share a
+   * category, so the category row appears and the type row does not.
+   *
+   * Either row is skipped when the selection declares nothing to match on —
+   * no shared type (see `typeMenuLabel`), or no resolved class at all —
+   * rather than shown as a row that can only ever find nothing.
+   *
+   * The by-parameter form lives on the inspector's property rows, where the
+   * value you're selecting by is the thing you're already looking at. A menu
+   * submenu listing every parameter is a later slice — `ContextMenu` has no
+   * flyout rendering yet.
+   */
+  selectSimilarCategory: () => void;
+  selectSimilarType: () => void;
 }
 
 export interface AppearanceFlags {
@@ -78,7 +94,21 @@ export function buildContextMenuItems(
   items.push({ label: 'Make opaque', onClick: actions.opaque, disabled: !flags.hasTransparent });
   items.push({ separator: true });
 
-  // Basket. ("Select similar ▸" goes here in a future slice — see header note.)
+  // Select similar — whatever the selection shares (see ContextMenuActions).
+  const similar = sharedSource(state.identities);
+  if (similar) {
+    items.push({
+      label: categoryMenuLabel(similar),
+      onClick: actions.selectSimilarCategory,
+    });
+    const typeRow = typeMenuLabel(similar);
+    if (typeRow) {
+      items.push({ label: typeRow, onClick: actions.selectSimilarType });
+    }
+    items.push({ separator: true });
+  }
+
+  // Basket.
   items.push({ label: 'Add to basket (M+)', onClick: actions.addToBasket });
 
   return items;

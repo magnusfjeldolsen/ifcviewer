@@ -227,8 +227,20 @@ describe('ifcWorker — Phase 2 bulk primitives', () => {
     const fn = workerSrc.match(/function candidateIds\([\s\S]*?\n\}/);
     expect(fn).not.toBeNull();
     expect(fn![0]).toMatch(/WebIFC\.IFCPRODUCT/);
-    expect(fn![0]).toMatch(/GetTypeCodeFromName\(ifcClass\)/);
     expect(fn![0]).toMatch(/GetLineIDsWithType\(/);
+  });
+
+  it('never resolves a class NAME to a type code', () => {
+    // web-ifc's GetTypeCodeFromName hashes its argument instead of looking
+    // it up: 'IfcSlab' returns 200263316 while the real IFCSLAB is
+    // 1529196076. It answers confidently for any string, including a
+    // mis-cased or nonexistent class, so there is no error to catch — the
+    // query just quietly targets the wrong type. Callers pass the numeric
+    // ifcTypeCode read off the element instead.
+    //
+    // Matches the CALL form specifically — the source comments name the
+    // function to explain why it must not come back.
+    expect(workerSrc).not.toMatch(/\.GetTypeCodeFromName\(/);
   });
 
   it('findMatching runs the predicate in the worker and posts ids only', () => {

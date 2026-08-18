@@ -155,8 +155,12 @@ describe('ContextMenu component', () => {
 // ── buildContextMenuItems pure helper (T26-T31) ────────────────────────
 
 describe('buildContextMenuItems', () => {
+  // A real numeric class code: select-similar scopes the candidate set by it,
+  // and a 0 means "not resolved yet" (SelectionManager's placeholder), which
+  // deliberately suppresses the similar rows.
+  const IFCWALL = 2391406946;
   function identity(modelId: string, expressId: number): ElementIdentity {
-    return { modelId, expressId, ifcClass: 'IfcWall', ifcTypeCode: 0 };
+    return { modelId, expressId, ifcClass: 'IfcWall', ifcTypeCode: IFCWALL };
   }
   function singleState(): SelectionState {
     return { kind: 'single', identities: [identity('A', 1)] };
@@ -182,6 +186,8 @@ describe('buildContextMenuItems', () => {
       opaque: () => calls.push('opaque'),
       clearTransparency: () => calls.push('clearTransparency'),
       addToBasket: () => calls.push('addToBasket'),
+      selectSimilarCategory: () => calls.push('selectSimilarCategory'),
+      selectSimilarType: () => calls.push('selectSimilarType'),
     };
   }
 
@@ -192,7 +198,7 @@ describe('buildContextMenuItems', () => {
       .map((i) => i.label ?? '');
   }
 
-  it('T26: SINGLE selection → element-line header; verbs Hide, Isolate, Show all, Make transparent, Make opaque, Add to basket (M+); "Select similar" ABSENT', () => {
+  it('T26: SINGLE selection → element-line header; verbs Hide, Isolate, Show all, Make transparent, Make opaque, Select all <class>, Add to basket (M+)', () => {
     const items = buildContextMenuItems(singleState(), { hasHidden: true, hasTransparent: true }, makeActions())!;
     expect(items).not.toBeNull();
     // First item is a header (no onClick).
@@ -204,17 +210,123 @@ describe('buildContextMenuItems', () => {
     expect(verbs).toContain('Make transparent');
     expect(verbs).toContain('Make opaque');
     expect(verbs.some((v) => /add to basket/i.test(v))).toBe(true);
-    expect(verbs.some((v) => /select similar/i.test(v))).toBe(false);
+    // Select-similar's category option, named after the element's own
+    // category so the row says what it will do.
+    expect(verbs.some((v) => /this category · IfcWall/.test(v))).toBe(true);
   });
 
-  it('T27: MULTI selection → header "N elements"; same verb set; still NO "Select similar"', () => {
+  it('T26b: the category option dispatches selectSimilarCategory', () => {
+    const actions = makeActions();
+    const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, actions)!;
+    items.find((i) => /this category/.test(i.label ?? ''))!.onClick!();
+    expect(actions.calls).toEqual(['selectSimilarCategory']);
+  });
+
+  it('T26c: category and type are separate options at their own grain', () => {
+    // "every beam" and "every beam of this section" are different questions;
+    // the menu answers both rather than picking one.
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [
+        {
+          modelId: 'A',
+          expressId: 1,
+          ifcClass: 'IfcBeam',
+          ifcTypeCode: 7,
+          objectType: 'SHS (EN 10210-2):SHS100x6.3',
+        },
+      ],
+    };
+    const actions = makeActions();
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, actions)!;
+
+    const category = items.find((i) => /this category/.test(i.label ?? ''));
+    const type = items.find((i) => /this type/.test(i.label ?? ''));
+    expect(category!.label).toBe('Select all of this category · IfcBeam');
+    expect(type!.label).toBe('Select all of this type · SHS (EN 10210-2):SHS100x6.3');
+
+    type!.onClick!();
+    expect(actions.calls).toEqual(['selectSimilarType']);
+  });
+
+  it('T26d: no type option when the element declares no ObjectType', () => {
+    // A row that could only ever find nothing is worse than no row.
+    const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this type/.test(i.label ?? ''))).toBe(false);
+  });
+
+  it('T26e: a long type name is elided so the menu keeps its width', () => {
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [
+        {
+          modelId: 'A',
+          expressId: 1,
+          ifcClass: 'IfcBeam',
+          ifcTypeCode: 7,
+          objectType: 'Dekkeelement skrå 280 med lang beskrivelse:2345x280',
+        },
+      ],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    const type = items.find((i) => /this type/.test(i.label ?? ''))!;
+    expect(type.label!.endsWith('…')).toBe(true);
+    expect(type.label!.length).toBeLessThan(70);
+  });
+
+  it('T27: MULTI selection → header "N elements"; same verbs, and the presets its members agree on', () => {
+    // Three walls are still "this category" — refusing to offer it just
+    // because there is more than one element would be arbitrary.
     const items = buildContextMenuItems(multiState(3), { hasHidden: true, hasTransparent: true }, makeActions())!;
     expect(items[0].label).toMatch(/3 elements/);
     const verbs = verbLabels(items);
     expect(verbs).toEqual(
       expect.arrayContaining(['Hide', 'Isolate', 'Show all', 'Make transparent', 'Make opaque']),
     );
-    expect(verbs.some((v) => /select similar/i.test(v))).toBe(false);
+    expect(verbs).toContain('Select all of this category · IfcWall');
+  });
+
+  it('T27b: MULTI spanning two classes → no presets, because there is no shared referent', () => {
+    const state: SelectionState = {
+      kind: 'multi',
+      identities: [identity('A', 1), { ...identity('A', 2), ifcClass: 'IfcBeam', ifcTypeCode: 753842376 }],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this category|this type/.test(i.label ?? ''))).toBe(false);
+  });
+
+  it('T27c: MULTI sharing a type → both presets; disagreeing on it → category only', () => {
+    // Mirrors what the inspector shows: a property the selection shares is a
+    // value, one it doesn't is `varies` — and you can't select by `varies`.
+    const withType = (id: number, typeName: string): ElementIdentity => ({
+      ...identity('A', id),
+      typeName,
+    });
+    const same: SelectionState = {
+      kind: 'multi',
+      identities: [withType(1, 'Basic Wall:Generic 200'), withType(2, 'Basic Wall:Generic 200')],
+    };
+    const sameItems = buildContextMenuItems(same, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(sameItems.some((i) => i.label === 'Select all of this type · Basic Wall:Generic 200')).toBe(true);
+
+    const mixed: SelectionState = {
+      kind: 'multi',
+      identities: [withType(1, 'Basic Wall:Generic 200'), withType(2, 'Basic Wall:Generic 300')],
+    };
+    const mixedItems = buildContextMenuItems(mixed, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(mixedItems.some((i) => /this type/.test(i.label ?? ''))).toBe(false);
+    expect(mixedItems.some((i) => /this category/.test(i.label ?? ''))).toBe(true);
+  });
+
+  it('T27d: placeholder identities (class not resolved yet) offer no presets', () => {
+    // SelectionManager stores { ifcClass: '', ifcTypeCode: 0 } until the
+    // repository fills them in; a preset built from those enumerates nothing.
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [{ modelId: 'A', expressId: 1, ifcClass: '', ifcTypeCode: 0 }],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this category|this type/.test(i.label ?? ''))).toBe(false);
   });
 
   it('T28: "Show all" disabled iff nothing hidden; "Make opaque" disabled iff nothing transparent', () => {
@@ -311,16 +423,32 @@ describe('App contextmenu wiring (T32 — source assertions)', () => {
 
   it('the contextmenu handler does NOT call any selection-mutating method (no raycast, no select-on-right-click)', () => {
     // Per CM2: the menu reads SelectionManager.getState() only; it never
-    // applies/clears selection or raycasts on right-click.
+    // applies/clears selection or raycasts on right-click. The handler
+    // delegates to openContextMenu (which awaits the enriched identity), so
+    // the invariant spans both.
     const handler = appSrc.match(/private onContextMenu\([\s\S]*?\n {2}\}/);
+    const opener = appSrc.match(/private async openContextMenu\([\s\S]*?\n {2}\}/);
     expect(handler).not.toBeNull();
-    const body = handler![0];
+    expect(opener).not.toBeNull();
+    const body = handler![0] + opener![0];
     expect(body).not.toMatch(/\.apply\(/);
     expect(body).not.toMatch(/\.applyMany\(/);
     expect(body).not.toMatch(/\.selectExactly\(/);
     expect(body).not.toMatch(/raycast/i);
     // It DOES read the current selection state to build the menu.
     expect(body).toMatch(/getState\(\)/);
+  });
+
+  it('the menu is built from an ENRICHED identity, not the selection placeholder', () => {
+    // SelectionManager stores ifcClass:'' / ifcTypeCode:0 placeholders. Built
+    // straight off those, "select all of this category" enumerated type code
+    // 0 and matched nothing ("No elements match all elements"), and the type
+    // row could never appear.
+    const opener = appSrc.match(/private async openContextMenu\([\s\S]*?\n {2}\}/);
+    expect(opener![0]).toMatch(/enrichSelection\(/);
+    const enrich = appSrc.match(/private async enrichSelection\([\s\S]*?\n {2}\}/);
+    expect(enrich).not.toBeNull();
+    expect(enrich![0]).toMatch(/propertyRepository\.get\(/);
   });
 
   it('the contextmenu handler bails via the suppression guard', () => {

@@ -29,6 +29,16 @@ export interface ElementIdentity {
   objectType?: string;
   tag?: string;
   predefinedType?: string;
+  /**
+   * Name of the linked `IfcTypeObject` (`IfcRelDefinesByType` / `IsTypedBy`) —
+   * the authoring-tool family type, e.g. "Concrete-Rectangular-Column:CC24x24".
+   *
+   * This is the discriminator for "select all of this type". `ObjectType`
+   * carries the same string in some exports but is absent in others (0 of 54
+   * columns in Snowdon Towers, 0 of 917 beams; present on all 121 RIB beams),
+   * whereas the type object is present in every model measured.
+   */
+  typeName?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -31,8 +31,22 @@ import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
 import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
+import { BulkRequestCancelled } from '../inspector/repository/ElementPropertyRepository';
+import {
+  categoryQuery,
+  describeSimilarResult,
+  identitiesFromIds,
+  sharedSource,
+  typeQuery,
+  type SimilarQuery,
+} from '../inspector/selectSimilar';
+import { SIMILAR_MENU_ENRICH_MAX } from '../inspector/limits';
+import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
+
+/** How long a transient status message stays up before clearing. */
+const STATUS_CLEAR_MS = 4000;
 
 export class App {
   private viewer: Viewer;
@@ -413,6 +427,7 @@ export class App {
           return record ? { name: record.name } : undefined;
         },
         getModelCount: () => this.modelRecords.size,
+        onSelectSimilar: (query) => void this.runSelectSimilar(query),
       },
       this.selectionManager,
     );
@@ -863,6 +878,53 @@ export class App {
     this.selectionManager.selectExactly(contents);
   }
 
+  // ── Select similar (F) ─────────────────────────────────────
+
+  /**
+   * Run a "select similar" query and make its result the selection.
+   *
+   * The predicate runs in the worker (`findMatching`) or, for the class
+   * preset, is just an id enumeration — either way only ids cross the thread
+   * boundary, so a class with tens of thousands of members costs a small
+   * message rather than a property dump. The result lands through
+   * `selectExactly`, which bypasses the single-model lock and records ONE
+   * undo command for the whole set.
+   *
+   * See dev/plans/handoff-select-similar.md.
+   */
+  private async runSelectSimilar(query: SimilarQuery): Promise<void> {
+    // A previous query (or an inspector intersection) still running would
+    // sit ahead of this one in the worker's serial queue.
+    this.propertyRepository.cancelBulk();
+    this.setStatus(`Finding ${query.label}…`);
+
+    try {
+      const ids =
+        query.kind === 'class'
+          ? await this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcTypeCode)
+          : await this.propertyRepository.findMatching(
+              query.modelId,
+              query.ifcTypeCode,
+              query.selector,
+              query.value,
+              (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+            );
+
+      const identities = identitiesFromIds(query, ids);
+      if (identities.length > 0) {
+        this.selectionManager.selectExactly(identities);
+      }
+      this.setStatus(describeSimilarResult(query, identities.length));
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    } catch (err) {
+      // Superseded by a newer query — the user moved on, not an error.
+      if (err instanceof BulkRequestCancelled) return;
+      console.error('App: select similar failed', err);
+      this.setStatus('Could not complete the search');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    }
+  }
+
   // ── Context menu (C) ───────────────────────────────────────
   //
   // The menu acts ONLY on the current selection (CM2): it reads
@@ -887,11 +949,27 @@ export class App {
       return;
     }
 
-    // Build items purely from the current selection + appearance state. Each
-    // verb dispatches to the appearance/basket collaborator on the CURRENT
-    // SELECTION scope (captured below); the element under the cursor is never
-    // read.
-    const state = this.selectionManager.getState();
+    // Coordinates must be read before the await below — the event object is
+    // not safe to touch once the handler has yielded.
+    void this.openContextMenu(e.clientX, e.clientY);
+  }
+
+  /**
+   * Resolve the selection's full identity, then open the menu for it.
+   *
+   * `SelectionManager` stores PLACEHOLDER identities — `ifcClass: ''`,
+   * `ifcTypeCode: 0` — because it only knows what was clicked, not what it
+   * is. Building the menu straight off those produced a category query for
+   * class "" and type code 0, which enumerated nothing ("No elements match
+   * all elements") and could never offer a type row. The repository memo
+   * holds the enriched identity for anything the inspector has already
+   * fetched, so this is normally instant.
+   */
+  private async openContextMenu(x: number, y: number): Promise<void> {
+    const state = await this.enrichSelection(this.selectionManager.getState());
+    // Same resolution the menu builder does, so a row that was offered and the
+    // query it runs can never disagree.
+    const similar = state.kind === 'none' ? null : sharedSource(state.identities);
     const items = buildContextMenuItems(
       state,
       {
@@ -906,13 +984,57 @@ export class App {
         opaque: () => this.appearanceOpaque(),
         clearTransparency: () => this.appearanceClearTransparency(),
         addToBasket: () => this.basketAdd(),
+        selectSimilarCategory: () => {
+          if (!similar) return;
+          void this.runSelectSimilar(categoryQuery(similar));
+        },
+        selectSimilarType: () => {
+          if (!similar) return;
+          const query = typeQuery(similar);
+          if (query) void this.runSelectSimilar(query);
+        },
       },
     );
 
     // No selection and no active recovery action → no menu.
     if (!items || items.length === 0) return;
 
-    this.contextMenu.open(e.clientX, e.clientY, items);
+    this.contextMenu.open(x, y, items);
+  }
+
+  /**
+   * Fill in the selection's real class / type code / type name from the
+   * property repository, so "select all of this category / type" knows what
+   * "this" is. Every member is enriched, because a multi-selection offers the
+   * same rows whenever its members agree (`sharedSource`).
+   *
+   * Capped at `SIMILAR_MENU_ENRICH_MAX`: each fetch is a worker round-trip,
+   * and a right-click menu that takes seconds to appear is worse than one
+   * missing two rows. Past the cap the identities stay as they are, which
+   * `sharedSource` reads as "nothing to offer".
+   *
+   * A failed fetch falls back to the placeholder rather than suppressing the
+   * menu: hide / isolate / basket don't need the enrichment, and losing the
+   * whole menu because one property read failed would be worse.
+   */
+  private async enrichSelection(state: SelectionState): Promise<SelectionState> {
+    if (state.kind === 'none') return state;
+    if (state.identities.length > SIMILAR_MENU_ENRICH_MAX) return state;
+
+    const enriched = await Promise.all(
+      state.identities.map(async (identity) => {
+        try {
+          const props = await this.propertyRepository.get(identity.modelId, identity.expressId);
+          return { ...identity, ...props.identity };
+        } catch {
+          return identity;
+        }
+      }),
+    );
+
+    return state.kind === 'single'
+      ? { kind: 'single', identities: [enriched[0]] }
+      : { ...state, identities: enriched };
   }
 
   // ── Appearance actions (D) ─────────────────────────────────

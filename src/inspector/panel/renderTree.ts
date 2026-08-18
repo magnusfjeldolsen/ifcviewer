@@ -21,6 +21,7 @@ import type {
   PropertyValue,
 } from '../types';
 import { displayStringForValue } from '../repository/flatRows';
+import { buildSimilarButton, type SelectSimilarHandler } from './similarAffordance';
 
 /** Max nesting depth before complex properties flatten with a "…" prefix. */
 const MAX_COMPLEX_DEPTH = 6;
@@ -61,6 +62,11 @@ export interface TreeRenderContext {
   formatVariesTooltip: (path: string) => string;
   /** Whether the panel currently has props rendered (gates varies tooltip lookup). */
   hasCurrentProps: () => boolean;
+  /**
+   * Run "select similar" for a row. Absent when the affordance shouldn't be
+   * offered at all — a multi-element selection has no single "this value".
+   */
+  onSelectSimilar?: SelectSimilarHandler;
 }
 
 export function renderTree(
@@ -321,6 +327,15 @@ function buildPropertyRow(
   row.appendChild(name);
   row.appendChild(eq);
   row.appendChild(valEl);
+
+  const similar = buildSimilarButton(
+    ownPath,
+    node.value,
+    displayStringForValue(node.value),
+    ctx.onSelectSimilar,
+  );
+  if (similar) row.appendChild(similar);
+
   wrapper.appendChild(row);
   return wrapper;
 }

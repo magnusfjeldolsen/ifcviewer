@@ -13,6 +13,7 @@
  * file. No behavior change.
  */
 
+import { buildSimilarButton, type SelectSimilarHandler } from './similarAffordance';
 import type { ElementProperties, PropertyFlatRow } from '../types';
 
 /** Filter input debounce in the Flat view. */
@@ -43,6 +44,11 @@ export interface FlatRenderContext {
   /** Get / set the debounce timer handle on the panel. */
   getDebounceTimer: () => ReturnType<typeof setTimeout> | null;
   setDebounceTimer: (handle: ReturnType<typeof setTimeout> | null) => void;
+  /**
+   * Run "select similar" for a row. Absent when the affordance shouldn't be
+   * offered at all — a multi-element selection has no single "this value".
+   */
+  onSelectSimilar?: SelectSimilarHandler;
 }
 
 export function renderFlat(
@@ -150,5 +156,9 @@ function buildFlatRow(r: PropertyFlatRow, ctx: FlatRenderContext): HTMLElement {
   row.appendChild(nameCell);
   row.appendChild(valueCell);
   row.appendChild(unitCell);
+
+  const similar = buildSimilarButton(r.path, r.rawValue, r.displayValue, ctx.onSelectSimilar);
+  if (similar) row.appendChild(similar);
+
   return row;
 }
