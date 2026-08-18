@@ -36,9 +36,11 @@ import {
   categoryQuery,
   describeSimilarResult,
   identitiesFromIds,
+  sharedSource,
   typeQuery,
   type SimilarQuery,
 } from '../inspector/selectSimilar';
+import { SIMILAR_MENU_ENRICH_MAX } from '../inspector/limits';
 import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
@@ -965,6 +967,9 @@ export class App {
    */
   private async openContextMenu(x: number, y: number): Promise<void> {
     const state = await this.enrichSelection(this.selectionManager.getState());
+    // Same resolution the menu builder does, so a row that was offered and the
+    // query it runs can never disagree.
+    const similar = state.kind === 'none' ? null : sharedSource(state.identities);
     const items = buildContextMenuItems(
       state,
       {
@@ -980,12 +985,12 @@ export class App {
         clearTransparency: () => this.appearanceClearTransparency(),
         addToBasket: () => this.basketAdd(),
         selectSimilarCategory: () => {
-          if (state.kind !== 'single') return;
-          void this.runSelectSimilar(categoryQuery(state.identities[0]));
+          if (!similar) return;
+          void this.runSelectSimilar(categoryQuery(similar));
         },
         selectSimilarType: () => {
-          if (state.kind !== 'single') return;
-          const query = typeQuery(state.identities[0]);
+          if (!similar) return;
+          const query = typeQuery(similar);
           if (query) void this.runSelectSimilar(query);
         },
       },
@@ -998,23 +1003,38 @@ export class App {
   }
 
   /**
-   * Fill in a single selection's real class / type code / type name from the
-   * property repository. Multi and empty selections pass through untouched —
-   * the menu's per-element verbs are single-selection only.
+   * Fill in the selection's real class / type code / type name from the
+   * property repository, so "select all of this category / type" knows what
+   * "this" is. Every member is enriched, because a multi-selection offers the
+   * same rows whenever its members agree (`sharedSource`).
+   *
+   * Capped at `SIMILAR_MENU_ENRICH_MAX`: each fetch is a worker round-trip,
+   * and a right-click menu that takes seconds to appear is worse than one
+   * missing two rows. Past the cap the identities stay as they are, which
+   * `sharedSource` reads as "nothing to offer".
    *
    * A failed fetch falls back to the placeholder rather than suppressing the
    * menu: hide / isolate / basket don't need the enrichment, and losing the
    * whole menu because one property read failed would be worse.
    */
   private async enrichSelection(state: SelectionState): Promise<SelectionState> {
-    if (state.kind !== 'single') return state;
-    const identity = state.identities[0];
-    try {
-      const props = await this.propertyRepository.get(identity.modelId, identity.expressId);
-      return { kind: 'single', identities: [{ ...identity, ...props.identity }] };
-    } catch {
-      return state;
-    }
+    if (state.kind === 'none') return state;
+    if (state.identities.length > SIMILAR_MENU_ENRICH_MAX) return state;
+
+    const enriched = await Promise.all(
+      state.identities.map(async (identity) => {
+        try {
+          const props = await this.propertyRepository.get(identity.modelId, identity.expressId);
+          return { ...identity, ...props.identity };
+        } catch {
+          return identity;
+        }
+      }),
+    );
+
+    return state.kind === 'single'
+      ? { kind: 'single', identities: [enriched[0]] }
+      : { ...state, identities: enriched };
   }
 
   // ── Appearance actions (D) ─────────────────────────────────

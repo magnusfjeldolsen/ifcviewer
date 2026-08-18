@@ -58,6 +58,53 @@ export type SimilarQuery =
     };
 
 /**
+ * Everything a similar-query needs to know about its source, minus the one
+ * field that can't survive a multi-element selection: `expressId`. A single
+ * `ElementIdentity` satisfies it directly; a multi-selection resolves one via
+ * `sharedSource`.
+ */
+export type SimilarSource = Omit<ElementIdentity, 'expressId'>;
+
+/**
+ * What a whole selection has in common, or null when it shares too little for
+ * "everything like this" to have a referent.
+ *
+ * A multi-selection is a perfectly good source when its members agree: two
+ * floors are still "this category", even though they are two elements. What
+ * they disagree on simply drops out — select two slabs of different types and
+ * the category row still appears while the type row does not, exactly
+ * mirroring the `varies` the inspector shows for that property.
+ *
+ * Null when the members span models or classes (no common referent), or when
+ * the identities are still `SelectionManager` placeholders — `ifcClass: ''`
+ * and `ifcTypeCode: 0` would build a query that enumerates nothing.
+ */
+export function sharedSource(identities: readonly ElementIdentity[]): SimilarSource | null {
+  const first = identities[0];
+  if (!first || !first.ifcClass || !first.ifcTypeCode) return null;
+  // The numeric code implies the class name, so agreeing on it is enough.
+  const sameClass = identities.every(
+    (i) => i.modelId === first.modelId && i.ifcTypeCode === first.ifcTypeCode,
+  );
+  if (!sameClass) return null;
+
+  const agreed = (pick: (i: ElementIdentity) => string | undefined): string | undefined => {
+    const value = pick(first);
+    if (!value) return undefined;
+    return identities.every((i) => pick(i) === value) ? value : undefined;
+  };
+
+  return {
+    modelId: first.modelId,
+    ifcClass: first.ifcClass,
+    ifcTypeCode: first.ifcTypeCode,
+    predefinedType: agreed((i) => i.predefinedType),
+    typeName: agreed((i) => i.typeName),
+    objectType: agreed((i) => i.objectType),
+  };
+}
+
+/**
  * Can this row drive a value-match? Requires a matchable value AND a path —
  * the path is what identifies the property in candidate elements.
  */
@@ -91,7 +138,7 @@ function elide(s: string): string {
 }
 
 /** "IfcSlab · BASESLAB", or just "IfcBeam" when there's no PredefinedType. */
-export function categoryLabel(identity: ElementIdentity): string {
+export function categoryLabel(identity: SimilarSource): string {
   const cls = identity.ifcClass || 'elements';
   return identity.predefinedType ? `${cls} · ${identity.predefinedType}` : cls;
 }
@@ -107,7 +154,7 @@ export function categoryLabel(identity: ElementIdentity): string {
  * fallback for exports that carry it without a type object.
  */
 export function typeSelector(
-  identity: ElementIdentity,
+  identity: SimilarSource,
 ): { path: string; value: string } | null {
   if (identity.typeName) return { path: 'Identity.Type', value: identity.typeName };
   if (identity.objectType) return { path: 'Identity.ObjectType', value: identity.objectType };
@@ -115,17 +162,17 @@ export function typeSelector(
 }
 
 /** The element's authoring-tool type, or null when it doesn't declare one. */
-export function typeLabel(identity: ElementIdentity): string | null {
+export function typeLabel(identity: SimilarSource): string | null {
   return typeSelector(identity)?.value ?? null;
 }
 
 /** Menu row text for the category option. */
-export function categoryMenuLabel(identity: ElementIdentity): string {
+export function categoryMenuLabel(identity: SimilarSource): string {
   return `Select all of this category · ${elide(categoryLabel(identity))}`;
 }
 
 /** Menu row text for the type option, or null when there's no type to offer. */
-export function typeMenuLabel(identity: ElementIdentity): string | null {
+export function typeMenuLabel(identity: SimilarSource): string | null {
   const label = typeLabel(identity);
   return label === null ? null : `Select all of this type · ${elide(label)}`;
 }
@@ -136,7 +183,7 @@ export function typeMenuLabel(identity: ElementIdentity): string | null {
  * the extra precision reuses the existing predicate rather than adding a
  * second mechanism; without one, the plain class enumeration stands.
  */
-export function categoryQuery(identity: ElementIdentity): SimilarQuery {
+export function categoryQuery(identity: SimilarSource): SimilarQuery {
   const predefined = identity.predefinedType;
   if (predefined) {
     return {
@@ -167,7 +214,7 @@ export function categoryQuery(identity: ElementIdentity): SimilarQuery {
  * ObjectType string would otherwise be conflated, and the class scope also
  * keeps the candidate set small.
  */
-export function typeQuery(identity: ElementIdentity): SimilarQuery | null {
+export function typeQuery(identity: SimilarSource): SimilarQuery | null {
   const sel = typeSelector(identity);
   if (!sel) return null;
   return {

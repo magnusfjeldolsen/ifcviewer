@@ -155,8 +155,12 @@ describe('ContextMenu component', () => {
 // ── buildContextMenuItems pure helper (T26-T31) ────────────────────────
 
 describe('buildContextMenuItems', () => {
+  // A real numeric class code: select-similar scopes the candidate set by it,
+  // and a 0 means "not resolved yet" (SelectionManager's placeholder), which
+  // deliberately suppresses the similar rows.
+  const IFCWALL = 2391406946;
   function identity(modelId: string, expressId: number): ElementIdentity {
-    return { modelId, expressId, ifcClass: 'IfcWall', ifcTypeCode: 0 };
+    return { modelId, expressId, ifcClass: 'IfcWall', ifcTypeCode: IFCWALL };
   }
   function singleState(): SelectionState {
     return { kind: 'single', identities: [identity('A', 1)] };
@@ -270,16 +274,59 @@ describe('buildContextMenuItems', () => {
     expect(type.label!.length).toBeLessThan(70);
   });
 
-  it('T27: MULTI selection → header "N elements"; same verbs, but NO class preset', () => {
-    // A multi-selection can span classes, so "select all of this class" has
-    // no referent — offering it would have to pick one arbitrarily.
+  it('T27: MULTI selection → header "N elements"; same verbs, and the presets its members agree on', () => {
+    // Three walls are still "this category" — refusing to offer it just
+    // because there is more than one element would be arbitrary.
     const items = buildContextMenuItems(multiState(3), { hasHidden: true, hasTransparent: true }, makeActions())!;
     expect(items[0].label).toMatch(/3 elements/);
     const verbs = verbLabels(items);
     expect(verbs).toEqual(
       expect.arrayContaining(['Hide', 'Isolate', 'Show all', 'Make transparent', 'Make opaque']),
     );
-    expect(verbs.some((v) => /this category|this type/.test(v))).toBe(false);
+    expect(verbs).toContain('Select all of this category · IfcWall');
+  });
+
+  it('T27b: MULTI spanning two classes → no presets, because there is no shared referent', () => {
+    const state: SelectionState = {
+      kind: 'multi',
+      identities: [identity('A', 1), { ...identity('A', 2), ifcClass: 'IfcBeam', ifcTypeCode: 753842376 }],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this category|this type/.test(i.label ?? ''))).toBe(false);
+  });
+
+  it('T27c: MULTI sharing a type → both presets; disagreeing on it → category only', () => {
+    // Mirrors what the inspector shows: a property the selection shares is a
+    // value, one it doesn't is `varies` — and you can't select by `varies`.
+    const withType = (id: number, typeName: string): ElementIdentity => ({
+      ...identity('A', id),
+      typeName,
+    });
+    const same: SelectionState = {
+      kind: 'multi',
+      identities: [withType(1, 'Basic Wall:Generic 200'), withType(2, 'Basic Wall:Generic 200')],
+    };
+    const sameItems = buildContextMenuItems(same, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(sameItems.some((i) => i.label === 'Select all of this type · Basic Wall:Generic 200')).toBe(true);
+
+    const mixed: SelectionState = {
+      kind: 'multi',
+      identities: [withType(1, 'Basic Wall:Generic 200'), withType(2, 'Basic Wall:Generic 300')],
+    };
+    const mixedItems = buildContextMenuItems(mixed, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(mixedItems.some((i) => /this type/.test(i.label ?? ''))).toBe(false);
+    expect(mixedItems.some((i) => /this category/.test(i.label ?? ''))).toBe(true);
+  });
+
+  it('T27d: placeholder identities (class not resolved yet) offer no presets', () => {
+    // SelectionManager stores { ifcClass: '', ifcTypeCode: 0 } until the
+    // repository fills them in; a preset built from those enumerates nothing.
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [{ modelId: 'A', expressId: 1, ifcClass: '', ifcTypeCode: 0 }],
+    };
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!;
+    expect(items.some((i) => /this category|this type/.test(i.label ?? ''))).toBe(false);
   });
 
   it('T28: "Show all" disabled iff nothing hidden; "Make opaque" disabled iff nothing transparent', () => {

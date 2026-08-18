@@ -22,3 +22,16 @@
  * act on ids or reduce in the worker.
  */
 export const BULK_INTERSECT_GUARD = 10_000;
+
+/**
+ * Selection size past which the context menu stops resolving each member's
+ * real identity for "select all of this category / type".
+ *
+ * Those rows need every selected element's class, PredefinedType and type
+ * name, and each one is a worker round-trip (~5–10 ms). A menu that appears
+ * instantly without two rows beats one that appears half a second late with
+ * them — and past this size the by-value affordance on the inspector's own
+ * property rows covers the same ground, from an intersection that has
+ * already been computed.
+ */
+export const SIMILAR_MENU_ENRICH_MAX = 50;

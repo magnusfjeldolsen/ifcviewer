@@ -13,6 +13,7 @@ import {
   categoryQuery,
   describeSimilarResult,
   identitiesFromIds,
+  sharedSource,
   typeLabel,
   typeMenuLabel,
   typeQuery,
@@ -60,6 +61,49 @@ describe('canSelectSimilar', () => {
         rawValue: { kind: 'quantity', quantityKind: 'volume', value: 2.34 },
       }),
     ).toBe(false);
+  });
+});
+
+describe('sharedSource', () => {
+  it('resolves a single element to itself', () => {
+    expect(sharedSource([identity()])).toMatchObject({
+      modelId: 'model-a',
+      ifcClass: 'IfcBeam',
+      ifcTypeCode: 1234,
+    });
+  });
+
+  it('resolves a multi-selection to what its members agree on', () => {
+    // Two floors of different types still share a category. Dropping the
+    // whole offer because they differ on ONE field would refuse a question
+    // that has a perfectly good answer.
+    const a = identity({ expressId: 1, predefinedType: 'FLOOR', typeName: 'Betong 300' });
+    const b = identity({ expressId: 2, predefinedType: 'FLOOR', typeName: 'Betong 500' });
+    const shared = sharedSource([a, b])!;
+    expect(shared.predefinedType).toBe('FLOOR');
+    expect(shared.typeName).toBeUndefined();
+    expect(categoryQuery(shared).label).toBe('all IfcBeam · FLOOR');
+    expect(typeQuery(shared)).toBeNull();
+  });
+
+  it('keeps the type when every member shares it', () => {
+    const t = { typeName: 'SHS100x6.3' };
+    const shared = sharedSource([identity({ expressId: 1, ...t }), identity({ expressId: 2, ...t })])!;
+    expect(typeLabel(shared)).toBe('SHS100x6.3');
+  });
+
+  it('refuses a selection spanning classes or models', () => {
+    expect(sharedSource([identity(), identity({ ifcClass: 'IfcColumn', ifcTypeCode: 99 })])).toBeNull();
+    expect(sharedSource([identity(), identity({ modelId: 'model-b' })])).toBeNull();
+  });
+
+  it('refuses placeholder identities and an empty selection', () => {
+    // SelectionManager's placeholder is { ifcClass: '', ifcTypeCode: 0 } —
+    // a query built from it enumerates nothing, which is how "No elements
+    // match all elements" happened.
+    expect(sharedSource([])).toBeNull();
+    expect(sharedSource([{ modelId: 'model-a', expressId: 1, ifcClass: '', ifcTypeCode: 0 }])).toBeNull();
+    expect(sharedSource([identity({ ifcTypeCode: 0 })])).toBeNull();
   });
 });
 
@@ -256,5 +300,22 @@ describe('App select-similar wiring (source assertions)', () => {
 
   it('is wired into the inspector panel', () => {
     expect(appSrc).toMatch(/onSelectSimilar:\s*\(query\)\s*=>/);
+  });
+
+  it('builds the menu query from the same sharedSource the menu displayed', () => {
+    // Offering "all of this type" and then running a different query is the
+    // failure mode this guards: one resolution, used by both.
+    const menu = appSrc.match(/private async openContextMenu\([\s\S]*?\n {2}\}/)![0];
+    expect(menu).toMatch(/const similar = state\.kind === 'none' \? null : sharedSource\(state\.identities\)/);
+    expect(menu).toMatch(/categoryQuery\(similar\)/);
+    expect(menu).toMatch(/typeQuery\(similar\)/);
+  });
+
+  it('enriches every selected identity, capped so the menu stays instant', () => {
+    // The presets need each member's real class/type; without enrichment the
+    // menu sees placeholders and offers nothing.
+    const enrich = appSrc.match(/private async enrichSelection\([\s\S]*?\n {2}\}/)![0];
+    expect(enrich).toMatch(/SIMILAR_MENU_ENRICH_MAX/);
+    expect(enrich).toMatch(/state\.identities\.map\(/);
   });
 });
