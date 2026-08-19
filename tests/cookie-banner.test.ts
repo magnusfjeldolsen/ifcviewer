@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CookieBanner } from '../src/ui/CookieBanner';
-import { CookieConsent } from '../src/services/CookieConsent';
+import { CookieConsent, DECLINE_REPROMPT_DAYS } from '../src/services/CookieConsent';
 
 const store = new Map<string, string>();
 const localStorageMock: Storage = {
@@ -74,5 +74,38 @@ describe('CookieBanner', () => {
     icon.click();
 
     expect(parent.querySelector('.cookie-expanded')).not.toBeNull();
+  });
+
+  it('asks again on the first load after a decline has lapsed', () => {
+    // What the user actually sees: decline today and the banner stays out of
+    // the way; come back in a couple of months and it asks once more.
+    const DAY = 24 * 60 * 60 * 1000;
+    CookieConsent.decline(Date.now() - (DECLINE_REPROMPT_DAYS + 1) * DAY);
+
+    new CookieBanner(parent);
+    expect(parent.querySelector('.cookie-expanded')).not.toBeNull();
+    expect(parent.querySelector('.cookie-icon')).toBeNull();
+  });
+
+  it('stays out of the way while a decline is still fresh', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    CookieConsent.decline(Date.now() - DAY);
+
+    new CookieBanner(parent);
+    expect(parent.querySelector('.cookie-icon')).not.toBeNull();
+    expect(parent.querySelector('.cookie-expanded')).toBeNull();
+  });
+
+  it('a re-declined banner collapses again rather than re-asking on the spot', () => {
+    // The re-prompt must not become a loop: declining at the re-ask writes a
+    // fresh timestamp, so the next ask is another full period away.
+    const DAY = 24 * 60 * 60 * 1000;
+    CookieConsent.decline(Date.now() - (DECLINE_REPROMPT_DAYS + 1) * DAY);
+
+    new CookieBanner(parent);
+    (parent.querySelector('button.decline') as HTMLButtonElement).click();
+
+    expect(parent.querySelector('.cookie-icon')).not.toBeNull();
+    expect(CookieConsent.getStatus()).toBe('declined');
   });
 });
