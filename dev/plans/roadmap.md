@@ -59,8 +59,9 @@ menu, with global Ctrl+Z / Ctrl+Y. Two independent keystones first
 features build on them. Confirmed decisions live in the epic doc.
 
 **Order:** ~~`bulk-property-fetch-and-cap` ‖ `undo-redo` → `context-menu` +
-`element-appearance`~~ (all shipped) → `undo-redo-retrofit` → **`select-similar`
-(next)** → (Data Insight) `parameter-coloring` · `data-aggregation-tabs`.
+`element-appearance` → `select-similar`~~ (all shipped) →
+**`undo-redo-retrofit`** → (Data Insight) `parameter-coloring` ·
+`data-aggregation-tabs`.
 
 ### `undo-redo-retrofit` — Make clipping + measurement undoable
 - **Status:** queued (depends on `undo-redo`)
@@ -69,15 +70,6 @@ features build on them. Confirmed decisions live in the epic doc.
 - **What:** Clipping drag (pointer-down→up) = one command; create/remove plane = one each. A completed measurement = one command; delete = one. Mid-placement Ctrl+Z cancels the pending placement.
 - **Risks:** tool visual handles must re-sync on undo/redo.
 - **Source:** `dev/plans/handoff-undo-redo.md` (§ Retrofit).
-
-### `select-similar` — Find elements with a matching parameter
-- **Status:** queued — **next up.** Both cuts are unblocked: `findMatching` + `enumerateExpressIds` shipped in PR #42.
-- **Effort:** M
-- **Why:** "Show me all the B12 beams" in one click — the inline form of `filter-by-parameter`; a `Scope` source feeding basket/visibility/coloring/aggregation.
-- **What:** Inline "⌕ Select similar" on inspector property rows + a context-menu submenu. Same-type/same-class presets plus parameter value-match. Result drives `selectExactly` (one undoable selection).
-- **Note:** the plan doc's mechanism section predates PR #42 and still says `getMany(ids)` + a main-thread filter. That's superseded: `repository.findMatching(modelId, ifcClass, selector, value)` runs the predicate in the worker and returns ids only. `getMany` was deliberately never built.
-- **Risks:** huge match sets (reuse the bulk selection path + progress); value typing. Also the first real exercise of the `IFCPRODUCT`-with-`includeInherited` assumption in `candidateIds`.
-- **Source:** `dev/plans/handoff-select-similar.md`.
 
 ## Data Insight phase (epic — see `dev/plans/phase-data-insight.md`)
 
@@ -90,7 +82,7 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 `Scope` source; the cards below build on it._
 
 ### `filter-by-parameter` — Show elements matching a parameter
-- **Status:** queued (bulk property access shipped in PR #42; `element-appearance` shipped in PR #39). First, lighter form is `select-similar` (selects rather than isolates).
+- **Status:** queued (bulk property access shipped in PR #42; `element-appearance` shipped in PR #39). The lighter form — `select-similar`, which selects rather than isolates — shipped in PR #44, so what is left here is the isolate-the-rest half plus multi-criteria matching.
 - **Effort:** M
 - **Why:** From a selected element/class, show all elements sharing a parameter value and hide the rest — fast "find everything like this."
 - **What:** Pick parameter(s) + match → matching elements become a `Scope`, isolated via `element-visibility`. Predicate evaluated across the model via bulk property access (the worker).
@@ -210,3 +202,13 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 
 ### `bulk-property-access` Phase 2 — Cancel, guard, enumerate, findMatching (PR #42, merged 2026-08-03)
 - **Outcome:** Completes the data keystone. **Cancellation:** `cancel` is handled synchronously in the worker's `onmessage` and never enqueued (queuing it would be useless — the job it cancels is at the head of the queue); bulk reqIds register at *dispatch*, so a job queued behind a long-running one is cancellable too; the running job bails at its next chunk boundary and posts nothing, so a partial fold is never committed. `BulkRequestCancelled` lets the panel tell "you asked me to stop" from a real failure. **The 1 000 refusal is gone** — below `BULK_INTERSECT_GUARD` (10 000, in the new `src/inspector/limits.ts`) it just computes; above it, "Compute anyway" rather than a wall. The chunk loop became a shared `readProps` so chunking / yield / progress / cancel have one implementation. `enumerateExpressIds` now returns `Promise<number[]>` (the stubbed AsyncIterable is gone) and resolves "all products" through the `IFCPRODUCT` supertype rather than a hand-listed class set. `findMatching` runs the predicate in the worker and returns ids only; the predicate lives in the pure `matchValue.ts` (single + enumerated matchable, quantity excluded as fragile, present-and-equal, exact-path). 592 → 626 tests. **Surprise:** `getMany` was never built — the reduce-in-worker design removed every near-term consumer, so it stays deferred to whichever feature first genuinely needs full props on main. **Follow-up spawned:** `worker-type-property-cache` (bulk throughput measured ~100–200 elements/sec; type-side work repeats per instance).
+
+### `select-similar` — Match every element like this one (PR #44, merged 2026-08-18)
+- **Outcome:** Three grains, one query type. Right-click offers **category** (the IFC class, narrowed by `PredefinedType` — a Revit floor and a structural foundation are both `IfcSlab` and only that separates them) and **type** (the linked `IfcTypeObject`, i.e. the authoring-tool family type); any matchable inspector property row offers select-by-value. All three build a `SimilarQuery` resolved by `enumerateExpressIds` / `findMatching` in the worker and applied through `selectExactly` — one undo step for the whole set. Menu labels name the value, so a row says what it will do before you click it.
+- **Manual testing overturned three assumptions, none of which a mocked test could have caught:**
+  - `GetTypeCodeFromName` **hashes** rather than looks up: `GetTypeCodeFromName('IfcSlab')` → 200263316 vs the real `IFCSLAB` 1529196076. It returns a plausible non-zero code for any string, so the `if (!typeCode) throw` guard never fired and every class query enumerated an empty set. Numeric `ifcTypeCode` is now carried end-to-end, and a test asserts the call never returns.
+  - **`ObjectType` is not the type discriminator.** RIB.ifc carries it on all 121 beams, which is why it was picked; Snowdon Towers carries it on **0 of 54 columns and 0 of 917 beams** while having a type object on all of them. The type object is now preferred with `ObjectType` as fallback.
+  - Revit writes `Name = "Family:Type:<ElementId>"` with the id repeated in `Tag`, so matching by name found only the source element. `stripAuthoringIdSuffix` removes it.
+- **Also from manual test:** the menu was built from `SelectionManager`'s placeholder identities (`ifcClass: ''`, `ifcTypeCode: 0`) and so offered "all elements" and never a type row — `App.enrichSelection` now resolves the real identity from the repository first. And the single-selection-only rule was wrong: two floors share a category as much as one does, so `sharedSource` resolves what a multi-selection agrees on, per field, dropping what it doesn't (capped at 50 elements — each is a worker round-trip and the menu must open instantly).
+- **Fixture lesson:** `assets/ifcs/RIB.ifc` is not version-controlled and was swapped mid-review for a different export (29 slabs where there were 37, no `IfcBeam` at all), breaking every pinned expressId and count. The e2e tests now derive their targets from whatever file is present and assert invariants; absolute counts live in the tracked Snowdon fixture only. 626 → 684 tests.
+- **Not built:** the by-parameter *submenu* (`ContextMenu` has no flyout rendering) — the by-value affordance lives on the inspector rows instead, where the value is already on screen.
