@@ -95,12 +95,14 @@ export function rotateAboutPivot(params: RotateAboutPivotParams): CameraPose {
 export interface PivotCandidates {
   /** Surface point under the cursor, if the ray hit anything. */
   hit: THREE.Vector3 | null;
+  /** Centre of the current selection, if there is one. */
+  selection: THREE.Vector3 | null;
+  /** Whether that selection centre is currently within the view frustum. */
+  selectionOnScreen: boolean;
   /** The pivot the user placed with the pivot tool, if any. */
   placed: THREE.Vector3 | null;
   /** Whether that placed pivot is currently within the view frustum. */
   placedOnScreen: boolean;
-  /** Centre of the current selection, if there is one. */
-  selection: THREE.Vector3 | null;
   /** Last resort — the centre of the last fit. */
   fallback: THREE.Vector3;
 }
@@ -120,22 +122,25 @@ export interface ResolvedPivot {
  * Whatever is under the cursor wins. Over empty space there is no answer to
  * "how far away did you mean" — ArcGIS Pro puts it well: *"You cannot click the
  * sky to navigate because the tool cannot determine how far away you want to
- * go."* So we fall back, in order of how specifically the user pointed at
- * something:
+ * go."* So we fall back, most recently expressed intent first:
  *
- * 1. the pivot they placed by hand, but only while it is on screen — one that
- *    has drifted out of view makes orbit feel like it is turning about nothing
- *    (Navisworks releases its pivot lock for the same reason). It stays
- *    stored, so it applies again the moment it comes back;
- * 2. the centre of the selection, which is what Revit and Navisworks offer as
- *    "centre pivot on selection";
+ * 1. the centre of the selection — what Revit and Navisworks offer as "centre
+ *    pivot on selection". It outranks the placed pivot deliberately: selecting
+ *    elements is the fresher statement of "this is what I am working on", and
+ *    a pivot dropped earlier in the session should not override it;
+ * 2. the pivot they placed by hand;
  * 3. the centre of the last fit.
+ *
+ * Both 1 and 2 are skipped while off screen — a centre that has drifted out of
+ * view makes orbit feel like it is turning about nothing, which is why
+ * Navisworks releases its pivot lock in the same situation. Neither is
+ * forgotten: each applies again as soon as it is back in view.
  */
 export function resolvePivot(candidates: PivotCandidates): ResolvedPivot {
-  const { hit, placed, placedOnScreen, selection, fallback } = candidates;
+  const { hit, selection, selectionOnScreen, placed, placedOnScreen, fallback } = candidates;
   if (hit) return { point: hit.clone(), transient: true };
+  if (selection && selectionOnScreen) return { point: selection.clone(), transient: false };
   if (placed && placedOnScreen) return { point: placed.clone(), transient: false };
-  if (selection) return { point: selection.clone(), transient: false };
   return { point: fallback.clone(), transient: false };
 }
 

@@ -121,20 +121,23 @@ Autodesk default.
 rotate-drag start / wheel:
   raycast under the cursor
     hit                          → pivot = hit.point   (transient, this gesture)
-    miss → placed pivot, if set and on-screen
-         → selection centre, if there is a selection
+    miss → selection centre, if there is a selection and it is on-screen
+         → placed pivot, if set and on-screen
          → defaultTarget (fit centre)
 ```
 
 Two rungs come from the prior art:
 
-- **On-screen check** (Navisworks' auto-unlock). A placed pivot that has drifted
-  out of the frustum makes orbit feel like it is rotating about nothing. Test it
-  against the frustum and fall through if it is outside — but keep it *stored*,
-  so it applies again as soon as it is back in view.
 - **Selection centre** (Revit/Navisworks `Center Pivot on Selection`). We already
   track the selection, so this is nearly free and is almost always what the user
-  means when they orbit over empty space with something selected.
+  means when they orbit over empty space with something selected. It sits
+  **above** the placed pivot (user call, 2026-08-24, after manual testing):
+  selecting elements is the fresher statement of "this is what I am working on",
+  and a pivot dropped earlier in the session should not outrank it.
+- **On-screen check** (Navisworks' auto-unlock), applied to both. A centre that
+  has drifted out of the frustum makes orbit feel like it is rotating about
+  nothing. Test it and fall through if it is outside — but keep it *stored*, so
+  it applies again as soon as it is back in view.
 
 The placed pivot is never *overwritten* by a cursor-orbit, and pan never touches
 it — decision 2 holds.

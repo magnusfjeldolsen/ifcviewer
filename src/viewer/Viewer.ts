@@ -367,11 +367,13 @@ export class Viewer {
   /** Gather what the scene can offer as a pivot and let `resolvePivot` rank it. */
   private pivotFor(clientX: number, clientY: number): ResolvedPivot {
     const hit = this.raycastAt(clientX, clientY);
+    const selection = this.selectionCenter?.() ?? null;
     return resolvePivot({
       hit: hit ? hit.point : null,
+      selection,
+      selectionOnScreen: selection !== null && this.isOnScreen(selection),
       placed: this.placedPivot,
       placedOnScreen: this.placedPivot !== null && this.isOnScreen(this.placedPivot),
-      selection: this.selectionCenter?.() ?? null,
       fallback: this.defaultTarget,
     });
   }

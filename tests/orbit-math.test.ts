@@ -279,16 +279,20 @@ describe('dollyTowardPoint', () => {
 
 describe('resolvePivot', () => {
   const HIT = v(1, 1, 1);
-  const PLACED = v(2, 2, 2);
-  const SELECTION = v(3, 3, 3);
+  const SELECTION = v(2, 2, 2);
+  const PLACED = v(3, 3, 3);
   const FALLBACK = v(4, 4, 4);
   const all = {
-    hit: HIT, placed: PLACED, placedOnScreen: true, selection: SELECTION, fallback: FALLBACK,
+    hit: HIT,
+    selection: SELECTION,
+    selectionOnScreen: true,
+    placed: PLACED,
+    placedOnScreen: true,
+    fallback: FALLBACK,
   };
 
   it('prefers whatever is under the cursor', () => {
-    const resolved = resolvePivot(all);
-    expect(resolved.point.equals(HIT)).toBe(true);
+    expect(resolvePivot(all).point.equals(HIT)).toBe(true);
   });
 
   it('marks a cursor pivot transient so it cannot replace the placed one', () => {
@@ -296,33 +300,53 @@ describe('resolvePivot', () => {
     expect(resolvePivot({ ...all, hit: null }).transient).toBe(false);
   });
 
-  it('falls back to the placed pivot over empty space', () => {
+  it('prefers the selection over a previously placed pivot', () => {
+    // Selecting elements is the fresher statement of what the user is working
+    // on; a pivot dropped earlier in the session should not outrank it.
     const resolved = resolvePivot({ ...all, hit: null });
+    expect(resolved.point.equals(SELECTION)).toBe(true);
+  });
+
+  it('falls back to the placed pivot when nothing is selected', () => {
+    const resolved = resolvePivot({ ...all, hit: null, selection: null });
+    expect(resolved.point.equals(PLACED)).toBe(true);
+  });
+
+  it('skips a selection that has drifted off screen', () => {
+    // Orbiting about a point behind the camera reads as turning about
+    // nothing, so the next candidate down takes over.
+    const resolved = resolvePivot({ ...all, hit: null, selectionOnScreen: false });
     expect(resolved.point.equals(PLACED)).toBe(true);
   });
 
   it('skips a placed pivot that has drifted off screen', () => {
-    // Orbiting about a point behind the camera reads as turning about
-    // nothing; Navisworks releases its pivot lock for the same reason.
-    const resolved = resolvePivot({ ...all, hit: null, placedOnScreen: false });
-    expect(resolved.point.equals(SELECTION)).toBe(true);
+    const resolved = resolvePivot({
+      ...all, hit: null, selection: null, placedOnScreen: false,
+    });
+    expect(resolved.point.equals(FALLBACK)).toBe(true);
   });
 
-  it('falls back to the selection when no pivot was ever placed', () => {
-    const resolved = resolvePivot({ ...all, hit: null, placed: null });
-    expect(resolved.point.equals(SELECTION)).toBe(true);
+  it('falls through to the fit centre when both candidates are off screen', () => {
+    const resolved = resolvePivot({
+      ...all, hit: null, selectionOnScreen: false, placedOnScreen: false,
+    });
+    expect(resolved.point.equals(FALLBACK)).toBe(true);
   });
 
   it('falls back to the fit centre when there is nothing else to go on', () => {
     const resolved = resolvePivot({
-      hit: null, placed: null, placedOnScreen: false, selection: null, fallback: FALLBACK,
+      hit: null,
+      selection: null,
+      selectionOnScreen: false,
+      placed: null,
+      placedOnScreen: false,
+      fallback: FALLBACK,
     });
     expect(resolved.point.equals(FALLBACK)).toBe(true);
   });
 
   it('returns copies, so a gesture cannot mutate the stored pivots', () => {
-    const resolved = resolvePivot({ ...all, hit: null });
-    resolved.point.set(9, 9, 9);
-    expect(PLACED.equals(v(2, 2, 2))).toBe(true);
+    resolvePivot({ ...all, hit: null }).point.set(9, 9, 9);
+    expect(SELECTION.equals(v(2, 2, 2))).toBe(true);
   });
 });
