@@ -166,8 +166,9 @@ schedule.
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
 ### `measurement-modes` — Solibri-style measuring (point, orthogonal, face-to-face)
-- **Status:** queued (independent of the Data Insight epic — schedule freely; bundle with `undo-redo-retrofit`)
-- **Effort:** M
+- **Status:** queued — **next up** (user call 2026-08-24: a primitive every IFC viewer should have, and it shares nothing with the Data Insight prerequisites, so neither blocks the other). Bundles `undo-redo-retrofit`'s measurement half.
+- **Effort:** M–L (sub-phased; see the hand-off doc)
+- **Plan:** `dev/plans/handoff-measurement-modes.md` — decisions D1–D8 need answering before code.
 - **Why:** Today's tool measures point-to-point only, so the common question —
   *"how far is that column from the wall?"* — makes the user hunt for the
   shortest path by eye and get an answer that is wrong by however far off-normal
@@ -198,7 +199,17 @@ schedule.
   placement lifecycle (a completed measurement = one command, mid-placement
   Ctrl+Z cancels). Doing both in one visit avoids reworking the same state
   machine twice.
-- **Source:** user request 2026-08-24 (Solibri comparison).
+- **Found while planning (2026-08-24) — a live bug, not just a measuring one:** web-ifc returns geometry in the **file's own length unit** and nothing normalizes it. Probed directly: `RIB.ifc` (MILLI.METRE) has a local x-range of ±30 700, `Snowdon Towers` (METRE) ±37. `MeasurementTool.createLabel` hardcodes `" m"`, so a 30.7 m beam in RIB reads **"30700.00 m"** — wrong on three of the four sample models. Worse, loading a mm model and an m model together puts them in one scene at **1000× different sizes**, and multi-model is first-class here. Fixing it also unblocks any future summed volume/area (the same defect corrupts aggregation). Decision D1 in the hand-off doc.
+- **Also found:** there is **no user-facing way to remove measurements**. `clearMeasurements()` is only called from `resetView()` (which also drops clipping, selection and appearance) and `dispose()`. `App.ts:82` still carries the comment *"future contextual buttons (Remove measurements, …)"*. A "Clear measurements" tray action is table stakes and is folded into this card.
+- **Source:** user request 2026-08-24 (Solibri comparison); prior art from Navisworks, Solibri, Trimble Connect, BIMcollab and the APS viewer in the hand-off doc.
+
+### `measurement-snapping` — Snap to vertices, edges and midpoints
+- **Status:** queued (follow-up to `measurement-modes`; deliberately not bundled)
+- **Effort:** M–L
+- **Why:** Without it, every pick lands on the triangle under the cursor, so "corner to corner" is approximate and measuring a precise edge is guesswork. It is the single biggest thing separating our tool from Solibri's — but it is a subsystem, not a flag: Autodesk ships it as its own viewer extension (`Autodesk.Snapping`), snapping to vertex, midpoint, intersection, circle centre, three edge kinds and faces, with the snap shown as a mesh in an overlay.
+- **What:** A snap resolver that, given a cursor ray and a hit, offers the nearest candidate of each enabled kind within a screen-space radius, with a visual indicator and a way to cycle candidates. Face snapping ships earlier with `measurement-modes` (orthogonal mode needs it anyway); this card adds the rest.
+- **Risks:** candidate selection at cursor distance is fiddly on dense meshes; needs a spatial index or a per-mesh cache to stay interactive on 100k-mesh models. Interacts with `instanced-meshes` if that ever lands.
+- **Source:** deferred out of `measurement-modes` (decision D4).
 
 ### `settings-panel` — User-tunable caps and preferences
 - **Status:** queued
