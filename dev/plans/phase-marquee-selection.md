@@ -1,3 +1,19 @@
+> **Status: SHIPPED — historical design record.**
+> Landed as PR #21 (2026-05-13). Kept because the reasoning is still the best
+> explanation of *why* `MarqueeSelector` is built the way it is — in
+> particular the decision to copy three's `SelectionBox` frustum construction
+> while rejecting its bounding-sphere-centre test, which survives verbatim at
+> `src/inspector/MarqueeSelector.ts:392`.
+>
+> **This is the pre-implementation design, not a record of what shipped.**
+> Three things changed during manual smoke and are recorded in the roadmap's
+> Done entry, not here: the stock `SelectionBox` far-plane normal flip, the
+> `applyMany` lock asymmetry, and the per-frame render lag on big models that
+> was deferred to `render-perf-orbit-lag`. Read the roadmap entry for the
+> outcome; read this for the rationale.
+
+---
+
 # Phase — Alt-Drag Marquee Selection (window + crossing)
 
 ## TL;DR

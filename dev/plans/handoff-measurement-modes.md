@@ -14,13 +14,19 @@
 | **D2** | Which modes ship in v1 | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
 | **D3** | How the user picks a mode | **(a)** buttons in the tool tray · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
 | **D4** | How much snapping | **(a)** none (today) · **(b)** face only · **(c)** + vertex / edge / midpoint | **(b)** now, **(c)** as its own card |
-| **D5** | How measurements are removed | **(a)** one "Clear measurements" only · **(b)** + click-to-select + `Delete` · **(c)** + a measurements list panel | **(b)** — (a) alone is punishing, (c) is a panel we don't need yet |
+| ~~**D5**~~ | ~~How measurements are removed~~ | **DECIDED 2026-08-24:** "Clear measurements" **+** click-to-select + `Delete`. A list panel stays open for later. | — |
+| **D9** | **How a measurement gets picked without stealing clicks from elements** (raised with D5) | **(a)** elements always win; measurements pickable only while the tool is active · **(b)** whatever is nearest wins · **(c)** thin-target priority + `Tab` to cycle | **(c)** |
 | **D6** | Do measurements survive a reload | **(a)** no (today) · **(b)** yes, in the session | **(b)** if cheap, else defer |
 | **D7** | Does this bundle `undo-redo-retrofit` | **(a)** yes · **(b)** separate PR | **(a)** — both rewrite the same state machine |
 | **D8** | Label content | **(a)** distance only (today) · **(b)** distance + mode + Δ components | **(b)**, compactly |
 
 **The one that isn't optional: D1.** It is a live bug, and it is not confined
 to measuring — see below. Everything else is a genuine preference.
+
+**D9 is the new one**, and it is the real design risk in this feature — see
+*Picking a measurement without stealing clicks*. Making measurements clickable
+is easy; making them clickable **without** ruining element selection near them
+is the part that needs deciding.
 
 **Sequencing note:** you asked for this before the Data Insight prerequisites.
 That works — it shares nothing with them, so neither blocks the other.
@@ -255,10 +261,10 @@ the same time as this one, so the gap is recorded rather than forgotten.
 
 ---
 
-## D5 — Removing measurements
+## D5 — Removing measurements *(decided)*
 
-**Recommended: click-to-select + `Delete`, plus a global clear.** This is
-Trimble Connect's model exactly, and it needs no panel.
+**Click-to-select + `Delete`, plus a global clear.** This is Trimble Connect's
+model exactly, and it needs no panel.
 
 You said a centralized clear feels right for a tool this simple, and that
 per-item CRUD is too much. I agree about CRUD — but note the starting point is
@@ -280,6 +286,85 @@ Why (2) matters despite your instinct: the failure mode of clear-only is
 "I placed six measurements, the fourth was a misclick, now I redo all six."
 That is the moment a user decides the tool isn't serious. It is the cheapest
 possible fix and it stops short of a panel.
+
+---
+
+## D9 — Picking a measurement without stealing clicks
+
+Your condition on D5 was the right one: per-item delete is only worth having
+if selecting a measurement is trivial **and** doesn't make elements near it
+unselectable. That is not automatic — it is the design risk of this half.
+
+**Why it's a real risk.** Measurement geometry is drawn with
+`depthTest: false` and `renderOrder: 1000` (`MeasurementTool.createMeasurement`,
+`createPointMarker`). It renders *on top of everything, including geometry in
+front of it*. So a measurement taken inside a wall still paints over that
+wall. If measurement objects simply joined the pick list, they would win
+clicks they have no depth-based right to — and "nearest hit wins" is
+meaningless when one of the candidates deliberately ignores depth.
+
+Note what protects us today: `raycastVisible` **explicitly filters
+measurements out** (`!obj.userData.isMeasurement`). That filter is why
+selection near a measurement works at all right now. Making measurements
+pickable means removing that protection, so the arbitration has to replace it
+with something better.
+
+### Recommended: thin-target priority + `Tab` to cycle
+
+**1. Only the thin parts are pickable.** The line and the two point markers —
+**not the label sprite.** The label is the only part of a measurement with
+real screen area (a filled rounded-rect quad scaled by measurement length, up
+to `2.0` world units), and it is precisely what would blanket elements behind
+it. Excluding it costs nothing: nobody's instinct is to click a number to
+select the thing it annotates, and the line is right there.
+
+**2. Screen-space threshold, not mesh intersection.** A 1-pixel line is
+miserable to hit with an exact raycast. Instead: project the measurement's
+segment to screen space and pick it when the cursor is within ~6 px of it —
+the same trick CAD apps use for wire geometry. This makes the hit *generous
+where it matters* (along a thin line) while occupying essentially no area
+elsewhere, which is exactly your requirement.
+
+**3. Elements win ties; `Tab` cycles.** When both an element and a measurement
+are candidates, prefer the **element** by default — the model is the content
+and the measurement is annotation. `Tab` then cycles through every candidate
+under the cursor, as in Revit. This is the escape hatch that makes the default
+safe: getting the priority wrong is recoverable in one keystroke, so the
+default can be tuned for the common case rather than the awkward one.
+
+**4. Show what will be picked before the click.** Revit's Tab is only usable
+because the status bar and a pre-highlight tell you what is currently under
+the cursor. Ours: pre-highlight the candidate on hover (the measurement line
+brightens, or the element gets its usual hover treatment). Without this, Tab
+is a guessing game. This pre-highlight is arguably the highest-value part of
+the whole interaction and is useful beyond measurements.
+
+### The alternatives, and why not
+
+- **(a) Elements always win; measurements pickable only while the measurement
+  tool is active.** Simplest and completely safe — element selection cannot
+  regress, because nothing changes while the tool is off. But it means "delete
+  that measurement" requires first activating the tool, which is a mode the
+  user did not ask to enter, and it is a strange asymmetry: you can *see* a
+  measurement in the normal view but not touch it. Reasonable fallback if (c)
+  proves fiddly.
+- **(b) Nearest wins.** Would be right if measurements respected depth. They
+  deliberately don't, and changing that would make measurements disappear
+  inside walls — which defeats the point of drawing them on top.
+
+### Consequences to keep honest
+
+- `Tab` is unbound today — check it does not collide with focus traversal in
+  the surrounding UI (the inspector and panels are real DOM). Likely needs
+  `preventDefault` while the pointer is over the canvas, and must not trap
+  keyboard users who are tabbing through the panels.
+- Cycling needs a stable candidate order or `Tab` will jitter between frames;
+  order by depth then by id, and hold the list for as long as the cursor
+  stays within a few pixels.
+- This is a second pick path alongside `SelectionManager`'s. It must honour
+  the same gates (`toolManager.getActiveTool()`, `isPivotPicking()`,
+  marquee's `setControlsEnabled(false)`) or gestures start fighting — the
+  same lesson the orbit work already paid for.
 
 **Deliberately left open for later** (the Solibri form, if it's ever wanted):
 a measurements list with per-row visibility toggles, multi-select, and
@@ -388,6 +473,11 @@ tolerance) — worth doing only if the manual smoke says it's needed.
   coplanar merging.
 - **Element→element cost.** Brute force is O(n·m). Bounded search + cap +
   honest labelling, and droppable if it misbehaves.
+- **Pick arbitration (D9).** The biggest interaction risk. Measurements draw
+  with `depthTest: false`, so they paint over geometry in front of them;
+  `raycastVisible` filters them out today, and that filter is what makes
+  selection near a measurement work at all. Removing it without the
+  thin-target + `Tab` scheme would regress element selection.
 - **Tool ownership.** The measurement tool, pivot picking, marquee, and the
   new measurement *selection* all want the same clicks. `canNavigate()` and
   the `toolManager.getActiveTool()` gate are the existing precedent — every
@@ -407,7 +497,10 @@ tolerance) — worth doing only if the manual smoke says it's needed.
       re-tune scale constants, label reads the model unit. Tests: a mm model
       and an m model load at the same real-world scale.
 - [ ] **Phase 2 — removal:** "Clear measurements" tray action; click-to-select
-      + `Delete`; stable measurement ids. Tests: tray predicate + id lifecycle.
+      + `Delete`; stable measurement ids; thin-target pick (line + markers, not
+      the label) with a screen-space threshold; `Tab` cycling with hover
+      pre-highlight. Tests: tray predicate, id lifecycle, and the pure
+      point-to-screen-segment distance + candidate ordering.
 - [ ] **Phase 3 — orthogonal:** `measureMath.ts` + unit tests (projection,
       normal transform, degenerate faces); face-lock hover/lock/preview
       feedback; mode buttons + `P`.

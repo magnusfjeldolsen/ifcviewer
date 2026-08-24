@@ -1,3 +1,36 @@
+> **Status: NOT STARTED — analysis still valid, implementation plan STALE.**
+> Last verified 2026-08-24.
+>
+> **What is stale.** Every implementation step in this document is written
+> against **`src/parser/IfcParser.ts`, which no longer exists.** PR #33 moved
+> parsing into a Web Worker (`src/parser/WorkerIfcParser.ts` +
+> `src/parser/ifcWorker.ts`). There are 8 references to the deleted file,
+> including the whole Phase-1 step list and the file-by-file table. Ignore the
+> line numbers and the file names in §"Implementation phases".
+>
+> The relocation is not cosmetic: `ParsedMesh` now crosses a `postMessage`
+> boundary as transferable buffers, so adding a field means touching
+> `src/parser/types.ts`, the worker's emit path, and the transfer list — and
+> any grouping work has to decide whether it runs worker-side (before
+> transfer) or main-thread-side (after). That trade-off is not analysed here.
+>
+> **What is still valid, and still worth reading.** The core insight is
+> unimplemented and unchanged: group by web-ifc's own **`geometryExpressID`**
+> rather than hashing vertex buffers, because two `placedGeom` entries sharing
+> that id share the underlying `IfcGeometry` in the WASM heap — deterministic
+> and free. That id is still read today (`src/parser/ifcWorker.ts:118`) and
+> still dropped before `ParsedMesh` is emitted (`src/parser/types.ts`). The
+> risk analysis (per-instance picking needs a sidecar `instanceId → expressID`
+> map; `SelectionManager`, `raycastVisible` and `MarqueeSelector` all need
+> adapting) also still holds.
+>
+> **Note a contradiction to resolve if this is ever picked up.** The roadmap's
+> `instanced-meshes` card says to "hash positions+indices, group by hash".
+> This document argues that is unnecessary. This document is right; the card
+> should be corrected rather than followed.
+
+---
+
 # Phase — Instanced Meshes (collapse repeated geometry into `THREE.InstancedMesh`)
 
 ## TL;DR
