@@ -204,6 +204,10 @@ export class App {
       appearanceBaseFor: (mesh) => this.appearanceManager.getBaseForMesh(mesh, pristineFor(mesh)),
     });
 
+    // Orbiting over empty space with something selected almost always means
+    // "turn around that", so give the viewer a way to ask where it is.
+    this.viewer.setSelectionCenterProvider(() => this.selectionManager.getSelectionCenter());
+
     // Marquee selection (Alt-drag, window + crossing). Same dependency
     // graph as SelectionManager; coexists via capture-phase pointerdown
     // that only fires when Alt is held and no tool/pivot is active.
@@ -496,6 +500,18 @@ export class App {
           refresh();
         }),
     });
+    // Orbit pivot — the red marker is easy to place and, before this, had no
+    // discoverable way back off. Same idiom as Remove clipping; visible only
+    // while a pivot is actually placed.
+    this.contextualActions.register({
+      id: 'remove-pivot',
+      label: 'Remove pivot',
+      icon: '🎯',
+      isVisible: () => this.viewer.hasPivot(),
+      onClick: () => this.viewer.clearPivot(),
+      subscribe: (refresh) => this.viewer.onPivotChange(refresh),
+    });
+
     this.contextualActions.register({
       id: 'clear-transparency',
       label: 'Clear transparency',

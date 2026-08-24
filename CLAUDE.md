@@ -40,13 +40,16 @@ This ensures main is always deployable and new features can't break the live sit
 2. **Yellow (intermediate)**: Object selection, highlighting, tree view, property inspection
 3. **Red (advanced)**: Large model performance, streaming, clash detection, section cuts, measurement
 
-## Deferred State Application
+## Camera Ownership
 
-When a tool or interaction changes internal state (e.g., setting a new orbit pivot, placing a measurement anchor), don't apply the visual consequence immediately. Instead, defer the render-loop update until the user's next interaction. This prevents jarring view snaps when the user activates a tool, sets state, and then may do something else before acting on it.
+Exactly one thing may drive the camera at a time, and `_controlsMode` in `src/viewer/Viewer.ts` says which:
 
-Pattern: set the state, raise a transitioning flag to skip the render-loop update, and clear the flag when the user begins their next interaction (e.g., via the OrbitControls `'start'` event). Any method that resets or overrides the deferred state (reset, clear, restore) must also clear the flag to avoid freezing the controls.
+- `'user'` — the render loop polls `controls.update()` every frame so OrbitControls can emit its `'change'` event.
+- `'animating'` — a `CameraAnimator` tween owns the camera; the loop skips `controls.update()` so the two don't fight. Every exit path (complete **and** interrupt) must restore `'user'`, or the controls freeze.
 
-See `pivotTransitioning` in `src/viewer/Viewer.ts` for the reference implementation.
+`controls.target` is a **view anchor**, not a pivot. It is always a point on the camera's forward axis, which makes `camera.lookAt(target)` a permanent no-op and stops OrbitControls from re-orienting the camera behind your back. The orbit pivot is a separate field. See `src/viewer/orbitMath.ts`.
+
+This section used to describe a "Deferred State Application" pattern: place a pivot, raise a flag to skip the render-loop update, and let the user's next gesture mask the resulting snap. It is gone, and the lesson is worth keeping — deferring a jarring visual consequence only moves it to the user's next gesture, where it still reads as the view lurching. Fix the state model that produces it instead. The pivot now lives outside `controls.target` precisely so there is nothing left to defer.
 
 ## Implementation Procedure
 
