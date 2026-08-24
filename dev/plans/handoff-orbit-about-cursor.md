@@ -196,8 +196,14 @@ cheapest UX win in the feature.
   capture-phase listener that `stopPropagation()`s before OrbitControls sees it.
   It works, but it depends on how three attaches its listeners — fragile in a
   way that fails silently on a library bump, for a saving of ~15 lines.)
-- **Pan stays theirs.** It already translates camera and target together, which
-  keeps the anchor on the axis; we only correct the anchor's depth.
+- **Pan stays theirs**, but moves to the **middle button** (`mouseButtons.MIDDLE
+  = PAN`, `RIGHT = null`). Right-drag used to pan while right-click opened the
+  context menu — two gestures on one button. Middle is the CAD convention and
+  was free anyway, since `enableZoom = false` had just killed its dolly. Pan
+  itself is unchanged: it already translates camera and target together, which
+  keeps the anchor on the axis; we only correct the anchor's depth. Our
+  pointerdown calls `preventDefault` for button 1 so the browser does not start
+  autoscrolling — three never preventDefaults pointerdown itself.
 
 ## Where the code goes
 

@@ -144,6 +144,14 @@ export class Viewer {
     // OrbitControls' pan, which is exactly what we want it to keep doing.
     this.controls.enableZoom = false;
 
+    // Pan moves to the middle button, the CAD convention (Revit, Navisworks
+    // and Fusion all pan with MMB). Right-drag used to pan, but right-click
+    // also opens our context menu, so the two gestures were fighting over the
+    // same button. Middle was free besides: it defaulted to dolly, which
+    // `enableZoom = false` had just switched off.
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+    this.controls.mouseButtons.RIGHT = null;
+
     this.controls.addEventListener('start', this.onControlsStart);
     // OrbitControls 'change' fires whenever camera or target moves —
     // including programmatic moves through controls.update(). Hooking
@@ -410,6 +418,10 @@ export class Viewer {
       }
       this.pinchDistance = null;
     } else {
+      // Middle-drag pans; claim the event so the browser doesn't start its
+      // autoscroll instead. OrbitControls never calls preventDefault on
+      // pointerdown itself.
+      if (e.button === 1) e.preventDefault();
       if (e.button !== 0) return;
       // Alt-drag belongs to the marquee selector; ctrl / shift / meta stay
       // with OrbitControls' pan, and are the selection modifiers besides.
