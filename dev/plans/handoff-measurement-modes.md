@@ -8,29 +8,38 @@
 
 ## TL;DR — decisions needed
 
+### Open — these need your answer
+
 | # | Decision | Options | Recommended |
 |---|---|---|---|
-| **D1** | **Unit scaling** — the tool reports metres on millimetre models today. | **(a)** read the unit the file declares (we already parse it) and normalize geometry to metres · **(b)** as (a), **plus** a per-model manual override for broken exports · **(c)** auto-detect from model size | **(b)** — and *not* (c): see *D1*, this was never a detection problem |
-| **D2** | Which modes ship in v1 | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
-| **D3** | How the user picks a mode | **(a)** buttons in the tool tray · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
-| ~~**D4**~~ | ~~How much snapping~~ | **DECIDED 2026-08-24: full snapping, in this feature.** Endpoint, midpoint, edge and face. Half-snapping would feel worse than none. | — |
-| **D11** | Does **circle-centre** snapping ship too (round columns, pipe centrelines)? | **(a)** no — endpoint/midpoint/edge/face only · **(b)** yes | **(a)** — the one kind that needs real geometry recovery; see D4 |
-| **D12** | `Tab` now has two jobs — cycling **pick** candidates (D9) and cycling **snap** candidates | **(a)** context-dependent: snaps while placing, picks otherwise · **(b)** different keys | **(a)** — the two are never live at once |
-| **D13** | How to suppress snapping momentarily (measure a raw surface point) | **(a)** hold a modifier · **(b)** toggle in the mode row · **(c)** both | **(c)** — but the modifier needs picking: Alt, Ctrl and Shift are all taken |
-| ~~**D5**~~ | ~~How measurements are removed~~ | **DECIDED 2026-08-24:** "Clear measurements" **+** click-to-select + `Delete`. A list panel stays open for later. | — |
-| **D9** | **How a measurement gets picked without stealing clicks from elements** (raised with D5) | **(a)** elements always win; measurements pickable only while the tool is active · **(b)** whatever is nearest wins · **(c)** thin-target priority + `Tab` to cycle | **(c)** — *thin target, thick line*: see D9 |
-| **D10** | Hover pre-highlight is user-toggleable (decided) — but **where does the setting live, and what is the default?** | **(a)** default **on**, key now + surfaced by `settings-panel` later · **(b)** default off · **(c)** wait for `settings-panel` and ship no toggle yet | **(a)** |
+| **D1** | **Unit scaling** — the tool reports metres on millimetre models today | **(a)** read the unit the file declares (we already parse it) and normalize geometry to metres · **(b)** as (a) **plus** a per-model override for broken exports · **(c)** auto-detect from model size | **(b)** — and *not* (c): this was never a detection problem |
+| **D2** | Which modes ship | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
+| **D3** | How the user picks a mode | **(a)** buttons in the tool row · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
 | **D6** | Do measurements survive a reload | **(a)** no (today) · **(b)** yes, in the session | **(b)** if cheap, else defer |
-| **D7** | Does this bundle `undo-redo-retrofit` | **(a)** yes · **(b)** separate PR | **(a)** — both rewrite the same state machine |
-| **D8** | Label content | **(a)** distance only (today) · **(b)** distance + mode + Δ components | **(b)**, compactly |
+| **D7** | Bundle `undo-redo-retrofit`'s measurement half | **(a)** yes · **(b)** separate PR | **(a)** — both rewrite the same state machine |
+| **D8** | Label content | **(a)** distance only (today) · **(b)** distance + unit + mode marker | **(b)**, compactly |
+| **D11** | Does **circle-centre** snapping ship (round columns, pipe centrelines)? | **(a)** no — endpoint/midpoint/edge/face only · **(b)** yes | **(a)** — the one kind needing real geometry recovery |
+| **D12** | `Tab` has two jobs: cycling **pick** candidates and cycling **snap** candidates | **(a)** context-dependent — snaps while placing, picks otherwise · **(b)** different keys | **(a)** — never live at once |
+| **D13** | How to suppress snapping for a raw point | **(a)** held modifier · **(b)** toggle in the mode row · **(c)** both | **(c)** — but the modifier needs picking: `Alt`, `Ctrl`, `Shift` are taken |
+| **D14** | **Snapping vs orthogonal mode** — the first orthogonal pick must lock a *face*, but snapping pulls picks to endpoints and edges | **(a)** in orthogonal mode the first pick ignores point/edge snaps · **(b)** snap normally, take the face from the underlying raycast anyway · **(c)** snapping off during the first pick | **(b)** — see *Snapping meets orthogonal* |
+| **D15** | **What happens to a measurement when its model is hidden or removed** | **(a)** nothing — it floats (today) · **(b)** hide with the model, delete with it · **(c)** delete on removal, leave on hide | **(b)** |
 
-**The one that isn't optional: D1.** It is a live bug, and it is not confined
-to measuring — see below. Everything else is a genuine preference.
+### Settled
 
-**D9 is the new one**, and it is the real design risk in this feature — see
-*Picking a measurement without stealing clicks*. Making measurements clickable
-is easy; making them clickable **without** ruining element selection near them
-is the part that needs deciding.
+- **D4 — snapping (2026-08-24):** full. Endpoint, midpoint, edge and face ship
+  with the tool; half-snapping would feel worse than none. Circle centre is
+  the only kind deferred (D11).
+- **D5 — removal (2026-08-24):** "Clear measurements" **plus** click-to-select
+  and `Delete`. A Solibri-style list panel stays open for later.
+- **D9 — pick arbitration (2026-08-24):** thin targets only (line and markers,
+  never the label), drawn thick enough to aim at via `Line2`, picked within a
+  screen-space threshold, elements winning ties, `Tab` to cycle.
+- **D10 — hover pre-highlight (2026-08-24):** user-toggleable, default **on**,
+  key under `ifcviewer:settings:*` via the central `Settings` module.
+
+**The one that isn't optional: D1.** It is a live bug and not confined to
+measuring — and per *Review findings* below it should now be its own PR ahead
+of this work, not a commit inside it.
 
 **Sequencing note:** you asked for this before the Data Insight prerequisites.
 That works — it shares nothing with them, so neither blocks the other.
@@ -625,6 +634,82 @@ tolerance) — worth doing only if the manual smoke says it's needed.
 
 ---
 
+## Review findings (2026-08-24, pre-implementation pass)
+
+Re-read end to end before starting. Five things, two of them real gaps.
+
+**1. Units should be its own PR, ahead of this one.** The doc previously said
+"land it as its own commit inside this PR". That is wrong. It touches the
+parse path, the IndexedDB geometry cache, every scene-scale constant, and
+multi-model correctness — and it has nothing to do with measuring except that
+measuring is what exposed it. If it rides inside the measurement PR and turns
+out to be wrong, reverting takes the measurement work with it. It is also
+independently valuable: it unblocks cross-model aggregation, which is the next
+epic. **Make it `normalize-model-units`, its own card and its own PR, merged
+before measurement work starts.**
+
+**2. There is ONE candidate system here, not two.** Phase 2 builds
+hover-highlight + `Tab` cycling to pick *measurements*. Phase 3 builds a hover
+glyph + `Tab` cycling to pick *snap candidates*. That is the same machinery
+twice: *given a cursor, produce ranked candidates, show the top one, let `Tab`
+cycle, let a setting mute the display.* Build it once in Phase 2 as a general
+candidate/overlay/cycle service and have Phase 3 register a new candidate
+kind. Building it twice is precisely the mistake the orbit work paid for
+(two rotate paths, one ignoring the pivot).
+
+**3. Gap — snapping meets orthogonal mode (D14).** Unspecified until now. See
+below.
+
+**4. Gap — measurements outlive their geometry (D15).** Unspecified until now.
+See below.
+
+**5. Size, honestly.** Five phases spanning the parse path, a new snapping
+subsystem, a pick-arbitration system, a mode system, and a geometry proximity
+search. With units split out (finding 1) this is still **3-4 PRs** and the
+largest single feature in the project so far. Worth knowing before kickoff
+rather than discovering at PR three.
+
+### Snapping meets orthogonal mode (D14)
+
+Orthogonal mode's first pick has to establish a **face** — a plane and a
+normal. But snapping's entire job is to pull the pick *off* the face, onto an
+endpoint or an edge. The two goals collide on exactly the click where both are
+most useful.
+
+**Recommended (b): snap the point, take the face from the raycast.** The two
+pieces of information are independent — the raycast tells us which triangle is
+under the cursor (hence the plane and normal) regardless of where the snapped
+point landed. So the user can snap the measurement's origin to a wall corner
+*and* still measure perpendicular to that wall's face. That is strictly more
+capable than either alternative, and it matches the mental model: "start at
+this corner, measure perpendicular to this surface."
+
+Edge case to handle: snapping to an endpoint shared by several faces means the
+raycast face is whichever triangle the cursor happened to be over. The face
+tint (already specified) shows which one was taken, and `Tab` can cycle the
+face candidates at that corner — the same cycling machinery again.
+
+### Measurements outlive their geometry (D15)
+
+A measurement is two world-space points and nothing else. Hide the wall and
+the measurement stays, annotating empty space. Remove the model and it dangles
+with no referent. Load a different model and old measurements sit in the new
+one's coordinate space.
+
+There is a precedent: `SelectionManager.onModelRemoved(modelId)` prunes the
+selection when a model goes. Measurements need the same, which means each
+measurement must record **which models its endpoints were taken from** —
+something D6 (session persistence) needs anyway, so the two decisions share
+their implementation.
+
+**Recommended (b): follow the model.** Hidden model → its measurements hide;
+removed model → its measurements go. A measurement spanning two models follows
+the stricter rule (hidden if either is hidden). This is the behaviour that
+never leaves a number on screen that refers to something the user cannot see —
+and a measurement you cannot verify is worse than no measurement.
+
+---
+
 ## Architecture
 
 - **`src/tools/measureMath.ts` (new, pure)** — projection onto a plane,
@@ -636,10 +721,17 @@ tolerance) — worth doing only if the manual smoke says it's needed.
   before adding modes. It is 481 lines with pointer handling, preview,
   markers, and label sprites all interleaved; adding three modes and a
   selection model on top of that as-is will not survive the next feature.
+- **`src/inspector/CandidateResolver.ts` (new)** — the one candidate system
+  (review finding 2). Given a cursor position, produce ranked candidates from
+  registered providers (elements, measurements, snap points), expose the top
+  one for pre-highlight, and cycle with `Tab`. Phase 2 builds it with the
+  element and measurement providers; Phase 3 registers the snap provider. The
+  ranking and the screen-space distance maths are pure and testable; only the
+  overlay rendering needs WebGL.
 - **`src/core/App.ts`** — the "Clear measurements" tray action, and the
   element→element context-menu item.
-- **Parse path** (D1(a) only) — unit normalization, plus the geometry-cache
-  version bump.
+- **Parse path** — unit normalization. **Now a separate PR** (`normalize-model-units`,
+  review finding 1), not part of this work.
 
 ---
 
@@ -673,10 +765,11 @@ tolerance) — worth doing only if the manual smoke says it's needed.
 - **Triangulation threshold.** The biggest snapping risk: the angle decides
   whether a curved wall becomes a useful handful of edges or a thousand
   useless ones. Tune against real IFC, not a test cube.
-- **Scope.** With full snapping this is comfortably an **L**, and more than one
-  PR's worth. Sub-phase it: (1) units, (2) removal UX, (3) snapping,
-  (4) orthogonal mode, (5) element-to-element. Each is independently shippable,
-  and (1)-(3) are each worth having even if what follows slips.
+- **Scope.** With full snapping this is comfortably an **L** and 3-4 PRs, even
+  after units are split out (review finding 1). Order: units *(separate card,
+  merged first)* → removal UX + the candidate system → snapping → orthogonal
+  mode → element-to-element. Each is independently shippable, and the first
+  three are each worth having even if what follows slips.
 
 ---
 
@@ -685,12 +778,15 @@ tolerance) — worth doing only if the manual smoke says it's needed.
 - [ ] Decisions D1–D8 answered
 - [ ] Branch `feature/measurement-modes`
 - [ ] Run existing tests (baseline)
-- [ ] **Phase 1 — units:** add a numeric length scale to `UnitTable`, move the
-      unit read to model-open, scale vertices at parse, bump the
-      geometry-cache version, re-tune scale constants, label reads the model
-      unit, per-model override in the model tree. Tests: `MILLI` → `0.001`;
-      a mm model and an m model load at the same real-world scale; an
-      override survives a reload and is visibly marked.
+- [ ] **Phase 0 — units: SEPARATE PR (`normalize-model-units`), merged first.**
+      Numeric length scale on `UnitTable`, unit read moved to model-open,
+      vertices scaled at parse, geometry-cache version bump, scale constants
+      re-tuned, per-model override in the model tree. Tests: `MILLI` → `0.001`;
+      a mm model and an m model load at the same real-world scale; an override
+      survives a reload and is visibly marked.
+- [ ] **Phase 1 — the candidate system:** cursor → ranked candidates from
+      registered providers, top-candidate pre-highlight, `Tab` cycling, the
+      D10 setting. Built once here; snapping registers into it in Phase 3.
 - [ ] **Phase 2 — removal:** "Clear measurements" tray action; click-to-select
       + `Delete`; stable measurement ids; thin-target pick (line + markers, not
       the label) with a screen-space threshold; `Tab` cycling with hover
