@@ -204,6 +204,10 @@ export class App {
       appearanceBaseFor: (mesh) => this.appearanceManager.getBaseForMesh(mesh, pristineFor(mesh)),
     });
 
+    // Orbiting over empty space with something selected almost always means
+    // "turn around that", so give the viewer a way to ask where it is.
+    this.viewer.setSelectionCenterProvider(() => this.selectionManager.getSelectionCenter());
+
     // Marquee selection (Alt-drag, window + crossing). Same dependency
     // graph as SelectionManager; coexists via capture-phase pointerdown
     // that only fires when Alt is held and no tool/pivot is active.

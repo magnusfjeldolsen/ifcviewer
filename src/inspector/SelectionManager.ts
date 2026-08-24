@@ -121,6 +121,14 @@ export class SelectionManager {
   private highlights = new Map<string, MeshHighlight>();
 
   /**
+   * Cached centre of the selection's world bounds, for `getSelectionCenter`.
+   * Recomputed lazily because the union runs over every highlighted mesh, and
+   * a marquee selection can hold tens of thousands of them.
+   */
+  private selectionCenter: THREE.Vector3 | null = null;
+  private selectionCenterDirty = true;
+
+  /**
    * Cache: original material reference -> shared highlight variant. Two
    * meshes that share an original material now share the same emissive
    * clone instead of each cloning their own.
@@ -186,6 +194,37 @@ export class SelectionManager {
       identities: ids,
       lockedModelId: sameModel ? firstModel : undefined,
     };
+  }
+
+  /**
+   * Centre of the current selection's world bounding box, or null when
+   * nothing is selected (or nothing selected is currently loaded).
+   *
+   * The viewer uses this as a fallback orbit pivot when the cursor is over
+   * empty space — with something selected, that is almost always what the
+   * user means to turn around.
+   */
+  getSelectionCenter(): THREE.Vector3 | null {
+    if (this.selectionCenterDirty) {
+      this.selectionCenterDirty = false;
+      this.selectionCenter = this.computeSelectionCenter();
+    }
+    return this.selectionCenter ? this.selectionCenter.clone() : null;
+  }
+
+  private computeSelectionCenter(): THREE.Vector3 | null {
+    if (this.highlights.size === 0) return null;
+
+    const bounds = new THREE.Box3();
+    const meshBox = new THREE.Box3();
+    for (const { mesh } of this.highlights.values()) {
+      if (mesh.geometry.boundingBox === null) mesh.geometry.computeBoundingBox();
+      const local = mesh.geometry.boundingBox;
+      if (!local) continue;
+      meshBox.copy(local).applyMatrix4(mesh.matrixWorld);
+      bounds.union(meshBox);
+    }
+    return bounds.isEmpty() ? null : bounds.getCenter(new THREE.Vector3());
   }
 
   /** Phase 4 — current single-model-lock state (for the inspector checkbox). */
@@ -610,6 +649,7 @@ export class SelectionManager {
     if (this.selected.has(key)) return;
     this.selected.add(key);
     this.identities.set(key, identity);
+    this.selectionCenterDirty = true;
     this.highlightExpress(identity.modelId, identity.expressId);
   }
 
@@ -618,6 +658,7 @@ export class SelectionManager {
     const id = this.identities.get(key);
     this.selected.delete(key);
     this.identities.delete(key);
+    this.selectionCenterDirty = true;
     if (id) this.unhighlightExpress(id.modelId, id.expressId);
   }
 
@@ -628,6 +669,7 @@ export class SelectionManager {
     this.highlights.clear();
     this.selected.clear();
     this.identities.clear();
+    this.selectionCenterDirty = true;
   }
 
   private highlightExpress(modelId: string, expressId: number): void {
