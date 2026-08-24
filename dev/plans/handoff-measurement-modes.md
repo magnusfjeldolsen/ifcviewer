@@ -1,5 +1,17 @@
 # Measurement modes — Solibri-style measuring
 
+> ## ⚠ Re-review each step before implementing it
+>
+> **This plan was written 2026-08-24, before any of it was built.** Every step
+> below assumes the codebase as it stood then. Each step that runs *after*
+> another one lands is working against a codebase that step already changed —
+> so before starting any step, re-verify its claims (line references, file
+> names, what earlier steps actually did versus what they planned to do). If a
+> check fails, fix this document first and say what changed. Do not implement
+> around a stale claim.
+>
+> Step 0 (`handoff-normalize-model-units.md`) is separate and lands first.
+
 > **Read this first.** The TL;DR below is every decision that needs your
 > answer before code starts. Everything after it is the reasoning, the
 > research it came from, and the build plan.
@@ -137,14 +149,18 @@ sessions are their own bug source.
   today's mixed scales. Expect to re-tune `computeFitPosition`'s
   `near = distance * 0.01`, the pivot marker's `dist * 0.008`, and the
   measurement marker sizes.
-- *Where to scale:* on the mesh vertices at parse, or as a scale on the
-  model's `THREE.Group`. The group is a one-liner but leaves raw numbers in
-  `geometry.boundingBox` and in every raycast hit, so every consumer would
-  need to remember to convert — exactly the trap we are climbing out of.
-  **Scale the vertices**, so there is one unit in the system.
+- *Where to scale:* **superseded — see `handoff-normalize-model-units.md`.**
+  This section originally argued for scaling the vertices, on the grounds that
+  a group scale "leaves raw numbers in `geometry.boundingBox` and in every
+  raycast hit". That was wrong: `hit.point` is world-space,
+  `Box3.expandByObject` applies `matrixWorld`, and `MarqueeSelector` already
+  multiplies by `matrixWorld` itself. **Scale the group** — it needs no
+  geometry-cache invalidation and makes the per-model override a live
+  one-liner instead of a re-parse.
 
-Land this as its own commit *before* the mode work, so the two stay separable
-if the re-tuning turns out to be fiddly.
+This is no longer part of this feature. It is its own card and its own PR
+(`normalize-model-units`), merged **before** measurement work starts — see
+*Review findings*.
 
 ---
 
@@ -813,3 +829,136 @@ and a measurement you cannot verify is worse than no measurement.
 - [ ] Roadmap: fold the `measurement-snapping` card back into this one
       (decision D4), leaving only circle-centre + intersection deferred
 - [ ] PR
+
+---
+
+## Implementation steps
+
+Each is a PR. Each carries the ⚠ banner's warning: re-verify before starting,
+because the step before it changed the ground.
+
+### Step 0 — `normalize-model-units` *(separate card)*
+
+`dev/plans/handoff-normalize-model-units.md`. Merged before anything below.
+Nothing here depends on it *functionally*, but everything here reports numbers,
+and reporting wrong numbers is worse than not reporting them.
+
+---
+
+### Step 1 — The candidate system + measurement removal
+
+**Why first:** it is the substrate the rest sits on (review finding 2), and it
+independently fixes the fact that there is no way to remove a measurement at
+all today.
+
+**Build**
+
+1. **`CandidateResolver`** — the one system (review finding 2). Given a cursor
+   position, ask each registered provider for candidates, rank them, expose the
+   top for pre-highlight, cycle with `Tab`.
+   - Providers register a kind, a priority, and a `candidatesAt(cursor)`.
+   - Ranking: by kind priority, then screen-space distance. Stable order, or
+     `Tab` jitters between frames.
+   - Pure parts (screen-space point-to-segment distance, ranking, cycle-index
+     arithmetic) go in a testable module. Only the overlay needs WebGL.
+2. **Element provider** — wraps today's `raycastVisible`. Behaviour must not
+   change: this is a refactor with a test-suite-shaped safety net.
+3. **Measurement provider** — line + markers only, **never the label sprite**
+   (D9). Screen-space threshold ~8 px.
+4. **`Line2` swap** — measurements draw with `Line2`/`LineGeometry`/`LineMaterial`
+   at ~3 px. Wire `LineMaterial.resolution` into the existing resize path.
+   **Verify `depthTest: false` still behaves** before building picking on it.
+5. **Hover pre-highlight** + the D10 setting (`ifcviewer:settings:*` via a new
+   central `Settings` module), default on. Throttle the hover raycast to one
+   per frame and reuse `Viewer.lastPointer`.
+6. **Removal** — "Clear measurements" tray action (📏, visible only when
+   measurements exist, same idiom as Remove pivot); click-to-select a
+   measurement; `Delete`/`Backspace` removes it. Stable ids on measurement
+   records so a list panel stays possible later.
+7. **D15** — measurements record which models their endpoints came from; they
+   hide with the model and are removed with it.
+
+**Risks specific to this step:** `Tab` must not trap keyboard users tabbing
+through the real DOM panels. The element provider refactor is where a silent
+selection regression would hide — lean on the existing selection tests.
+
+**Manual test:** select elements near a measurement; delete one of several;
+clear all; `Tab` through overlapping candidates; toggle hover off; hide a model
+and watch its measurements go.
+
+---
+
+### Step 2 — Snapping
+
+**Depends on:** Step 1's `CandidateResolver` (snapping registers a provider).
+
+**Build**
+
+1. **Feature-edge extraction** — `EdgesGeometry(geometry, threshold)` per mesh,
+   computed lazily on hover, cached keyed by the geometry object.
+   Threshold a named constant, start 15–20°, **tune against a curved wall**.
+2. **Candidates** — endpoint (feature-edge vertices), midpoint, nearest point
+   on edge, face (today's raw hit). Priority endpoint > midpoint > edge > face.
+   All local-space: apply `matrixWorld` (and the Step-0 group scale comes with
+   it — see the note in `ModelManager`).
+3. **Glyph overlay** — a distinct glyph per kind. This is what makes snapping
+   trustworthy; an invisible snap is indistinguishable from a bug.
+4. **D12** — `Tab` cycles snaps while placing, pick candidates otherwise.
+5. **D13** — suppression key. **Still unanswered.** `Alt`, `Ctrl`, `Shift` are
+   all taken; needs a decision before this step starts.
+
+**Test:** a triangulated box yields exactly its 12 real edges and no diagonals.
+That single test is the difference between snapping and snapping-to-artefacts.
+
+**Manual test:** corner-to-corner on a wall; a curved wall (threshold check);
+a dense model (hover cost); suppression key.
+
+---
+
+### Step 3 — Orthogonal mode
+
+**Depends on:** Step 2 (D14 — the point comes from the snap, the face from the
+raycast).
+
+**Build**
+
+1. **`measureMath.ts`** — plane projection, orthogonal distance, world normal
+   from a hit (`face.normal` × the mesh's normal matrix), degenerate-face
+   guards. Pure, tested.
+2. **Face lock + feedback** — tint the face on hover, keep it tinted after the
+   lock, draw the normal at the lock point, dashed-to-plane + solid-along-normal
+   during the second pick. Right-click releases the lock.
+3. **Mode selection (D3)** — buttons in a mode row + `P`.
+4. **Label (D8)** — distance, unit, and a `⊥` marker in orthogonal mode.
+
+**Risk:** tessellation normals. If the face tint shows stray triangles being
+caught often, follow up with coplanar-face merging — but only if the manual
+smoke says so.
+
+---
+
+### Step 4 — Element → element shortest distance
+
+**Depends on:** nothing above, structurally. Last because it is the most
+droppable.
+
+**Build**
+
+1. Context-menu item on a two-element selection (the `select-similar` pattern:
+   selection-scoped, built from `SelectionState`).
+2. AABB-vs-AABB first for a lower bound and an instant answer when the
+   elements are far apart; then a bounded triangle-pair search with early exit.
+3. A cap, and an honest "approximate" label above it. Navisworks itself
+   approximates here (centre lines on parametric cylinders), so a stated
+   approximation is in good company — a silent one is not.
+
+**Risk:** O(n·m). If it misbehaves on real models, drop the step; nothing else
+depends on it.
+
+---
+
+### Step 5 — Undo retrofit *(D7, folded in)*
+
+Fold into whichever step touches the placement state machine last, rather than
+running as a sixth pass: a completed measurement is one command, a delete is
+one, mid-placement `Ctrl+Z` cancels the pending placement.

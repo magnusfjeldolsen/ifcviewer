@@ -165,6 +165,16 @@ schedule.
 - **Risks:** the pivot authoring UX and the tab / session-persistence model are the design risk — each gets its own hand-off doc.
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
+### `normalize-model-units` — One world unit = one metre
+- **Status:** queued — **next up**, ahead of `measurement-modes` (its own PR, split out 2026-08-24)
+- **Effort:** S–M
+- **Plan:** `dev/plans/handoff-normalize-model-units.md`
+- **Why:** web-ifc returns geometry in the file's own length unit and nothing normalizes it. Probed directly: `RIB.ifc` (MILLI.METRE) ±30 700, `Snowdon Towers` (METRE) ±37. So (1) `MeasurementTool` hardcodes `" m"` and reads "30700.00 m" for a 30.7 m beam, (2) a mm model and an m model loaded together sit in one scene at **1000× different sizes**, and (3) any future summed length/area/volume is corrupted across models — a landmine directly in front of the Data Insight epic.
+- **What:** Resolve `LENGTHUNIT` to a numeric factor (the declaration is already parsed for the inspector's unit pills; `UnitTable` just maps it to a *symbol*, never a number), read it at model-open rather than lazily on first property query, and apply it as a **uniform scale on the model's `THREE.Group`**. Plus a per-model override in the model tree, because exporters do declare the wrong unit and the user is the only one who can see it.
+- **Why the group and not the vertices:** `hit.point` is world-space, `Box3.expandByObject` applies `matrixWorld`, and `MarqueeSelector` already multiplies by `matrixWorld` — so world-space consumers are correct for free. The group scale needs no geometry-cache invalidation and makes the override a live one-liner instead of a re-parse.
+- **Risks:** scale constants tuned by eye (camera near/far, marker sizes) need verifying against both models; session-restore path must get the scale too; imperial (`IFCCONVERSIONBASEDUNIT`) models are explicitly unhandled and must warn rather than silently mis-scale.
+- **Source:** found while planning `measurement-modes`; split out on review (finding 1) so a revert cannot take the measurement work with it.
+
 ### `measurement-modes` — Solibri-style measuring (point, orthogonal, face-to-face)
 - **Status:** queued — **next up** (user call 2026-08-24: a primitive every IFC viewer should have, and it shares nothing with the Data Insight prerequisites, so neither blocks the other). Bundles `undo-redo-retrofit`'s measurement half.
 - **Effort:** L (sub-phased: units -> removal UX -> snapping -> orthogonal -> element-to-element; see the hand-off doc). Raised from M-L when full snapping was folded in (D4).
