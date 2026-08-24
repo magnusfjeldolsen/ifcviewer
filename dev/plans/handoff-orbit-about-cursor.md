@@ -212,8 +212,13 @@ cheapest UX win in the feature.
   vectors. `Viewer` needs WebGL and has no unit tests; this is the same split as
   `computeFitPosition` in `cameraUtils.ts` and `computePlaneDelta` in
   `ClippingTool.ts`, and it is where the tests go.
-- **`src/viewer/Viewer.ts`** — pointer/wheel/pinch handlers, the `pivot` field,
-  the fallback ladder, marker feedback.
+- **`src/viewer/PivotState.ts` (new)** — the placed pivot plus its change
+  listeners. Extracted for the same reason: the contextual-action tray decides
+  whether to offer "Remove pivot" from `has()` and only re-evaluates when a
+  subscriber fires, so a missed notification leaves a button that lies about
+  the state. Same surface as `ClippingTool.hasClipPlane` / `onStateChange`.
+- **`src/viewer/Viewer.ts`** — pointer/wheel/pinch handlers, the fallback
+  ladder, marker feedback.
 
 ## Consequence for CLAUDE.md
 
@@ -268,6 +273,7 @@ workaround.
 - [ ] Pan re-derives the anchor depth
 - [ ] Pinch handler (finger midpoint)
 - [ ] Transient pivot marker during a cursor-orbit
+- [ ] "Remove pivot" in the contextual-action tray
 - [ ] Delete `'pivot-transition'`; rewrite the CLAUDE.md section
 - [ ] Marquee / pivot-picking / tool gating still hold
 - [ ] Manual test: place pivot → no snap on place, no snap on first orbit;

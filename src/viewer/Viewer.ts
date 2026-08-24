@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
 import { computeFitPosition } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
+import { PivotState } from './PivotState';
 import {
   rotateAboutPivot,
   dollyTowardPoint,
@@ -76,14 +77,14 @@ export class Viewer {
   private transientMarker: THREE.Mesh | null = null;
 
   /**
-   * The rotation centre the user placed with the pivot tool, or null.
+   * The rotation centre the user placed with the pivot tool.
    *
    * Deliberately NOT `controls.target`: that field is also the point
    * OrbitControls makes the camera look at every frame, so putting a pivot
    * there re-centres the view. `controls.target` is only ever a view anchor on
    * the camera's forward axis now — see `orbitMath.ts`.
    */
-  private placedPivot: THREE.Vector3 | null = null;
+  private pivot = new PivotState();
 
   /** Last-resort rotation centre: the centre of the last fit. */
   private defaultTarget = new THREE.Vector3();
@@ -306,18 +307,34 @@ export class Viewer {
     });
   }
 
+  /** True while a pivot placed with the pivot tool is in force. */
+  hasPivot(): boolean {
+    return this.pivot.has();
+  }
+
+  /**
+   * Subscribe to pivot place / clear transitions. Same surface as
+   * `ClippingTool.onStateChange`, and for the same consumer: the
+   * contextual-action tray needs to know when to offer "Remove pivot".
+   */
+  onPivotChange(cb: () => void): () => void {
+    return this.pivot.onChange(cb);
+  }
+
   /** Forget the placed pivot; orbits fall back to the fit centre again. */
   resetPivot(): void {
     this._controlsMode = 'user';
-    this.placedPivot = null;
-    this.removePivotMarker();
-    this.needsRender = true;
+    this.forgetPivot();
   }
 
   clearPivot(): void {
     this._controlsMode = 'user';
     if (this.pickingPivot) this.cancelPivotPicking();
-    this.placedPivot = null;
+    this.forgetPivot();
+  }
+
+  private forgetPivot(): void {
+    this.pivot.clear();
     this.removePivotMarker();
     this.needsRender = true;
   }
@@ -336,6 +353,7 @@ export class Viewer {
     this.controls.removeEventListener('start', this.onControlsStart);
     this.removePivotMarker();
     this.removeTransientMarker();
+    this.pivot.dispose();
     this.controls.dispose();
     this.renderer.dispose();
   }
@@ -376,12 +394,13 @@ export class Viewer {
   private pivotFor(clientX: number, clientY: number): ResolvedPivot {
     const hit = this.raycastAt(clientX, clientY);
     const selection = this.selectionCenter?.() ?? null;
+    const placed = this.pivot.get();
     return resolvePivot({
       hit: hit ? hit.point : null,
       selection,
       selectionOnScreen: selection !== null && this.isOnScreen(selection),
-      placed: this.placedPivot,
-      placedOnScreen: this.placedPivot !== null && this.isOnScreen(this.placedPivot),
+      placed,
+      placedOnScreen: placed !== null && this.isOnScreen(placed),
       fallback: this.defaultTarget,
     });
   }
@@ -638,9 +657,9 @@ export class Viewer {
     // Note what has NOT changed: the camera and `controls.target`. Placing a
     // pivot records a rotation centre and nothing else, so the view cannot
     // move — not now, and not on the first orbit afterwards.
-    this.placedPivot = hit.point.clone();
+    this.pivot.place(hit.point);
 
-    this.showPivotMarker(this.placedPivot);
+    this.showPivotMarker(hit.point);
     this.cancelPivotPicking();
     this.needsRender = true;
   }
