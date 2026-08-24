@@ -10,12 +10,13 @@
 
 | # | Decision | Options | Recommended |
 |---|---|---|---|
-| **D1** | **Unit scaling** — the tool reports metres on millimetre models today. Fix where? | **(a)** normalize geometry to metres at parse · **(b)** keep raw units, scale only the label | **(a)** — see *D1* below, this is a bug beyond measuring |
+| **D1** | **Unit scaling** — the tool reports metres on millimetre models today. | **(a)** read the unit the file declares (we already parse it) and normalize geometry to metres · **(b)** as (a), **plus** a per-model manual override for broken exports · **(c)** auto-detect from model size | **(b)** — and *not* (c): see *D1*, this was never a detection problem |
 | **D2** | Which modes ship in v1 | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
 | **D3** | How the user picks a mode | **(a)** buttons in the tool tray · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
 | **D4** | How much snapping | **(a)** none (today) · **(b)** face only · **(c)** + vertex / edge / midpoint | **(b)** now, **(c)** as its own card |
 | ~~**D5**~~ | ~~How measurements are removed~~ | **DECIDED 2026-08-24:** "Clear measurements" **+** click-to-select + `Delete`. A list panel stays open for later. | — |
-| **D9** | **How a measurement gets picked without stealing clicks from elements** (raised with D5) | **(a)** elements always win; measurements pickable only while the tool is active · **(b)** whatever is nearest wins · **(c)** thin-target priority + `Tab` to cycle | **(c)** |
+| **D9** | **How a measurement gets picked without stealing clicks from elements** (raised with D5) | **(a)** elements always win; measurements pickable only while the tool is active · **(b)** whatever is nearest wins · **(c)** thin-target priority + `Tab` to cycle | **(c)** — *thin target, thick line*: see D9 |
+| **D10** | Hover pre-highlight is user-toggleable (decided) — but **where does the setting live, and what is the default?** | **(a)** default **on**, key now + surfaced by `settings-panel` later · **(b)** default off · **(c)** wait for `settings-panel` and ship no toggle yet | **(a)** |
 | **D6** | Do measurements survive a reload | **(a)** no (today) · **(b)** yes, in the session | **(b)** if cheap, else defer |
 | **D7** | Does this bundle `undo-redo-retrofit` | **(a)** yes · **(b)** separate PR | **(a)** — both rewrite the same state machine |
 | **D8** | Label content | **(a)** distance only (today) · **(b)** distance + mode + Δ components | **(b)**, compactly |
@@ -62,28 +63,76 @@ feature here (model tree, single-model lock, combined fit). So this is a real
 defect today, independent of measuring — measuring is just the first feature
 that makes it undeniable.
 
-**Option (a) — normalize to metres at parse (recommended).** Read the model's
-`LENGTHUNIT`, scale vertices (or the model group) so one world unit is one
-metre, everywhere. Fixes multi-model scale, measurement, and any future
-volume/area work in one place, and means every downstream consumer can assume
-metres.
-- *Cost:* touches the parse path and the geometry cache. The IndexedDB
-  geometry cache (`cached-parsed-geometry-idb`, PR #27) stores parsed
-  geometry — cached entries from before this change would be in raw units, so
-  the cache needs a version bump or the scale factor stored alongside.
-- *Risk:* camera near/far and marker screen-size constants were tuned against
+### This is not a detection problem — and we already read the answer
+
+You asked whether to set the unit per model by hand or auto-detect it. Neither,
+mostly: **the IFC file states its length unit explicitly**, and it is not a
+heuristic or an inference. It is a declaration:
+
+```
+IFCUNITASSIGNMENT → IFCSIUNIT(*, .LENGTHUNIT., .MILLI., .METRE.)
+```
+
+**And we already parse it.** `computeUnitTable`
+(`src/inspector/repository/unitTable.ts`) walks
+`IfcProject.UnitsInContext.Units` today and reads exactly this — it is what
+drives the unit pills in the inspector. `format.ts` even maps the SI prefix
+(`SI_PREFIX_SYMBOL: MILLI → 'm'`) so a length reads "mm".
+
+So the gap is narrow and specific, and it is plumbing, not discovery:
+
+1. **`UnitTable` is `ReadonlyMap<MeasureKind, string>` — symbols only.** It
+   resolves `MILLI` to the *letter* `m`, never to the *number* `0.001`. Add a
+   numeric length-scale alongside the symbol.
+2. **Nothing applies it to geometry.** The scale factor never reaches
+   `ModelManager`, so the scene graph stays in file units.
+3. **Timing.** `ensureUnitTable` runs *lazily, on the first property query*
+   (`ifcWorker.ts`). Geometry scaling needs the factor at model-open, before
+   meshes stream. The read has to move earlier — small, but it is a real
+   sequencing change, not a no-op.
+
+**Auto-detection from model size would be strictly worse.** Guessing "this
+model is 30 000 units across, so probably millimetres" fails on a genuinely
+large site model in metres, and fails silently — the worst kind. We would be
+inferring something the file already told us.
+
+### Recommended: (b) — trust the declaration, allow an override
+
+**Primary: read `LENGTHUNIT` and normalize to metres.** One world unit = one
+metre, everywhere, for every model. Every downstream consumer — measurement,
+multi-model fit, future volume/area aggregation — can then assume metres
+without asking.
+
+**Secondary: a per-model override, in the model tree.** Not because detection
+is unreliable, but because **declarations are sometimes wrong**. Exporters do
+ship files that declare metres while writing millimetres, and when that
+happens the user is the only one who can see it (the model loads 1000× too
+big next to a correct one). A small unit dropdown per model row — defaulting
+to "declared: mm" and rarely touched — turns an unrecoverable situation into a
+two-click fix.
+
+Make the override *visibly* an override: show the declared unit, and mark the
+row when the user has overridden it. Silent overrides that persist across
+sessions are their own bug source.
+
+### Cost and risk either way
+
+- *Geometry cache:* the IndexedDB cache (`cached-parsed-geometry-idb`, PR #27)
+  stores parsed geometry. Entries written before this change are in raw units,
+  so the cache needs a version bump — or the first load after deploy is
+  silently 1000× wrong for anyone with a warm cache.
+- *Scale constants:* camera near/far and marker sizes were tuned against
   today's mixed scales. Expect to re-tune `computeFitPosition`'s
   `near = distance * 0.01`, the pivot marker's `dist * 0.008`, and the
   measurement marker sizes.
+- *Where to scale:* on the mesh vertices at parse, or as a scale on the
+  model's `THREE.Group`. The group is a one-liner but leaves raw numbers in
+  `geometry.boundingBox` and in every raycast hit, so every consumer would
+  need to remember to convert — exactly the trap we are climbing out of.
+  **Scale the vertices**, so there is one unit in the system.
 
-**Option (b) — leave geometry raw, scale only the label.** Cheaper and
-narrower; measuring becomes correct. But multi-model stays broken, and every
-future feature that compares lengths across models inherits the problem.
-
-I'd take (a) and treat it as its own commit *inside* this PR, landing before
-the mode work, so the two are separable if (a) turns up trouble. If you prefer
-(b), say so — but then a `normalize-model-units` card goes on the roadmap and
-the aggregation epic inherits it (the same defect corrupts summed volumes).
+Land this as its own commit *before* the mode work, so the two stay separable
+if the re-tuning turns out to be fiddly.
 
 ---
 
@@ -318,26 +367,58 @@ to `2.0` world units), and it is precisely what would blanket elements behind
 it. Excluding it costs nothing: nobody's instinct is to click a number to
 select the thing it annotates, and the line is right there.
 
-**2. Screen-space threshold, not mesh intersection.** A 1-pixel line is
-miserable to hit with an exact raycast. Instead: project the measurement's
-segment to screen space and pick it when the cursor is within ~6 px of it —
-the same trick CAD apps use for wire geometry. This makes the hit *generous
-where it matters* (along a thin line) while occupying essentially no area
-elsewhere, which is exactly your requirement.
+**2. The line has to be *drawn* thick enough to aim at — and that needs a
+different three.js class.** `THREE.LineBasicMaterial` has a `linewidth`
+property, but **WebGL ignores it**: the core profile only guarantees a line
+width of 1 device pixel, so on Windows/ANGLE (i.e. most of your users) setting
+it does nothing. Today's measurement line is a `THREE.Line` with
+`LineBasicMaterial` — a hairline, and no amount of tweaking that material
+changes it.
 
-**3. Elements win ties; `Tab` cycles.** When both an element and a measurement
+The fix is three's fat-line classes, already vendored in the version we
+depend on (`three@0.183.2`,
+`node_modules/three/examples/jsm/lines/`): `Line2` + `LineGeometry` +
+`LineMaterial`, where `linewidth` *is* honoured and is expressed in screen
+pixels. No new dependency.
+
+- Draw at ~3 px so it reads as a deliberate annotation rather than an artefact.
+- **Gotcha:** `LineMaterial` needs `resolution` kept in sync with the canvas
+  size — it must be updated in the existing `onResize` path, or the apparent
+  thickness drifts after any window resize.
+
+**3. Screen-space threshold for the pick, slightly wider than the draw.** Even
+a 3 px line is a poor exact-raycast target. Project the segment to screen
+space and pick when the cursor is within ~8 px of it — the standard CAD trick
+for wire geometry. Deliberately wider than the 3 px drawn, so it is
+*forgiving* along the line while occupying essentially no area anywhere else,
+which is exactly the constraint you set.
+
+**4. Elements win ties; `Tab` cycles.** When both an element and a measurement
 are candidates, prefer the **element** by default — the model is the content
 and the measurement is annotation. `Tab` then cycles through every candidate
 under the cursor, as in Revit. This is the escape hatch that makes the default
 safe: getting the priority wrong is recoverable in one keystroke, so the
 default can be tuned for the common case rather than the awkward one.
 
-**4. Show what will be picked before the click.** Revit's Tab is only usable
-because the status bar and a pre-highlight tell you what is currently under
-the cursor. Ours: pre-highlight the candidate on hover (the measurement line
-brightens, or the element gets its usual hover treatment). Without this, Tab
-is a guessing game. This pre-highlight is arguably the highest-value part of
-the whole interaction and is useful beyond measurements.
+**5. Show what will be picked before the click — and let the user turn it
+off (D10).** Revit's Tab is only usable because a pre-highlight tells you what
+is currently under the cursor; without it, Tab is a guessing game. So the
+candidate glows on hover: the measurement line brightens (`Line2` makes this
+easy — swap the material colour, keep the width), and an element gets its
+usual highlight treatment.
+
+Per-frame hover raycasting on a 100k-mesh model is not free, and some people
+find hover highlights busy — hence the toggle. **Default it on**: it is what
+makes `Tab` legible, and a feature nobody discovers is worse than one somebody
+disables.
+
+Where the setting lives is D10. The `settings-panel` card (queued) already
+specifies the convention: keys under `ifcviewer:settings:*`, read through a
+central `Settings` module that internals subscribe to. Recommended: add the
+key and that module *now* — it is small — and let `settings-panel` surface it
+later along with the other caps. That way this ships with a working toggle
+(keyboard shortcut and/or a checkbox on the measurement mode row) without
+waiting on a panel, and the panel gets one more row for free when it lands.
 
 ### The alternatives, and why not
 
@@ -473,6 +554,14 @@ tolerance) — worth doing only if the manual smoke says it's needed.
   coplanar merging.
 - **Element→element cost.** Brute force is O(n·m). Bounded search + cap +
   honest labelling, and droppable if it misbehaves.
+- **Fat lines.** `Line2` is a different draw path from `THREE.Line`: it needs
+  `LineMaterial.resolution` maintained on resize, and it does not respond to
+  `depthTest: false` identically. Verify the on-top behaviour survives the
+  swap before building the pick logic on it.
+- **Hover cost.** Pre-highlight means raycasting on pointer-move. Throttle to
+  one raycast per frame, and reuse the same cursor position the navigation
+  code already tracks (`Viewer.lastPointer`) rather than adding a second
+  listener.
 - **Pick arbitration (D9).** The biggest interaction risk. Measurements draw
   with `depthTest: false`, so they paint over geometry in front of them;
   `raycastVisible` filters them out today, and that filter is what makes
@@ -493,9 +582,12 @@ tolerance) — worth doing only if the manual smoke says it's needed.
 - [ ] Decisions D1–D8 answered
 - [ ] Branch `feature/measurement-modes`
 - [ ] Run existing tests (baseline)
-- [ ] **Phase 1 — units:** normalize at parse, bump the geometry-cache version,
-      re-tune scale constants, label reads the model unit. Tests: a mm model
-      and an m model load at the same real-world scale.
+- [ ] **Phase 1 — units:** add a numeric length scale to `UnitTable`, move the
+      unit read to model-open, scale vertices at parse, bump the
+      geometry-cache version, re-tune scale constants, label reads the model
+      unit, per-model override in the model tree. Tests: `MILLI` → `0.001`;
+      a mm model and an m model load at the same real-world scale; an
+      override survives a reload and is visibly marked.
 - [ ] **Phase 2 — removal:** "Clear measurements" tray action; click-to-select
       + `Delete`; stable measurement ids; thin-target pick (line + markers, not
       the label) with a screen-space threshold; `Tab` cycling with hover
