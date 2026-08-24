@@ -13,7 +13,10 @@
 | **D1** | **Unit scaling** — the tool reports metres on millimetre models today. | **(a)** read the unit the file declares (we already parse it) and normalize geometry to metres · **(b)** as (a), **plus** a per-model manual override for broken exports · **(c)** auto-detect from model size | **(b)** — and *not* (c): see *D1*, this was never a detection problem |
 | **D2** | Which modes ship in v1 | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
 | **D3** | How the user picks a mode | **(a)** buttons in the tool tray · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
-| **D4** | How much snapping | **(a)** none (today) · **(b)** face only · **(c)** + vertex / edge / midpoint | **(b)** now, **(c)** as its own card |
+| ~~**D4**~~ | ~~How much snapping~~ | **DECIDED 2026-08-24: full snapping, in this feature.** Endpoint, midpoint, edge and face. Half-snapping would feel worse than none. | — |
+| **D11** | Does **circle-centre** snapping ship too (round columns, pipe centrelines)? | **(a)** no — endpoint/midpoint/edge/face only · **(b)** yes | **(a)** — the one kind that needs real geometry recovery; see D4 |
+| **D12** | `Tab` now has two jobs — cycling **pick** candidates (D9) and cycling **snap** candidates | **(a)** context-dependent: snaps while placing, picks otherwise · **(b)** different keys | **(a)** — the two are never live at once |
+| **D13** | How to suppress snapping momentarily (measure a raw surface point) | **(a)** hold a modifier · **(b)** toggle in the mode row · **(c)** both | **(c)** — but the modifier needs picking: Alt, Ctrl and Shift are all taken |
 | ~~**D5**~~ | ~~How measurements are removed~~ | **DECIDED 2026-08-24:** "Clear measurements" **+** click-to-select + `Delete`. A list panel stays open for later. | — |
 | **D9** | **How a measurement gets picked without stealing clicks from elements** (raised with D5) | **(a)** elements always win; measurements pickable only while the tool is active · **(b)** whatever is nearest wins · **(c)** thin-target priority + `Tab` to cycle | **(c)** — *thin target, thick line*: see D9 |
 | **D10** | Hover pre-highlight is user-toggleable (decided) — but **where does the setting live, and what is the default?** | **(a)** default **on**, key now + surfaced by `settings-panel` later · **(b)** default off · **(c)** wait for `settings-panel` and ship no toggle yet | **(a)** |
@@ -290,23 +293,119 @@ trust is worse than no measurement.
 
 ---
 
-## D4 — Snapping
+## D4 — Snapping *(decided: full, in this feature)*
 
-**Recommended: face-only in v1, full snapping as its own card.**
+Agreed, and for the right reason: a measuring tool that *almost* hits the
+corner is not a measuring tool. This raises the effort from **M-L to L** and
+makes snapping its own phase — but it is more tractable than the roadmap card
+assumed, for one specific reason below.
 
-Orthogonal mode needs the face anyway, so face "snapping" comes free with it.
-Vertex / edge / midpoint / centre snapping is what makes measuring feel
-*precise*, and it is the single biggest thing separating this from Solibri —
-but APS shipped it as a whole extension with its own indicator overlay, and
-that is a fair estimate of the size. Bundling it here would double the PR and
-delay the mode work.
+### The trap that decides the design
 
-Note the honest consequence of deferring: without vertex snapping, measuring
-"corner to corner" stays approximate, because you get the point on the
-triangle under the cursor and nothing pulls it to the corner. That is already
-true today, so this is not a regression — but it is the first thing a Solibri
-user will notice. A `measurement-snapping` card should go on the roadmap at
-the same time as this one, so the gap is recorded rather than forgotten.
+**IFC geometry is triangulated, and naive snapping snaps to the triangles.**
+A rectangular wall face is at least two triangles. Snap to raw mesh vertices
+and you offer the user points *in the middle of a flat surface*; snap to raw
+mesh edges and you offer the **diagonal seam** across that face. Aiming at a
+corner and landing on a triangulation artefact is worse than no snapping,
+because the user cannot see why the number is wrong.
+
+So candidates must come from **feature edges**, not mesh edges — only the
+edges where the two adjacent faces actually diverge.
+
+**Three.js already does exactly this.** `THREE.EdgesGeometry(geometry,
+thresholdAngle)` keeps an edge only when the angle between its adjacent faces
+exceeds the threshold
+(`node_modules/three/src/geometries/EdgesGeometry.js:35`). It turns a
+triangulated box back into its 12 real edges. The threshold wants tuning
+against real IFC — start around 15-20 degrees, keep it a named constant, and
+check it against a curved wall, which is the case that punishes a threshold
+set too low.
+
+### The insight that makes this affordable
+
+**No global spatial index is needed.** The earlier estimate — and the roadmap
+card — assumed snapping means indexing the whole model. It does not: the
+cursor is already over a mesh, and we already raycast it for the hover
+highlight. Candidates come from **that mesh**, computed lazily and cached:
+
+```
+hover a mesh
+  -> EdgesGeometry(mesh.geometry, threshold)   <- once per mesh, cached
+       endpoints = feature-edge vertices
+       midpoints = midpoint of each feature edge
+       edge      = nearest point on the nearest feature edge
+       face      = the raw hit point (today's behaviour)
+  -> keep candidates within ~12 px of the cursor in screen space
+  -> rank: endpoint > midpoint > edge > face
+```
+
+The cost is paid only for meshes the user actually hovers, and once each. That
+is a very different proposition from indexing 100k meshes up front.
+
+Two caveats, honestly:
+
+- **Geometry is not shared today** — `ModelManager` builds a fresh
+  `BufferGeometry` per mesh (`ModelManager.ts:238`), so the cache cannot
+  dedupe across a thousand identical bolts. It stays *correct*, just less
+  efficient than it will be if `instanced-meshes` ever lands. Key the cache by
+  geometry object and it improves for free when that happens.
+- **Spanning elements.** Taking candidates from the hovered mesh alone means
+  you cannot snap to a neighbouring element's corner while hovering this one.
+  That is usually right — you are pointing at *this* thing — but it fails for
+  "from this column's corner to that wall's corner" if the cursor drifts.
+  Mitigation: also consider meshes whose screen-space bounds contain the
+  cursor, capped at a handful.
+
+### Snap kinds
+
+**Shipping** — the set you named, plus the one we already have:
+
+| kind | source | priority |
+|---|---|---|
+| **Endpoint** | feature-edge vertices | 1 (highest) |
+| **Midpoint** | midpoint of a feature edge | 2 |
+| **Edge** | nearest point along a feature edge | 3 |
+| **Face** | raw raycast hit | 4 (fallback = today) |
+
+Priority follows the CAD convention — *points beat lines beat surfaces* —
+because a point is a more specific intent than a surface, and a user aiming
+near a corner means the corner.
+
+**Deferred: circle centre (D11).** Genuinely useful for round columns and pipe
+centrelines, and the one kind that cannot be read off the tessellation. IFC
+curved geometry arrives as flat triangles, so there is no arc to snap to — the
+centre has to be *recovered* by fitting a circle to a coplanar feature-edge
+loop, with a tolerance and an honest failure when the loop is not circular.
+Self-contained work with its own risk, and everything else is useful without
+it. Recommend shipping without, and adding it if round columns turn out to be
+a daily annoyance.
+
+**Also deferred: intersection.** Needs two edges resolved at once; rare in a
+viewer compared with a modeller.
+
+### Feedback
+
+Follow the AutoCAD / APS pattern: a **distinct glyph per snap kind**, drawn in
+an overlay at the candidate point (square = endpoint, triangle = midpoint, and
+so on), so the kind is readable without a legend. APS renders exactly this as
+a mesh in an overlay.
+
+The glyph is what makes snapping trustworthy. Without it the user cannot tell
+whether the tool grabbed the corner or a point 2 mm along the edge — and an
+invisible snap is indistinguishable from a bug.
+
+The same overlay serves the hover pre-highlight (D10), and the D10 toggle
+should govern both: they are one "tell me what you are about to do" system.
+
+### Suppressing it (D13)
+
+Every CAD tool lets you take a raw point without snapping. The convention is a
+held modifier, but **ours are all taken**: `Alt` is the marquee, `Ctrl` and
+`Shift` are the selection modifiers *and* three's pan path. Options: a plain
+letter held down (`S`), or `Space` as hold-to-suppress, plus a sticky toggle
+in the mode row for anyone who wants it off permanently. Decide before
+implementing — a modifier that fights the marquee is exactly the kind of bug
+manual testing catches late and inconsistently.
 
 ---
 
@@ -571,9 +670,13 @@ tolerance) — worth doing only if the manual smoke says it's needed.
   new measurement *selection* all want the same clicks. `canNavigate()` and
   the `toolManager.getActiveTool()` gate are the existing precedent — every
   new pointer path must honour them or gestures start fighting.
-- **Scope.** This document proposes more than one PR's worth. Sub-phase it:
-  (1) units, (2) removal UX, (3) orthogonal mode, (4) element→element. Each is
-  independently shippable and (1) and (2) are worth having even if (3) slips.
+- **Triangulation threshold.** The biggest snapping risk: the angle decides
+  whether a curved wall becomes a useful handful of edges or a thousand
+  useless ones. Tune against real IFC, not a test cube.
+- **Scope.** With full snapping this is comfortably an **L**, and more than one
+  PR's worth. Sub-phase it: (1) units, (2) removal UX, (3) snapping,
+  (4) orthogonal mode, (5) element-to-element. Each is independently shippable,
+  and (1)-(3) are each worth having even if what follows slips.
 
 ---
 
@@ -593,10 +696,16 @@ tolerance) — worth doing only if the manual smoke says it's needed.
       the label) with a screen-space threshold; `Tab` cycling with hover
       pre-highlight. Tests: tray predicate, id lifecycle, and the pure
       point-to-screen-segment distance + candidate ordering.
-- [ ] **Phase 3 — orthogonal:** `measureMath.ts` + unit tests (projection,
+- [ ] **Phase 3 — snapping:** feature-edge extraction via `EdgesGeometry` with
+      a tuned threshold, cached per geometry; endpoint / midpoint / edge / face
+      candidates; screen-space radius + kind priority; per-kind glyph overlay;
+      `Tab` cycling (D12); suppression modifier (D13). Tests: candidate
+      derivation and ranking are pure and live in `measureMath.ts`; assert that
+      a triangulated box yields exactly its 12 real edges and no diagonals.
+- [ ] **Phase 4 — orthogonal:** `measureMath.ts` + unit tests (projection,
       normal transform, degenerate faces); face-lock hover/lock/preview
       feedback; mode buttons + `P`.
-- [ ] **Phase 4 — element→element:** context-menu item on a 2-element
+- [ ] **Phase 5 — element→element:** context-menu item on a 2-element
       selection; AABB bound then bounded triangle search; cap + approximate
       labelling.
 - [ ] Undo: measurement create / delete are single commands; mid-placement
@@ -605,5 +714,6 @@ tolerance) — worth doing only if the manual smoke says it's needed.
 - [ ] Manual test: mm model and m model, singly and together; orthogonal
       against a wall face; a deliberately stray triangle; delete one of
       several; clear all
-- [ ] Roadmap: add the `measurement-snapping` follow-up card
+- [ ] Roadmap: fold the `measurement-snapping` card back into this one
+      (decision D4), leaving only circle-centre + intersection deferred
 - [ ] PR

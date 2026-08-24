@@ -167,7 +167,7 @@ schedule.
 
 ### `measurement-modes` — Solibri-style measuring (point, orthogonal, face-to-face)
 - **Status:** queued — **next up** (user call 2026-08-24: a primitive every IFC viewer should have, and it shares nothing with the Data Insight prerequisites, so neither blocks the other). Bundles `undo-redo-retrofit`'s measurement half.
-- **Effort:** M–L (sub-phased; see the hand-off doc)
+- **Effort:** L (sub-phased: units -> removal UX -> snapping -> orthogonal -> element-to-element; see the hand-off doc). Raised from M-L when full snapping was folded in (D4).
 - **Plan:** `dev/plans/handoff-measurement-modes.md` — decisions D1–D8 need answering before code.
 - **Why:** Today's tool measures point-to-point only, so the common question —
   *"how far is that column from the wall?"* — makes the user hunt for the
@@ -203,13 +203,22 @@ schedule.
 - **Also found:** there is **no user-facing way to remove measurements**. `clearMeasurements()` is only called from `resetView()` (which also drops clipping, selection and appearance) and `dispose()`. `App.ts:82` still carries the comment *"future contextual buttons (Remove measurements, …)"*. A "Clear measurements" tray action is table stakes and is folded into this card.
 - **Source:** user request 2026-08-24 (Solibri comparison); prior art from Navisworks, Solibri, Trimble Connect, BIMcollab and the APS viewer in the hand-off doc.
 
-### `measurement-snapping` — Snap to vertices, edges and midpoints
-- **Status:** queued (follow-up to `measurement-modes`; deliberately not bundled)
-- **Effort:** M–L
-- **Why:** Without it, every pick lands on the triangle under the cursor, so "corner to corner" is approximate and measuring a precise edge is guesswork. It is the single biggest thing separating our tool from Solibri's — but it is a subsystem, not a flag: Autodesk ships it as its own viewer extension (`Autodesk.Snapping`), snapping to vertex, midpoint, intersection, circle centre, three edge kinds and faces, with the snap shown as a mesh in an overlay.
-- **What:** A snap resolver that, given a cursor ray and a hit, offers the nearest candidate of each enabled kind within a screen-space radius, with a visual indicator and a way to cycle candidates. Face snapping ships earlier with `measurement-modes` (orthogonal mode needs it anyway); this card adds the rest.
-- **Risks:** candidate selection at cursor distance is fiddly on dense meshes; needs a spatial index or a per-mesh cache to stay interactive on 100k-mesh models. Interacts with `instanced-meshes` if that ever lands.
-- **Source:** deferred out of `measurement-modes` (decision D4).
+### `measurement-snap-circle-centre` — Snap to the centre of round columns and pipes
+- **Status:** queued (follow-up to `measurement-modes`; the only snap kind deliberately left out)
+- **Effort:** M
+- **Why:** "Centre of that column" and "centreline of that pipe" are common measuring intents, and the only ones the shipped snap set cannot express. Navisworks' Shortest Distance has the same shape of feature (it measures centre lines on parametric cylinders).
+- **What:** Recover a circle from a coplanar feature-edge loop — fit centre + radius, with a tolerance and an honest failure when the loop is not circular — and offer the centre as a snap candidate. Everything else it needs (feature-edge extraction, the candidate ranking, the glyph overlay) ships with `measurement-modes`.
+- **Why it is separate:** IFC curved geometry arrives as flat triangles, so there is no arc in the data — the centre has to be *reconstructed*. That is real geometry work with its own failure modes, and every other snap kind is useful without it.
+- **Risks:** false positives on any polygon that is roughly round; the tolerance decides whether this is helpful or maddening.
+- **Source:** deferred out of `measurement-modes` (decision D11).
+
+_The broader `measurement-snapping` card was folded INTO `measurement-modes`
+on 2026-08-24 (decision D4, user call): endpoint / midpoint / edge / face
+snapping ships with the tool, because a measuring tool that almost hits the
+corner is not a measuring tool. Two findings made that affordable — feature
+edges come from `THREE.EdgesGeometry`'s dihedral-angle filter (so we never
+snap to a triangulation seam), and candidates derive from the mesh already
+under the cursor, so no global spatial index is needed._
 
 ### `settings-panel` — User-tunable caps and preferences
 - **Status:** queued
