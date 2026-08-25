@@ -166,8 +166,9 @@ schedule.
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
 
 ### `measurement-modes` — Solibri-style measuring (point, orthogonal, face-to-face)
-- **Status:** queued (independent of the Data Insight epic — schedule freely; bundle with `undo-redo-retrofit`)
-- **Effort:** M
+- **Status:** queued — **next up**, starting at step 1 (user call 2026-08-24: a primitive every IFC viewer should have, and it shares nothing with the Data Insight prerequisites, so neither blocks the other). Bundles `undo-redo-retrofit`'s measurement half.
+- **Effort:** L (sub-phased: removal UX + the candidate system -> snapping -> orthogonal -> element-to-element; see the hand-off doc). Raised from M-L when full snapping was folded in (D4); the units step was cancelled when its premise was disproved.
+- **Plan:** `dev/plans/handoff-measurement-modes.md` — decisions D1–D8 need answering before code.
 - **Why:** Today's tool measures point-to-point only, so the common question —
   *"how far is that column from the wall?"* — makes the user hunt for the
   shortest path by eye and get an answer that is wrong by however far off-normal
@@ -198,7 +199,26 @@ schedule.
   placement lifecycle (a completed measurement = one command, mid-placement
   Ctrl+Z cancels). Doing both in one visit avoids reworking the same state
   machine twice.
-- **Source:** user request 2026-08-24 (Solibri comparison).
+- **A reported unit bug turned out not to exist (2026-08-24 → disproved 2026-08-25).** Planning claimed web-ifc returns geometry in the file's own length unit, on the strength of a probe that read raw vertex buffers. It does not: the factor is baked into each mesh's `flatTransformation` (measured — uniform matrix scale is exactly `0.001` for `RIB.ifc` and exactly `0.304800` for the foot-based `Snowdon Towers`). The scene has always been metres and `" m"` was always correct. A `normalize-model-units` card was written, implemented and **reverted before any PR** when manual testing showed it double-applied the factor. Kept here because the failure mode is worth remembering: two probes agreed with each other while both read the wrong thing, and only running the app settled it. Details in `dev/plans/handoff-normalize-model-units.md`.
+- **Also found:** there is **no user-facing way to remove measurements**. `clearMeasurements()` is only called from `resetView()` (which also drops clipping, selection and appearance) and `dispose()`. `App.ts:82` still carries the comment *"future contextual buttons (Remove measurements, …)"*. A "Clear measurements" tray action is table stakes and is folded into this card.
+- **Source:** user request 2026-08-24 (Solibri comparison); prior art from Navisworks, Solibri, Trimble Connect, BIMcollab and the APS viewer in the hand-off doc.
+
+### `measurement-snap-circle-centre` — Snap to the centre of round columns and pipes
+- **Status:** queued (follow-up to `measurement-modes`; the only snap kind deliberately left out)
+- **Effort:** M
+- **Why:** "Centre of that column" and "centreline of that pipe" are common measuring intents, and the only ones the shipped snap set cannot express. Navisworks' Shortest Distance has the same shape of feature (it measures centre lines on parametric cylinders).
+- **What:** Recover a circle from a coplanar feature-edge loop — fit centre + radius, with a tolerance and an honest failure when the loop is not circular — and offer the centre as a snap candidate. Everything else it needs (feature-edge extraction, the candidate ranking, the glyph overlay) ships with `measurement-modes`.
+- **Why it is separate:** IFC curved geometry arrives as flat triangles, so there is no arc in the data — the centre has to be *reconstructed*. That is real geometry work with its own failure modes, and every other snap kind is useful without it.
+- **Risks:** false positives on any polygon that is roughly round; the tolerance decides whether this is helpful or maddening.
+- **Source:** deferred out of `measurement-modes` (decision D11).
+
+_The broader `measurement-snapping` card was folded INTO `measurement-modes`
+on 2026-08-24 (decision D4, user call): endpoint / midpoint / edge / face
+snapping ships with the tool, because a measuring tool that almost hits the
+corner is not a measuring tool. Two findings made that affordable — feature
+edges come from `THREE.EdgesGeometry`'s dihedral-angle filter (so we never
+snap to a triangulation seam), and candidates derive from the mesh already
+under the cursor, so no global spatial index is needed._
 
 ### `settings-panel` — User-tunable caps and preferences
 - **Status:** queued
