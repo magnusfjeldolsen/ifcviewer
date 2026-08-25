@@ -1,4 +1,53 @@
-# Normalize model units — one world unit = one metre
+# Normalize model units — VOID, THE PREMISE WAS WRONG
+
+> ## ❌ DO NOT IMPLEMENT. There is no unit bug.
+>
+> **Disproved 2026-08-25 by manual testing.** web-ifc **already normalizes
+> geometry to metres**: it bakes the length-unit factor into each mesh's
+> `flatTransformation`, which `ModelManager` applies as the mesh matrix. The
+> raw vertex buffers are in file units; the *placement matrix* converts them.
+>
+> Measured — the uniform scale of the first placement matrix in each model:
+>
+> ```
+> assets/ifcs/RIB.ifc          matrix scale = 0.001000, 0.001000, 0.001000
+> Snowdon Towers …Structural   matrix scale = 0.304800, 0.304800, 0.304800
+> ```
+>
+> Exactly the millimetre factor and exactly the foot factor. The scene has
+> always been in metres, `MeasurementTool`'s hardcoded `" m"` was always
+> **correct**, and multi-model was never broken.
+>
+> **Where the error came from.** The original probe read
+> `GetVertexArray(...)` — raw, local, file-unit vertices — and never looked at
+> `flatTransformation`. Seeing ±30 700 for RIB and ±37 for Snowdon, it
+> concluded "millimetres vs metres, unreconciled". Both numbers were real;
+> the conclusion did not follow, because the transform reconciles them.
+>
+> **What implementing it did.** Applying the declared factor to `group.scale`
+> multiplied it in a *second* time: RIB 1000x too small (a 26 m span labelled
+> "26 mm"), Snowdon 3.28x too small (3.61 m labelled "1.10 m"). Caught in the
+> first minute of manual testing, before any PR. Branch kept as
+> `abandoned/normalize-model-units-wrong-premise`; never pushed.
+>
+> **Lesson worth keeping.** Two probes agreed with each other and were both
+> reading the wrong thing. The re-review step caught a real detail (Snowdon is
+> feet, not metres) but inherited the framing and so could not catch the
+> framing itself. What finally settled it was running the app and looking at
+> a number — which is exactly what the manual-test gate is for.
+>
+> **What survives:** nothing structural. One cosmetic detail found during the
+> work is worth keeping and belongs to measurement decision D8: a sub-metre
+> distance renders as "0.00 m" under `toFixed(2)`, so the label should switch
+> to millimetres below 1 m.
+
+---
+
+_Original plan retained below for the record only. Every claim about unit
+handling in it is wrong._
+
+---
+
 
 > ## ⚠ Re-review before implementing
 >

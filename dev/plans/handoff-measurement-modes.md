@@ -24,12 +24,12 @@
 
 | # | Decision | Options | Recommended |
 |---|---|---|---|
-| **D1** | **Unit scaling** — the tool reports metres on millimetre models today | **(a)** read the unit the file declares (we already parse it) and normalize geometry to metres · **(b)** as (a) **plus** a per-model override for broken exports · **(c)** auto-detect from model size | **(b)** — and *not* (c): this was never a detection problem |
+| ~~**D1**~~ | ~~Unit scaling~~ | **WITHDRAWN 2026-08-25 — there was no bug.** web-ifc already bakes the length factor into each mesh's placement matrix (measured: exactly `0.001` for RIB, exactly `0.304800` for Snowdon). The scene was always metres. See `handoff-normalize-model-units.md`. | — |
 | **D2** | Which modes ship | **(a)** point→point + orthogonal · **(b)** + surface→surface · **(c)** + element→element shortest distance | **(a) + (c)** |
 | **D3** | How the user picks a mode | **(a)** buttons in the tool row · **(b)** hotkey during placement · **(c)** infer automatically | **(a) + (b)** |
 | **D6** | Do measurements survive a reload | **(a)** no (today) · **(b)** yes, in the session | **(b)** if cheap, else defer |
 | **D7** | Bundle `undo-redo-retrofit`'s measurement half | **(a)** yes · **(b)** separate PR | **(a)** — both rewrite the same state machine |
-| **D8** | Label content | **(a)** distance only (today) · **(b)** distance + unit + mode marker | **(b)**, compactly |
+| **D8** | Label content | **(a)** distance only (today) · **(b)** distance + unit + mode marker, switching to mm below 1 m so a 3 mm gap does not render as "0.00 m" | **(b)**, compactly |
 | **D11** | Does **circle-centre** snapping ship (round columns, pipe centrelines)? | **(a)** no — endpoint/midpoint/edge/face only · **(b)** yes | **(a)** — the one kind needing real geometry recovery |
 | **D12** | `Tab` has two jobs: cycling **pick** candidates and cycling **snap** candidates | **(a)** context-dependent — snaps while placing, picks otherwise · **(b)** different keys | **(a)** — never live at once |
 | **D13** | How to suppress snapping for a raw point | **(a)** held modifier · **(b)** toggle in the mode row · **(c)** both | **(c)** — but the modifier needs picking: `Alt`, `Ctrl`, `Shift` are taken |
@@ -49,9 +49,12 @@
 - **D10 — hover pre-highlight (2026-08-24):** user-toggleable, default **on**,
   key under `ifcviewer:settings:*` via the central `Settings` module.
 
-**The one that isn't optional: D1.** It is a live bug and not confined to
-measuring — and per *Review findings* below it should now be its own PR ahead
-of this work, not a commit inside it.
+**D1 is withdrawn.** It was reported here as a live bug on the strength of a
+probe that read raw vertex buffers and ignored the placement matrix. web-ifc
+already normalizes to metres. Nothing in this feature is blocked by units, and
+the `normalize-model-units` card is gone. The only fragment worth keeping is
+cosmetic and now lives in D8: sub-metre distances must not render as
+"0.00 m".
 
 **Sequencing note:** you asked for this before the Data Insight prerequisites.
 That works — it shares nothing with them, so neither blocks the other.
@@ -837,11 +840,11 @@ and a measurement you cannot verify is worse than no measurement.
 Each is a PR. Each carries the ⚠ banner's warning: re-verify before starting,
 because the step before it changed the ground.
 
-### Step 0 — `normalize-model-units` *(separate card)*
+### ~~Step 0 — `normalize-model-units`~~ — CANCELLED 2026-08-25
 
-`dev/plans/handoff-normalize-model-units.md`. Merged before anything below.
-Nothing here depends on it *functionally*, but everything here reports numbers,
-and reporting wrong numbers is worse than not reporting them.
+The premise was wrong: web-ifc already normalizes geometry to metres via the
+placement matrix. See `handoff-normalize-model-units.md` for the measurement
+that disproved it. **Step 1 is now the first step.**
 
 ---
 
