@@ -674,11 +674,13 @@ export class App {
     this.candidateResolver.register({
       kind: 'measurement',
       candidatesAt: (cursor) => this.measurementTool.candidatesAt(cursor),
-      pick: (candidate) => {
+      pick: (candidate, mode) => {
         const id = measurementPayload(candidate)?.measurementId;
         if (!id) return;
+        // Element and measurement selections never coexist, so the element one
+        // goes even when Ctrl is adding to the measurement selection.
         this.selectionManager.clear();
-        this.measurementTool.selectMeasurement(id);
+        this.measurementTool.selectMeasurement(id, mode);
       },
       highlight: (candidate) =>
         this.measurementTool.setHovered(

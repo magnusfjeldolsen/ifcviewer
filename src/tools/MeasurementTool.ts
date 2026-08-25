@@ -12,6 +12,7 @@ import {
 } from './MeasurementStore';
 import { measurementCandidatesAt } from './measurementPicking';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
+import type { SelectionMode } from '../inspector/types';
 
 export interface MeasurementToolDeps {
   renderer: THREE.WebGLRenderer;
@@ -160,16 +161,20 @@ export class MeasurementTool implements Tool {
     this.deps.requestRender?.();
   }
 
-  /** Select a measurement so `Delete` knows what to take, or `null` to clear. */
-  selectMeasurement(id: string | null): void {
-    this.store.select(id);
+  /**
+   * Apply a click to the measurement selection so `Delete` knows what to take.
+   * `mode` is the element-selection vocabulary: plain click replaces, Ctrl/Cmd
+   * toggles, Shift removes. `null` deselects everything.
+   */
+  selectMeasurement(id: string | null, mode: SelectionMode = 'replace'): void {
+    this.store.applySelection(id, mode);
   }
 
-  getSelectedMeasurementId(): string | null {
-    return this.store.getSelectedId();
+  getSelectedMeasurementIds(): string[] {
+    return this.store.getSelectedIds();
   }
 
-  /** `Delete` / `Backspace`. Returns whether anything was removed. */
+  /** `Delete` / `Backspace` — takes every selected measurement in one go. */
   removeSelectedMeasurement(): boolean {
     return this.store.removeSelected();
   }
@@ -468,9 +473,8 @@ export class MeasurementTool implements Tool {
 
   /** Apply the normal / hovered / selected colour to every measurement line. */
   private restyleLines(): void {
-    const selectedId = this.store.getSelectedId();
     for (const [id, line] of this.lines) {
-      const selected = id === selectedId;
+      const selected = this.store.isSelected(id);
       const hovered = id === this.hoveredId;
       const color = selected ? LINE_COLOR_SELECTED : hovered ? LINE_COLOR_HOVER : LINE_COLOR;
       line.material.color.setHex(color);

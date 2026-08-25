@@ -137,6 +137,28 @@ describe('CandidateResolver', () => {
     expect(elementPick).not.toHaveBeenCalled();
   });
 
+  it("carries the click's modifier mode to the provider", () => {
+    // Ctrl+click has to mean "add to the selection" whichever kind of thing is
+    // under the cursor; two meanings in one viewport would be a bug itself.
+    const pick = vi.fn();
+    const resolver = new CandidateResolver();
+    resolver.register({ kind: 'measurement', candidatesAt: () => [measurement('m1')], pick });
+
+    resolver.resolve(CURSOR);
+    resolver.pick(resolver.getActive()!, 'add');
+    expect(pick).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'measurement' }), 'add');
+  });
+
+  it('defaults to replace when no mode is given', () => {
+    const pick = vi.fn();
+    const resolver = new CandidateResolver();
+    resolver.register({ kind: 'measurement', candidatesAt: () => [measurement('m1')], pick });
+
+    resolver.resolve(CURSOR);
+    resolver.pick(resolver.getActive()!);
+    expect(pick).toHaveBeenLastCalledWith(expect.anything(), 'replace');
+  });
+
   it('lights the active candidate and clears every other provider', () => {
     const measurementHighlight = vi.fn();
     const elementHighlight = vi.fn();

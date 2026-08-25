@@ -24,7 +24,7 @@ describe('MeasurementStore', () => {
     it('starts empty', () => {
       expect(store.size()).toBe(0);
       expect(store.list()).toEqual([]);
-      expect(store.getSelectedId()).toBeNull();
+      expect(store.getSelectedIds()).toEqual([]);
     });
 
     it('assigns a distinct id to every measurement', () => {
@@ -73,15 +73,15 @@ describe('MeasurementStore', () => {
 
     it('clears the selection when the selected measurement is removed', () => {
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
-      store.select(a.id);
+      store.applySelection(a.id);
       store.remove(a.id);
-      expect(store.getSelectedId()).toBeNull();
+      expect(store.getSelectedIds()).toEqual([]);
     });
 
     it('removeSelected drops the selected measurement, and nothing without one', () => {
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
       expect(store.removeSelected()).toBe(false);
-      store.select(a.id);
+      store.applySelection(a.id);
       expect(store.removeSelected()).toBe(true);
       expect(store.size()).toBe(0);
     });
@@ -89,11 +89,11 @@ describe('MeasurementStore', () => {
     it('clear() empties the store and the selection', () => {
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
       store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
-      store.select(a.id);
+      store.applySelection(a.id);
 
       expect(store.clear()).toBe(true);
       expect(store.size()).toBe(0);
-      expect(store.getSelectedId()).toBeNull();
+      expect(store.getSelectedIds()).toEqual([]);
     });
 
     it('clear() on an empty store is a no-op', () => {
@@ -102,18 +102,135 @@ describe('MeasurementStore', () => {
   });
 
   describe('selection', () => {
-    it('selecting an unknown id clears rather than storing a dangling reference', () => {
+    it('a plain click replaces the selection', () => {
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
-      store.select(a.id);
-      store.select('ghost');
-      expect(store.getSelectedId()).toBeNull();
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+
+      store.applySelection(a.id);
+      store.applySelection(b.id);
+      expect(store.getSelectedIds()).toEqual([b.id]);
     });
 
-    it('select(null) deselects', () => {
+    it('Ctrl/Cmd+click adds to the selection', () => {
+      // The user's report: "can't multi select by holding ctrl on measurement
+      // lines". Mirrors SelectionManager's 'add' mode exactly.
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
-      store.select(a.id);
-      store.select(null);
-      expect(store.getSelectedId()).toBeNull();
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      const c = store.add(v(0, 0, 0), v(3, 0, 0), ['m']);
+
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+      store.applySelection(c.id, 'add');
+      expect(store.getSelectedIds()).toEqual([a.id, b.id, c.id]);
+      expect(store.selectedCount()).toBe(3);
+    });
+
+    it('Ctrl/Cmd+click TOGGLES, so a mis-click undoes itself', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+      store.applySelection(b.id, 'add');
+      expect(store.getSelectedIds()).toEqual([a.id]);
+    });
+
+    it('Shift+click removes without touching the rest', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+      store.applySelection(a.id, 'remove');
+      expect(store.getSelectedIds()).toEqual([b.id]);
+    });
+
+    it('Shift+click on an unselected measurement is a no-op', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'remove');
+      expect(store.getSelectedIds()).toEqual([a.id]);
+    });
+
+    it('a plain click on an unknown id clears — click empty space to deselect', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection('ghost');
+      expect(store.getSelectedIds()).toEqual([]);
+    });
+
+    it('Ctrl+click on an unknown id leaves the selection alone', () => {
+      // Never store a dangling reference, but never destroy a multi-selection
+      // because one candidate went stale mid-gesture either.
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection('ghost', 'add');
+      expect(store.getSelectedIds()).toEqual([a.id]);
+    });
+
+    it('applySelection(null) deselects everything', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+      store.applySelection(null);
+      expect(store.getSelectedIds()).toEqual([]);
+    });
+
+    it('isSelected answers for every member of a multi-selection', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      const c = store.add(v(0, 0, 0), v(3, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection(c.id, 'add');
+
+      expect(store.isSelected(a.id)).toBe(true);
+      expect(store.isSelected(b.id)).toBe(false);
+      expect(store.isSelected(c.id)).toBe(true);
+    });
+  });
+
+  describe('deleting a multi-selection', () => {
+    it('removeSelected takes every selected measurement at once', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      const c = store.add(v(0, 0, 0), v(3, 0, 0), ['m']);
+
+      store.applySelection(a.id);
+      store.applySelection(c.id, 'add');
+      expect(store.removeSelected()).toBe(true);
+
+      expect(store.list().map((r) => r.id)).toEqual([b.id]);
+      expect(store.getSelectedIds()).toEqual([]);
+    });
+
+    it('notifies exactly once for a multi-delete', () => {
+      // One Delete keypress is one user gesture, so the tray refreshes once.
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['m']);
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+
+      const cb = vi.fn();
+      store.onChange(cb);
+      store.removeSelected();
+      expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports false with nothing selected', () => {
+      store.add(v(0, 0, 0), v(1, 0, 0), ['m']);
+      expect(store.removeSelected()).toBe(false);
+    });
+
+    it('drops a selected measurement from the selection when its model goes', () => {
+      const a = store.add(v(0, 0, 0), v(1, 0, 0), ['model-a']);
+      const b = store.add(v(0, 0, 0), v(2, 0, 0), ['model-b']);
+      store.applySelection(a.id);
+      store.applySelection(b.id, 'add');
+
+      store.onModelRemoved('model-a');
+      expect(store.getSelectedIds()).toEqual([b.id]);
     });
   });
 
@@ -236,7 +353,7 @@ describe('MeasurementStore', () => {
       const a = store.add(v(0, 0, 0), v(1, 0, 0), ['model-a']);
       expect(cb).toHaveBeenCalledTimes(1);
 
-      store.select(a.id);
+      store.applySelection(a.id);
       expect(cb).toHaveBeenCalledTimes(2);
 
       store.setModelVisible('model-a', false);
@@ -252,12 +369,12 @@ describe('MeasurementStore', () => {
       store.onChange(cb);
 
       store.remove('ghost');
-      store.select(null);
+      store.applySelection(null);
       store.setModelVisible('model-a', true); // already visible
       expect(cb).not.toHaveBeenCalled();
 
-      store.select(a.id);
-      store.select(a.id); // already selected
+      store.applySelection(a.id);
+      store.applySelection(a.id); // already selected
       expect(cb).toHaveBeenCalledTimes(1);
     });
 

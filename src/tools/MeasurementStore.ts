@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+// Shared vocabulary, not a dependency on the inspector: measurement clicks use
+// the SAME modifier semantics as element clicks (see `applySelection`).
+import type { SelectionMode } from '../inspector/types';
 
 /**
  * The bookkeeping half of the measurement tool: what measurements exist, which
@@ -38,7 +41,13 @@ export interface SerializedMeasurement {
 
 export class MeasurementStore {
   private records: MeasurementRecord[] = [];
-  private selectedId: string | null = null;
+  /**
+   * Selected measurement ids, in click order. A Set rather than a single id so
+   * Ctrl/Cmd+click can build a multi-selection and one `Delete` takes the lot
+   * — BIMcollab does the same, and the alternative (delete them one at a time)
+   * is the same "now redo all six" annoyance per-item delete exists to fix.
+   */
+  private selectedIds = new Set<string>();
   /** Models the user has switched off in the model tree (D15). */
   private hiddenModels = new Set<string>();
   private listeners: Array<() => void> = [];
@@ -57,8 +66,17 @@ export class MeasurementStore {
     return this.records.find((r) => r.id === id);
   }
 
-  getSelectedId(): string | null {
-    return this.selectedId;
+  /** Selected ids in click order. Empty when nothing is selected. */
+  getSelectedIds(): string[] {
+    return [...this.selectedIds];
+  }
+
+  isSelected(id: string): boolean {
+    return this.selectedIds.has(id);
+  }
+
+  selectedCount(): number {
+    return this.selectedIds.size;
   }
 
   /**
@@ -93,35 +111,62 @@ export class MeasurementStore {
     const before = this.records.length;
     this.records = this.records.filter((r) => r.id !== id);
     if (this.records.length === before) return false;
-    if (this.selectedId === id) this.selectedId = null;
+    this.selectedIds.delete(id);
     this.notify();
     return true;
   }
 
   /** Remove everything. No-op (and no notification) when already empty. */
   clear(): boolean {
-    if (this.records.length === 0 && this.selectedId === null) return false;
+    if (this.records.length === 0 && this.selectedIds.size === 0) return false;
     this.records = [];
-    this.selectedId = null;
+    this.selectedIds.clear();
     this.notify();
     return true;
   }
 
   /**
-   * Select a measurement so `Delete` knows what to take, or `null` to
-   * deselect. Selecting an id that is not present clears the selection rather
-   * than storing a dangling reference.
+   * Apply a click to the measurement selection.
+   *
+   * The modes are `SelectionManager`'s, deliberately: `replace` for a plain
+   * click, `add` (toggle) for Ctrl/Cmd, `remove` for Shift. Ctrl+click meaning
+   * one thing on an element and another on a measurement, in the same
+   * viewport, would be a bug in its own right.
+   *
+   * `null` deselects everything. An id the store does not hold is ignored
+   * rather than stored as a dangling reference — except under `replace`, where
+   * it still clears, matching "click empty space to deselect".
    */
-  select(id: string | null): void {
-    const next = id !== null && this.get(id) ? id : null;
-    if (next === this.selectedId) return;
-    this.selectedId = next;
-    this.notify();
+  applySelection(id: string | null, mode: SelectionMode = 'replace'): void {
+    const known = id !== null && this.get(id) !== undefined;
+    const before = this.selectionKey();
+
+    if (id === null || !known) {
+      if (mode === 'replace') this.selectedIds.clear();
+    } else if (mode === 'replace') {
+      this.selectedIds.clear();
+      this.selectedIds.add(id);
+    } else if (mode === 'add') {
+      // Toggle, so a mis-Ctrl-click is undone by repeating it.
+      if (!this.selectedIds.delete(id)) this.selectedIds.add(id);
+    } else {
+      this.selectedIds.delete(id);
+    }
+
+    if (this.selectionKey() !== before) this.notify();
   }
 
-  /** `Delete` / `Backspace`: drop the selected measurement, if any. */
+  /**
+   * `Delete` / `Backspace`: drop every selected measurement in one go.
+   * Returns whether anything was removed.
+   */
   removeSelected(): boolean {
-    return this.selectedId === null ? false : this.remove(this.selectedId);
+    if (this.selectedIds.size === 0) return false;
+    const doomed = this.selectedIds;
+    this.selectedIds = new Set();
+    this.records = this.records.filter((r) => !doomed.has(r.id));
+    this.notify();
+    return true;
   }
 
   /**
@@ -134,7 +179,9 @@ export class MeasurementStore {
     const survivors = this.records.filter((r) => !r.modelIds.includes(modelId));
     if (survivors.length === this.records.length) return false;
     this.records = survivors;
-    if (this.selectedId !== null && !this.get(this.selectedId)) this.selectedId = null;
+    for (const id of [...this.selectedIds]) {
+      if (!this.get(id)) this.selectedIds.delete(id);
+    }
     this.notify();
     return true;
   }
@@ -183,7 +230,7 @@ export class MeasurementStore {
         end: new THREE.Vector3(...e.end),
         modelIds: [...e.modelIds],
       }));
-    this.selectedId = null;
+    this.selectedIds.clear();
     this.notify();
     return this.records;
   }
@@ -205,12 +252,22 @@ export class MeasurementStore {
   dispose(): void {
     this.listeners = [];
     this.records = [];
-    this.selectedId = null;
+    this.selectedIds.clear();
     this.hiddenModels.clear();
   }
 
   private notify(): void {
     for (const cb of [...this.listeners]) cb();
+  }
+
+  /**
+   * Order-sensitive fingerprint of the selection, so `applySelection` can stay
+   * silent when a click changed nothing (Shift on an unselected measurement,
+   * a plain click on the one already selected). A tray that re-renders on
+   * every no-op click churns for no reason.
+   */
+  private selectionKey(): string {
+    return [...this.selectedIds].join('|');
   }
 }
 

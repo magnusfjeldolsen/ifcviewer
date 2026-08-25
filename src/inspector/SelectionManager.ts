@@ -77,7 +77,7 @@ export interface SelectionManagerDeps {
    */
   candidates?: {
     activeAt(clientX: number, clientY: number): Candidate | null;
-    pick(candidate: Candidate): void;
+    pick(candidate: Candidate, mode: SelectionMode): void;
   };
 }
 
@@ -643,7 +643,9 @@ export class SelectionManager {
     if (candidates) {
       const active = candidates.activeAt(e.clientX, e.clientY);
       if (active && active.kind !== 'element') {
-        candidates.pick(active);
+        // Same modifier reading the element path uses, so Ctrl+click means
+        // "add to the selection" whichever kind of thing is under the cursor.
+        candidates.pick(active, pickMode(e));
         return;
       }
     }

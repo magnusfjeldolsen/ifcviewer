@@ -5,6 +5,7 @@ import {
   type Candidate,
   type ScreenPoint,
 } from './candidateMath';
+import type { SelectionMode } from './types';
 
 /**
  * The one candidate system.
@@ -30,11 +31,15 @@ export interface CandidateProvider {
   candidatesAt(cursor: ScreenPoint): Candidate[];
   /**
    * Act on a click that landed with one of this provider's candidates active.
-   * Optional: the element provider has no handler because `SelectionManager`
-   * owns that path already and passing a selection mode through here would
-   * leak selection semantics into a generic resolver.
+   * `mode` carries the click's modifier keys under the same names element
+   * selection uses — plain click replaces, Ctrl/Cmd adds (toggles), Shift
+   * removes — so Ctrl+click cannot come to mean two different things in one
+   * viewport.
+   *
+   * Optional: the element provider has no handler, because `SelectionManager`
+   * owns that path already.
    */
-  pick?(candidate: Candidate): void;
+  pick?(candidate: Candidate, mode: SelectionMode): void;
   /**
    * Show or clear the "this is what a click would take" affordance. Called
    * with the active candidate when it belongs to this provider, and with
@@ -116,9 +121,9 @@ export class CandidateResolver {
     return this.getActive();
   }
 
-  /** Route a click to the provider that produced `candidate`. */
-  pick(candidate: Candidate): void {
-    this.providers.find((p) => p.kind === candidate.kind)?.pick?.(candidate);
+  /** Route a click, with its modifier mode, to the provider that produced it. */
+  pick(candidate: Candidate, mode: SelectionMode = 'replace'): void {
+    this.providers.find((p) => p.kind === candidate.kind)?.pick?.(candidate, mode);
   }
 
   /**
