@@ -40,8 +40,8 @@ Much more than expected. This feature is mostly **assembly**, not new capability
 - **Provenance is already recorded.** `ModelSource` in
   `src/services/SessionStore.ts` is
   `{ type: 'local'; fileName } | { type: 'remote'; url; fileName }`.
-  **The grey-out rule the user described falls straight out of this** — a model
-  is shareable if and only if its source is `remote`.
+  A `remote` source is **necessary but not sufficient** for shareability —
+  see *Which models can be shared*, which is where the rest of the rule lives.
 - **Remote loading is real.** `src/loader/RemoteLoader.ts` fetches, validates
   the `ISO-10303-21` header, tracks progress, and classifies failures.
 - **URL rewriting has a home.** `src/loader/urlNormalizer.ts` already rewrites
