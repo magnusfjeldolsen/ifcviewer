@@ -772,11 +772,13 @@ and a measurement you cannot verify is worse than no measurement.
   one raycast per frame, and reuse the same cursor position the navigation
   code already tracks (`Viewer.lastPointer`) rather than adding a second
   listener.
-- **Pick arbitration (D9).** The biggest interaction risk. Measurements draw
-  with `depthTest: false`, so they paint over geometry in front of them;
-  `raycastVisible` filters them out today, and that filter is what makes
-  selection near a measurement work at all. Removing it without the
-  thin-target + `Tab` scheme would regress element selection.
+- ~~**Pick arbitration (D9).**~~ **Retired 2026-08-25.** The premise was that
+  measurements have to join the raycast list. They do not: the measurement
+  provider is a screen-space pass, so `raycastVisible` keeps its filter and the
+  element pick path never changed. See *Step 1 — what the plan got wrong*.
+  What replaced it: `Line2` extends `THREE.Mesh`, so every fat line (and any
+  future snap glyph) must carry `userData.isMeasurement` or it rejoins the
+  raycast sweep through the back door.
 - **Tool ownership.** The measurement tool, pivot picking, marquee, and the
   new measurement *selection* all want the same clicks. `canNavigate()` and
   the `toolManager.getActiveTool()` gate are the existing precedent — every
@@ -803,14 +805,17 @@ and a measurement you cannot verify is worse than no measurement.
       re-tuned, per-model override in the model tree. Tests: `MILLI` → `0.001`;
       a mm model and an m model load at the same real-world scale; an override
       survives a reload and is visibly marked.
-- [ ] **Phase 1 — the candidate system:** cursor → ranked candidates from
+- [x] **Phase 1 — the candidate system:** cursor → ranked candidates from
       registered providers, top-candidate pre-highlight, `Tab` cycling, the
       D10 setting. Built once here; snapping registers into it in Phase 3.
-- [ ] **Phase 2 — removal:** "Clear measurements" tray action; click-to-select
+      *(`CandidateResolver` + `candidateMath` + `CandidateInput`, 2026-08-25.)*
+- [x] **Phase 2 — removal:** "Clear measurements" tray action; click-to-select
       + `Delete`; stable measurement ids; thin-target pick (line + markers, not
       the label) with a screen-space threshold; `Tab` cycling with hover
       pre-highlight. Tests: tray predicate, id lifecycle, and the pure
       point-to-screen-segment distance + candidate ordering.
+      *(2026-08-25. Phases 1 and 2 shipped together as Step 1 — see
+      "Step 1 — what the plan got wrong".)*
 - [ ] **Phase 3 — snapping:** feature-edge extraction via `EdgesGeometry` with
       a tuned threshold, cached per geometry; endpoint / midpoint / edge / face
       candidates; screen-space radius + kind priority; per-kind glyph overlay;
@@ -850,6 +855,10 @@ that disproved it. **Step 1 is now the first step.**
 
 ### Step 1 — The candidate system + measurement removal
 
+> **✅ BUILT 2026-08-25.** Corrections found while implementing are recorded in
+> *Step 1 — what the plan got wrong* below. Read that before Step 2: two of
+> them change what Step 2 can assume.
+
 **Why first:** it is the substrate the rest sits on (review finding 2), and it
 independently fixes the fact that there is no way to remove a measurement at
 all today.
@@ -888,6 +897,91 @@ selection regression would hide — lean on the existing selection tests.
 **Manual test:** select elements near a measurement; delete one of several;
 clear all; `Tab` through overlapping candidates; toggle hover off; hide a model
 and watch its measurements go.
+
+---
+
+### Step 1 — what the plan got wrong
+
+Each claim below was checked in the running app before code was written, per
+the ⚠ banner and the lesson from `handoff-normalize-model-units.md`.
+
+**Verified as stated (no change needed):**
+
+- *The measurement line is a hairline that is hard to click.* True, and the
+  reason is now measured rather than asserted: on this machine
+  (ANGLE / D3D11 / RTX 2000 Ada) `gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE)`
+  returns **`[1, 1]`**, so `LineBasicMaterial.linewidth` cannot widen the line
+  by any amount. The `Line2` swap is the only route to a thicker line.
+- *There is no way to remove a measurement short of Reset View.* True. With a
+  measurement placed, the tray held exactly five actions — remove-clipping,
+  clear-basket, show-hidden, remove-pivot, clear-transparency — and stayed
+  hidden. `clearMeasurements()` had exactly one caller, `App.resetView`.
+- *`raycastVisible` excludes measurements today.* True. Clicking dead on a
+  measurement's start marker selected the **slab behind it**, and there was no
+  way to touch the measurement at all.
+- *`Line2` keeps `depthTest: false` behaviour.* Verified after the swap: a
+  measurement taken through the building still draws over the slabs and beams
+  in front of it, at ~3 px.
+
+**Wrong, and fixed here:**
+
+1. **`raycastVisible`'s measurement filter does NOT have to be removed.**
+   D9, the risk list and Step 1 all say making measurements pickable means
+   dropping the `!obj.userData.isMeasurement` guard and replacing it with
+   arbitration. It does not. The measurement provider **projects the two
+   endpoints to screen space** and measures pixel distance to the drawn line
+   and markers — it never raycasts. So the filter stays exactly as it was, the
+   element pick path is untouched byte-for-byte, and the regression the whole
+   of D9 was written to prevent cannot happen through this route. This is
+   strictly safer than the plan assumed, and it is why the "element provider
+   refactor is where a silent selection regression would hide" risk did not
+   materialise: there was no refactor.
+
+2. **`Line2` extends `THREE.Mesh`.** `Line2 → LineSegments2 → Mesh`, so a
+   `Line2` in the scene **is** collected by `raycastVisible`'s
+   `obj instanceof THREE.Mesh` sweep. It is excluded only because the code
+   sets `userData.isMeasurement = true` on it. The plan treats the fat-line
+   swap as a pure draw-path change; it is also a pick-path change, and
+   forgetting that flag would produce exactly the click-stealing regression D9
+   warns about. **Step 2 must set the same flag on any snap-glyph geometry it
+   adds to the scene.**
+
+3. **`LineMaterial.resolution` belongs in the render loop, not the resize
+   path.** The plan says to wire it into `Viewer.onResize`. `Viewer` has no
+   reference to the measurement tool, and `MeasurementTool.update()` already
+   runs from the render loop *before* `renderer.render`, on every frame that
+   draws — including the frame a resize triggers. Setting it there is both
+   simpler and correct for canvas changes a window `resize` event never fires
+   for.
+
+4. **The label does not fill the viewport at normal framing.** D9 cites a
+   screenshot of the label "filling the whole viewport". At default fit on the
+   Snowdon fixture it is a small plate at the midpoint: the sprite is
+   world-scaled and clamped to ≤ 2.0 world units, so it only dominates when the
+   camera is close to it. Excluding it from picking is still right — a
+   world-scaled quad's screen area is unbounded as the camera closes in, and it
+   is the only part of a measurement with area at all — but the justification
+   is "unbounded", not "always huge".
+
+**Deliberately deferred out of Step 1:**
+
+- **Element hover pre-highlight.** D9 point 5 asks for the element candidate to
+  get "its usual highlight treatment" on hover. Only measurements pre-highlight
+  today. Lighting an element per-frame means going through
+  `SelectionManager`'s variant cache and the
+  hidden > transparent > highlighted > base precedence chain, which is a real
+  tangle for a small gain: `Tab` stays legible because the measurement glowing
+  means "Tab will take the measurement" and nothing glowing means "the
+  element". The provider already accepts a `highlight` callback, so adding it
+  later is a wiring change, not a redesign.
+- The whole hover system stays **dormant until at least one measurement
+  exists** (`isActive()` in `CandidateInput`), so the per-frame raycast costs
+  nothing for anyone who is not measuring.
+
+**Stricter than the plan sketched:** `Tab` is taken only when the pointer is
+over the canvas, focus is on `document.body` or the canvas (never inside a
+panel control), no Ctrl/Alt/Meta is held, and at least two candidates are under
+the cursor. Any one of those failing leaves `Tab` to the browser.
 
 ---
 

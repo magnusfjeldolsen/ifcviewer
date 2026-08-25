@@ -25,6 +25,11 @@ import { SessionStore } from '../services/SessionStore';
 import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
+import { CandidateResolver } from '../inspector/CandidateResolver';
+import { CandidateInput } from '../inspector/CandidateInput';
+import { elementCandidatesAt } from '../inspector/elementCandidates';
+import { measurementPayload } from '../tools/measurementPicking';
+import { Settings } from '../services/Settings';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
@@ -97,6 +102,20 @@ export class App {
   // SelectionManager via capture-phase pointerdown; bails when any tool
   // is active or pivot picking is on.
   private marqueeSelector!: MarqueeSelector;
+  // The one candidate system (D9). Given a cursor it asks every registered
+  // provider what is under there, ranks the answers (elements first), lets the
+  // top one pre-highlight, and lets Tab cycle. Step 1 registers the element
+  // and measurement providers; snapping registers a third later and inherits
+  // the ranking, the cycling and the hover display unchanged.
+  private candidateResolver = new CandidateResolver();
+  // Constructed in start(); null until then, so the SelectionManager adapter
+  // below can be handed over in the constructor and simply answer "nothing" if
+  // a click somehow arrives before the wiring is complete.
+  private candidateInput: CandidateInput | null = null;
+  // User settings, keyed under `ifcviewer:settings:*`. Today it holds one
+  // entry — the D10 hover pre-highlight toggle; the queued settings panel will
+  // surface it (and the rest) rather than each consumer reading storage itself.
+  private settings = new Settings();
   // Element appearance (hide / isolate / show-all + transparent / opaque).
   // Per-element overrides driven from the context menu + the contextual tray,
   // made reversible by the shared HistoryManager. Constructed in the App
@@ -202,6 +221,21 @@ export class App {
       toolManager: this.toolManager,
       history: this.history,
       appearanceBaseFor: (mesh) => this.appearanceManager.getBaseForMesh(mesh, pristineFor(mesh)),
+      // Pick arbitration: elements outrank the annotations drawn over them, so
+      // this normally answers 'element' and the click proceeds exactly as it
+      // did before. Only a Tab-cycled candidate diverts it.
+      candidates: {
+        activeAt: (x, y) => this.candidateInput?.activeAt(x, y) ?? null,
+        pick: (candidate) => this.candidateResolver.pick(candidate),
+      },
+    });
+
+    // Picking a measurement is a selection in its own right, so the two never
+    // coexist. Guarded on a NON-empty selection: clearing the element
+    // selection is exactly what the measurement pick does first, and reacting
+    // to that would undo the selection it just made.
+    this.selectionManager.onChange((state) => {
+      if (state.kind !== 'none') this.measurementTool.selectMeasurement(null);
     });
 
     // Orbiting over empty space with something selected almost always means
@@ -248,6 +282,10 @@ export class App {
     this.modelTreePanel = new ModelTreePanel(appEl, {
       onVisibilityToggle: (id, visible) => {
         this.modelManager.setVisible(id, visible);
+        // D15 — a measurement follows its model. A number annotating geometry
+        // the user just switched off is worse than no number, and a
+        // measurement spanning two models hides while either is hidden.
+        this.measurementTool.setModelVisible(id, visible);
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -262,6 +300,9 @@ export class App {
         // (its onChange triggers a debounced session save). Constructed in
         // the App constructor, so it's always available here.
         this.selectionBasket.onModelRemoved(id);
+        // D15 — drop this model's measurements: two world points with no
+        // geometry left to refer to are not a measurement.
+        this.measurementTool.onModelRemoved(id);
         // Prune appearance overrides for the removed model (system change,
         // pushes no undo command). Its onChange triggers a debounced save.
         this.appearanceManager.onModelRemoved(id);
@@ -373,6 +414,26 @@ export class App {
       },
     });
 
+    // D5 — click a measurement, then Delete. `KeyboardShortcuts` already skips
+    // text inputs, so this cannot eat a Backspace someone is typing with.
+    // Registered under both keys because Delete and Backspace are the two
+    // conventions and users reach for whichever their keyboard has.
+    const deleteMeasurement = (): void => {
+      if (this.measurementTool.removeSelectedMeasurement()) {
+        this.candidateInput?.refresh();
+      }
+    };
+    this.keyboardShortcuts.register({
+      key: 'Delete',
+      label: 'Delete measurement',
+      action: deleteMeasurement,
+    });
+    this.keyboardShortcuts.register({
+      key: 'Backspace',
+      label: 'Delete measurement',
+      action: deleteMeasurement,
+    });
+
     this.keyboardShortcuts.register({
       key: 'v',
       label: 'Pick Pivot',
@@ -394,8 +455,11 @@ export class App {
         } else if (this.toolManager.getActiveTool() !== null) {
           this.toolManager.abort();
         } else {
-          // No tool active, no pivot picking: clear the inspector selection.
+          // No tool active, no pivot picking: clear both selections. A
+          // measurement selection is as much "a thing Escape should let go of"
+          // as an element one, and only one of the two is ever set.
           this.selectionManager.clear();
+          this.measurementTool.selectMeasurement(null);
         }
       },
     });
@@ -485,6 +549,19 @@ export class App {
       subscribe: (refresh) => this.selectionBasket.onChange(refresh),
     });
 
+    // Measurements (D5) — before this there was NO way to remove one: the only
+    // escape was Reset View, which also drops your clipping plane, selection
+    // and appearance overrides. Same idiom as Remove clipping; visible only
+    // when at least one measurement exists.
+    this.contextualActions.register({
+      id: 'clear-measurements',
+      label: 'Clear measurements',
+      icon: '📏',
+      isVisible: () => this.measurementTool.hasMeasurements(),
+      onClick: () => this.measurementTool.clearMeasurements(),
+      subscribe: (refresh) => this.measurementTool.onStateChange(refresh),
+    });
+
     // Element appearance recovery (D) — always-available escape hatches so the
     // user is never trapped with invisible or faded geometry. Same idiom as
     // Remove clipping; visible only when the matching state is active.
@@ -520,6 +597,8 @@ export class App {
       onClick: () => this.appearanceClearTransparency(),
       subscribe: (refresh) => this.appearanceManager.onChange(refresh),
     });
+
+    this.setupCandidateSystem();
 
     // Right-click context menu (C). Selection-scoped — the handler reads
     // SelectionManager.getState() + appearance flags and builds the items; it
@@ -562,6 +641,77 @@ export class App {
     window.addEventListener('beforeunload', this.boundBeforeUnload);
   }
 
+  /**
+   * Register the candidate providers and wire the pointer / `Tab` input.
+   *
+   * Two providers today. The element one wraps `raycastVisible` untouched, so
+   * element selection cannot regress through this route; the measurement one
+   * is a screen-space pass over the drawn line and markers — never the label
+   * (D9) — which is why `raycastVisible` can go on filtering measurements out
+   * and nothing about the existing pick path has to change.
+   */
+  private setupCandidateSystem(): void {
+    const viewer = this.viewer;
+    const canvas = viewer.getCanvas();
+
+    this.candidateResolver.register({
+      kind: 'element',
+      candidatesAt: (cursor) =>
+        elementCandidatesAt(
+          {
+            camera: viewer.getCamera(),
+            scene: viewer.getScene(),
+            renderer: viewer.getRenderer(),
+            canvas,
+          },
+          cursor,
+        ),
+      // No `pick`: SelectionManager owns the element click, modifier keys and
+      // all. Routing it through here would leak selection modes into a generic
+      // resolver for no gain.
+    });
+
+    this.candidateResolver.register({
+      kind: 'measurement',
+      candidatesAt: (cursor) => this.measurementTool.candidatesAt(cursor),
+      pick: (candidate) => {
+        const id = measurementPayload(candidate)?.measurementId;
+        if (!id) return;
+        this.selectionManager.clear();
+        this.measurementTool.selectMeasurement(id);
+      },
+      highlight: (candidate) =>
+        this.measurementTool.setHovered(
+          candidate ? (measurementPayload(candidate)?.measurementId ?? null) : null,
+        ),
+    });
+
+    this.candidateInput = new CandidateInput({
+      canvas,
+      resolver: this.candidateResolver,
+      // The same ownership gates every other pointer path honours. A second
+      // pick path that ignores them is how gestures start fighting — the
+      // lesson the orbit work already paid for.
+      canPick: () =>
+        this.toolManager.getActiveTool() === null &&
+        !viewer.isPivotPicking() &&
+        !this.marqueeSelector.isDragging(),
+      showHover: () => this.settings.get('hoverPreHighlight'),
+      // Dormant until there is something to arbitrate: with no measurements
+      // placed there is only one candidate kind, so the hover raycast — the
+      // expensive part on a 100k-mesh model — never runs.
+      isActive: () => this.measurementTool.hasMeasurements(),
+      requestRender: () => viewer.requestRender(),
+    });
+
+    // Flipping the hover setting has to take effect without moving the mouse.
+    this.settings.onChange(() => this.candidateInput?.refresh());
+    // A measurement that disappears must not leave its highlight behind.
+    this.measurementTool.onStateChange(() => this.candidateInput?.refresh());
+    // D6 — persist measurements alongside the models and the basket.
+    this.measurementTool.onStateChange(() => this.scheduleSave());
+  }
+
   private boundBeforeUnload = (): void => {
     if (this.sessionStore.isMemoryEnabled()) {
       this.sessionStore.saveSession(this.buildSessionState());
@@ -579,6 +729,7 @@ export class App {
       models: Array.from(this.modelRecords.values()),
       basket: this.selectionBasket.serialize(),
       appearance: this.appearanceManager.serialize(),
+      measurements: this.measurementTool.serialize(),
     };
   }
 
@@ -751,6 +902,17 @@ export class App {
       if (surviving.length > 0) {
         this.appearanceManager.deserialize(surviving);
       }
+    }
+
+    // Rehydrate measurements (D6) AFTER models restore — same rationale as the
+    // basket, but stricter: a measurement is two world points, and world
+    // points only mean something with the geometry they were taken from. The
+    // store drops any whose models did not all come back.
+    if (session?.measurements?.length) {
+      this.measurementTool.deserialize(
+        session.measurements,
+        new Set(this.modelManager.getModelIds()),
+      );
     }
 
     // Restore camera after fitToBox so it overrides the auto-fit
@@ -1238,6 +1400,10 @@ export class App {
     if (this.inspectorPanel) this.inspectorPanel.dispose();
     if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
     this.marqueeSelector.dispose();
+    // Before toolManager.dispose (which disposes the measurement tool), so the
+    // resolver's providers still point at live objects while they unhook.
+    if (this.candidateInput) this.candidateInput.dispose();
+    this.settings.dispose();
     this.selectionManager.dispose();
     // Context menu: detach the canvas listener + tear down the menu element.
     // Guarded — the field is initialized in start().

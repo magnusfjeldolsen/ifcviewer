@@ -56,6 +56,22 @@ export interface SessionState {
    * dev/plans/handoff-element-appearance.md.
    */
   appearance?: { modelId: string; expressId: number; state: 'hidden' | 'transparent' }[];
+  /**
+   * Measurements (D6) — two world points, the models they were taken from, and
+   * a stable id. Tiny, so they ride in the localStorage session state like the
+   * basket and the appearance overrides.
+   *
+   * Rehydrated *after* models load: world coordinates only mean something with
+   * the same geometry present, so a measurement whose models did not come back
+   * is dropped rather than left floating. Safe to persist because "Clear
+   * measurements" and Reset View both clear them in one click.
+   */
+  measurements?: {
+    id: string;
+    start: [number, number, number];
+    end: [number, number, number];
+    modelIds: string[];
+  }[];
 }
 
 const TOGGLE_KEY = 'ifcviewer:memoryEnabled';
