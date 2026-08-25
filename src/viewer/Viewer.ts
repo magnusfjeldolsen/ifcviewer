@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { computeFitPosition } from './cameraUtils';
+import { computeClippingPlanes, computeFitPosition, sceneRadius } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -23,7 +23,14 @@ const ROTATE_SPEED = 1;
  */
 const WHEEL_ZOOM_STEP = 0.9;
 
-/** Keep the camera this many near-planes away from whatever it is zooming at. */
+/**
+ * Keep the camera this many near-planes away from whatever it is zooming at.
+ *
+ * Only a sane stop now that the near plane tracks the viewing distance
+ * (`computeClippingPlanes`): the limit shrinks as the camera approaches, so a
+ * dolly asymptotes towards a surface instead of hitting the wall a fixed near
+ * plane used to put 2.26 m in front of it.
+ */
 const MIN_FOCUS_NEAR_PLANES = 2;
 
 /**
@@ -88,6 +95,28 @@ export class Viewer {
 
   /** Last-resort rotation centre: the centre of the last fit. */
   private defaultTarget = new THREE.Vector3();
+
+  /**
+   * Radius of the loaded scene, from the last fit. Sets the far plane's scale,
+   * so it follows the model rather than a multiple of one historical camera
+   * distance. 1 until something is loaded.
+   */
+  private sceneRadius = 1;
+
+  /**
+   * Distance to the geometry last found under the cursor, or null when the
+   * cursor was over empty space.
+   *
+   * The near plane follows this as well as the view anchor, because the two
+   * come apart exactly where it matters. `controls.target` is a free-floating
+   * anchor on the camera's forward axis: dollying toward a wall moves camera
+   * and anchor together, so the anchor can still be 176 m away while the wall
+   * is 0.7 m away. Sizing the near plane off the anchor alone put the dolly
+   * guard 0.7 m in front of the wall — better than the 2.26 m it used to be,
+   * and still nowhere near millimetre range. Recorded by `raycastAt`, which
+   * every navigation gesture already calls.
+   */
+  private lastHitDistance: number | null = null;
 
   /**
    * Where the current selection sits, when there is one. Wired by App.
@@ -264,6 +293,9 @@ export class Viewer {
     if (!this.needsRender) return;
     this.needsRender = false;
     for (const cb of this.updateCallbacks) cb();
+    // One place, so no camera path can forget: orbit, dolly, pan, fit, a
+    // flyTo tween and a session restore all end up here before the draw.
+    this.updateClipping();
     this.updateMarkerScales();
     this.renderer.render(this.scene, this.camera);
   };
@@ -272,6 +304,7 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return;
 
+    this.sceneRadius = sceneRadius(box);
     this.camera.position.copy(fit.position);
     this.camera.near = fit.near;
     this.camera.far = fit.far;
@@ -286,6 +319,8 @@ export class Viewer {
   flyToBox(box: THREE.Box3): Promise<void> {
     const fit = computeFitPosition(box);
     if (!fit) return Promise.resolve();
+
+    this.sceneRadius = sceneRadius(box);
 
     return this.animator.flyTo({
       camera: this.camera,
@@ -410,7 +445,9 @@ export class Viewer {
     if (rect.width === 0 || rect.height === 0) return null;
     this.mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    return raycastVisible(this.mouse, this.camera, this.scene, this.renderer);
+    const hit = raycastVisible(this.mouse, this.camera, this.scene, this.renderer);
+    this.lastHitDistance = hit ? hit.distance : null;
+    return hit;
   }
 
   private isOnScreen(point: THREE.Vector3): boolean {
@@ -573,6 +610,10 @@ export class Viewer {
   }
 
   private dollyTo(focus: THREE.Vector3, scale: number): void {
+    // Refresh the planes first: the guard below reads `camera.near`, and a
+    // burst of wheel events within one frame would otherwise all measure
+    // against the near plane from before the burst started.
+    this.updateClipping();
     this.applyPose(
       dollyTowardPoint({
         position: this.camera.position,
@@ -616,6 +657,27 @@ export class Viewer {
     this.controls.target.copy(pose.target);
     this.camera.lookAt(this.controls.target);
     this.needsRender = true;
+  }
+
+  /**
+   * Re-derive the clipping planes from where the camera actually is.
+   *
+   * The near plane used to be fixed at fit time, which is what made close-up
+   * work impossible — see `computeClippingPlanes`. Skips the projection-matrix
+   * rebuild when nothing moved enough to matter.
+   */
+  private updateClipping(): void {
+    const toAnchor = this.camera.position.distanceTo(this.controls.target);
+    // The nearer of the two references wins: whatever is under the cursor is
+    // what the user is about to run into, and the anchor covers the case where
+    // they are pointing at empty space. Erring small only spends depth
+    // precision, and `computeClippingPlanes` caps how much it can spend.
+    const reference = Math.min(toAnchor, this.lastHitDistance ?? Infinity);
+    const { near, far } = computeClippingPlanes(reference, this.sceneRadius, toAnchor);
+    if (near === this.camera.near && far === this.camera.far) return;
+    this.camera.near = near;
+    this.camera.far = far;
+    this.camera.updateProjectionMatrix();
   }
 
   // ── Pivot picking ─────────────────────────────────────────
