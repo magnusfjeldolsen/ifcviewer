@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { computeFitPosition } from '../src/viewer/cameraUtils';
+import {
+  computeClippingPlanes,
+  computeFitPosition,
+  sceneRadius,
+} from '../src/viewer/cameraUtils';
 
 describe('computeFitPosition', () => {
   it('should return null for an empty box', () => {
@@ -31,15 +35,34 @@ describe('computeFitPosition', () => {
     expect(dist).toBeGreaterThan(10);
   });
 
-  it('should set near/far proportional to distance', () => {
+  it('frames the whole box between its planes', () => {
     const box = new THREE.Box3(
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(20, 20, 20),
     );
     const result = computeFitPosition(box)!;
-    // maxDim = 20, distance = 30
-    expect(result.near).toBeCloseTo(0.3); // 30 * 0.01
-    expect(result.far).toBeCloseTo(3000); // 30 * 100
+    const eye = result.position.distanceTo(result.center);
+
+    // Everything from the near corner to the far corner has to be inside.
+    expect(result.near).toBeLessThan(eye - sceneRadius(box));
+    expect(result.far).toBeGreaterThan(eye + sceneRadius(box));
+  });
+
+  it('agrees with computeClippingPlanes, so the fit does not fight the loop', () => {
+    // The render loop recomputes the planes every frame from the live camera
+    // distance. If the fit installed a different formula the view would shift
+    // on the first frame after a fit.
+    const box = new THREE.Box3(
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(20, 20, 20),
+    );
+    const result = computeFitPosition(box)!;
+    const live = computeClippingPlanes(
+      result.position.distanceTo(result.center),
+      sceneRadius(box),
+    );
+    expect(result.near).toBeCloseTo(live.near);
+    expect(result.far).toBeCloseTo(live.far);
   });
 
   it('should handle non-uniform boxes', () => {

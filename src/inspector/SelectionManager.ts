@@ -6,6 +6,7 @@ import { raycastVisible } from '../utils/raycast';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
 import { makeKey } from './elementKey';
+import type { Candidate } from './candidateMath';
 import type { ElementIdentity, SelectionMode, SelectionState } from './types';
 
 /**
@@ -62,6 +63,22 @@ export interface SelectionManagerDeps {
    * and calls `refreshHighlights()` after any appearance op on selected meshes.
    */
   appearanceBaseFor?: (mesh: THREE.Mesh) => THREE.Material | THREE.Material[];
+  /**
+   * Optional pick arbitration (D9). When wired, a click first asks the
+   * candidate system what is under the cursor: elements outrank the
+   * annotations drawn over them, so this normally answers `'element'` and the
+   * click falls through to the path below unchanged. When `Tab` has cycled to
+   * something else — a measurement today, a snap point later — the click is
+   * handed to that provider instead and the element selection is left alone.
+   *
+   * Structural on purpose: `CandidateResolver` satisfies it, and so does a
+   * two-method stub in a test. Absent means today's behaviour exactly, which
+   * is what keeps the existing selection suite meaningful.
+   */
+  candidates?: {
+    activeAt(clientX: number, clientY: number): Candidate | null;
+    pick(candidate: Candidate, mode: SelectionMode): void;
+  };
 }
 
 /** Color and intensity for the highlight emissive boost (brand blue). */
@@ -618,6 +635,21 @@ export class SelectionManager {
   }
 
   private handleClick(e: PointerEvent): void {
+    // Pick arbitration (D9). Elements rank above everything drawn on top of
+    // them, so this only diverts the click when the user has cycled past the
+    // element with `Tab` — or when there is no element under the cursor at all
+    // and only an annotation is there.
+    const candidates = this.deps.candidates;
+    if (candidates) {
+      const active = candidates.activeAt(e.clientX, e.clientY);
+      if (active && active.kind !== 'element') {
+        // Same modifier reading the element path uses, so Ctrl+click means
+        // "add to the selection" whichever kind of thing is under the cursor.
+        candidates.pick(active, pickMode(e));
+        return;
+      }
+    }
+
     this.updateMouse(e);
     const hit = raycastVisible(
       this.mouse,
