@@ -59,9 +59,10 @@ menu, with global Ctrl+Z / Ctrl+Y. Two independent keystones first
 features build on them. Confirmed decisions live in the epic doc.
 
 **Order:** ~~`bulk-property-fetch-and-cap` ‖ `undo-redo` → `context-menu` +
-`element-appearance` → `select-similar`~~ (all shipped) →
-**`undo-redo-retrofit`** → (Data Insight) `parameter-coloring` ·
-`data-aggregation-tabs`.
+`element-appearance` → `select-similar`~~ (all shipped) → (Data Insight — see
+that epic's revised order) → **`undo-redo-retrofit`**, which is orthogonal to
+Data Insight and now bundles with `measurement-modes` (both touch
+`MeasurementTool`; do them in one visit).
 
 ### `undo-redo-retrofit` — Make clipping + measurement undoable
 - **Status:** queued (depends on `undo-redo`)
@@ -81,6 +82,65 @@ aggregation). Ships feature-by-feature, foundational-first.
 _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 `Scope` source; the cards below build on it._
 
+**Revised order (2026-08-24), after auditing what aggregation actually needs:**
+
+```
+worker-type-property-cache  → schema-discovery → parameter-coloring → data-aggregation-tabs
+   (throughput)                (the pickers)      (cheap proof)        (capstone)
+```
+
+The first two are **prerequisites**, not nice-to-haves:
+
+- **Throughput.** Bulk reads measure 100–200 elements/sec (PR #42 smoke).
+  Aggregation is the one feature that reads *every* element in a scope, so a
+  2 000-element pivot takes 10–20 s and a whole-model one takes minutes.
+  `worker-type-property-cache` is filed under Queued as a perf card; for this
+  epic it is a blocker. Do it first, and measure.
+- **Schema discovery.** `describeSchema` is still
+  `throw new Error('not implemented yet')`. Both the pivot ("group by ___,
+  aggregate ___") and the coloring picker need to know which parameters exist
+  across a `Scope` before they can render a dropdown — today the app only knows
+  the properties of elements the user already clicked. New card below.
+
+`parameter-coloring` goes **before** the tabs deliberately: it needs the same
+schema picker and numeric extraction but no tab infrastructure, so it is the
+cheapest end-to-end proof that the data pipeline works — and it makes any
+remaining throughput problem impossible to ignore.
+
+`filter-by-parameter` is *not* a prerequisite — its lighter half shipped as
+`select-similar` (PR #44), and the isolate-the-rest half is useful on its own
+schedule.
+
+### `schema-discovery` — What parameters exist across a Scope
+- **Status:** queued (prerequisite for `parameter-coloring` + `data-aggregation-tabs`)
+- **Effort:** M
+- **Why:** Every authoring UX in this epic starts with "pick a parameter", and
+  nothing can populate that list. `WorkerPropertyRepository.describeSchema`
+  throws; `ModelSchema` only models `classCounts`. Without this, aggregation
+  and coloring can only offer parameters from elements already clicked.
+- **What:** Given a `Scope` (or a model), fold in the worker over the same
+  `readProps` spine `findMatching` uses, and return per parameter path: the
+  element count carrying it, the value kind (numeric / text / boolean /
+  enumerated), the unit, and — for discrete values — the distinct set with
+  counts. Numeric paths additionally carry min/max, which the coloring scale
+  needs for its domain and the pivot needs to sanity-check a sum.
+  Extend `ModelSchema` accordingly. Cancellable and progress-reporting like
+  the other bulk jobs.
+- **Units — decide here:** `PropertyFlatRow` already separates `rawValue` from
+  `unit` ("so aggregation can operate on raw numerics") and there is a
+  per-model `unitTable`, but nothing normalizes *between* models. Summing
+  volumes across a millimetre model and a metre model silently produces a
+  wrong number, and multi-model is first-class in this app. Either normalize to
+  SI at the fold and format on the way out, or refuse to aggregate a path whose
+  unit disagrees across the scope. Pick one before the first sum ships.
+- **Risks:** it is a full-scope read, so it inherits the throughput problem —
+  hence the ordering. Cache per (model, scope-signature) or the picker re-folds
+  on every open. Paths are not uniform across elements: a parameter present on
+  10 of 900 elements must be offerable but visibly rare, or users will sum a
+  column that is 99 % empty and not notice.
+- **Source:** this epic, feature 3 (the unbuilt half); PR #42 left
+  `describeSchema` stubbed deliberately.
+
 ### `filter-by-parameter` — Show elements matching a parameter
 - **Status:** queued (bulk property access shipped in PR #42; `element-appearance` shipped in PR #39). The lighter form — `select-similar`, which selects rather than isolates — shipped in PR #44, so what is left here is the isolate-the-rest half plus multi-criteria matching.
 - **Effort:** M
@@ -90,7 +150,7 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 - **Source:** `dev/plans/phase-data-insight.md` (feature 4); inline form in `dev/plans/handoff-select-similar.md`.
 
 ### `parameter-coloring` — Color a scope by a parameter (color scale)
-- **Status:** queued
+- **Status:** queued (depends on `schema-discovery`; do after `worker-type-property-cache`)
 - **Effort:** M
 - **Why:** See data spread visually — color elements by a parameter's value, like Naviate in Revit.
 - **What:** Apply a color scale (gradient for numeric, categorical for discrete) to a chosen parameter across a `Scope` (model / basket / filter), with a legend. Temporary; restored on clear. Reuses the highlight-variant material mechanism.
@@ -98,12 +158,47 @@ _`selection-basket` shipped (PR #36, 2026-05-26) — see Done. It is the first
 - **Source:** `dev/plans/phase-data-insight.md` (feature 5).
 
 ### `data-aggregation-tabs` — Pivot-style aggregation in workspace tabs
-- **Status:** queued (capstone — depends on bulk property access + the `Scope` spine)
+- **Status:** queued (capstone — depends on bulk property access + the `Scope` spine + `schema-discovery`, and on `worker-type-property-cache` for it to be usable at model scale)
 - **Effort:** L
 - **Why:** Quickly understand a model's data — sum / avg / count over a scope, Excel-pivot-style. The headline of the Data Insight phase.
 - **What:** A tabbed workspace (MODEL + renamable, session-persisted data-agg tabs). Each tab pivots a `Scope` (model / basket / filter): group + aggregate, show contributing elements + result tables; graphs + report/export later. Sub-phased: tab infra → pivot → graphs/export.
 - **Risks:** the pivot authoring UX and the tab / session-persistence model are the design risk — each gets its own hand-off doc.
 - **Source:** `dev/plans/phase-data-insight.md` (feature 6).
+
+### `measurement-modes` — Solibri-style measuring (point, orthogonal, face-to-face)
+- **Status:** queued (independent of the Data Insight epic — schedule freely; bundle with `undo-redo-retrofit`)
+- **Effort:** M
+- **Why:** Today's tool measures point-to-point only, so the common question —
+  *"how far is that column from the wall?"* — makes the user hunt for the
+  shortest path by eye and get an answer that is wrong by however far off-normal
+  they clicked. Solibri answers it directly: pick the wall face, pick the
+  column, and the distance is measured along that face's normal.
+- **What:** Measurement *modes*, chosen before or during placement:
+  - **Point → point** — today's behaviour, unchanged and still the default.
+  - **Surface → point (orthogonal)** — first pick establishes a face; the
+    second point is projected onto that face's plane and the distance reported
+    along the normal. Draw the projection foot and the normal segment, not just
+    a line between the raw picks, so the measurement is self-explaining.
+  - **Surface → surface** — perpendicular distance between two parallel-ish
+    faces (clear span between walls). Needs a tolerance for "parallel enough"
+    and an honest refusal when they are not.
+  The geometry is already available: `raycastVisible` returns `hit.face`, so
+  the world-space normal is `face.normal` transformed by the mesh's
+  `normalMatrix`. Extract the maths into a pure module (`measureMath.ts`) the
+  way `orbitMath.ts` was split out of `Viewer` — `MeasurementTool` needs WebGL
+  and cannot be constructed under test.
+- **Risks:** face normals on IFC geometry are only as good as the tessellation —
+  a curved or triangulated "flat" wall gives slightly different normals per
+  triangle, so surface mode needs to either snap to a dominant plane or show
+  the user which face it locked onto. Mode switching mid-placement must not
+  strand a half-placed measurement. The existing tool is 481 lines with its own
+  pointer handling, preview, and label sprites; adding modes without splitting
+  placement state from rendering will make it unmaintainable.
+- **Bundle with `undo-redo-retrofit`:** that card also rewrites this tool's
+  placement lifecycle (a completed measurement = one command, mid-placement
+  Ctrl+Z cancels). Doing both in one visit avoids reworking the same state
+  machine twice.
+- **Source:** user request 2026-08-24 (Solibri comparison).
 
 ### `settings-panel` — User-tunable caps and preferences
 - **Status:** queued
