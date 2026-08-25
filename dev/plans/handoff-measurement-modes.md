@@ -983,6 +983,69 @@ over the canvas, focus is on `document.body` or the canvas (never inside a
 panel control), no Ctrl/Alt/Meta is held, and at least two candidates are under
 the cursor. Any one of those failing leaves `Tab` to the browser.
 
+**Added after the first manual test** (both from the user, neither in the plan):
+
+- **Ctrl/Cmd+click multi-selects measurements**, and one `Delete` takes the
+  lot. Reported as "can't multi select by holding ctrl on measurement lines".
+  BIMcollab supports it. The modifier vocabulary is `SelectionManager`'s,
+  reused rather than reinvented — plain click replaces, Ctrl/Cmd toggles,
+  Shift removes — so Ctrl+click cannot mean two different things in one
+  viewport. The click's mode now travels with the pick through
+  `CandidateResolver`, a channel snapping inherits.
+- **The clipping planes now track the camera** so a millimetre reading can be
+  earned rather than merely displayed. See *The near plane was the real
+  blocker* below. This is shared rendering code, not measurement code.
+
+---
+
+### The near plane was the real blocker for millimetre work
+
+Shipping the mm label (D8) exposed something the plan never considered: the
+camera could not physically get close enough for a millimetre to mean anything.
+
+**Measured on Snowdon, before changing anything.** The near plane was fixed at
+fit time at **1.13 m**; the dolly guard (`camera.near * MIN_FOCUS_NEAR_PLANES`)
+refused to bring the camera closer than **2.2615 m** to any surface; and 300
+further wheel notches moved it **0.0000 m**. A hard stop, not a slow approach.
+At 2.26 m with a 45° FOV, one millimetre is under one pixel.
+
+**The fix is a dynamic near/far**, recomputed every frame from where the camera
+actually is (`computeClippingPlanes` in `cameraUtils.ts`). Two details matter:
+
+1. **far/near is capped at 200 000 by construction.** That ratio, not the near
+   plane's absolute value, is what governs depth precision, and the buffer is
+   24-bit (measured). Simply shrinking the old constants — the obvious cheap
+   fix — would have meant a 2 mm near plane against an 11 307 m far plane: a
+   ratio of 5.6 million, trading a visible bug for z-fighting. `logarithmic
+   DepthBuffer` was rejected too: it costs early-z on a 100k-mesh model and is
+   a global flag every tuned constant would need re-checking against.
+2. **Near follows the nearer of the view anchor and the geometry under the
+   cursor.** `controls.target` is a free-floating anchor on the camera's
+   forward axis (see CLAUDE.md, *Camera Ownership*), so dollying at a wall
+   moves camera and anchor together and the anchor can still be 176 m away
+   while the wall is centimetres off. Sizing off the anchor alone still stopped
+   the camera 0.7 m short.
+
+Closest approach is now **4.0 mm** on Snowdon and **11.7 mm** on RIB (RIB is
+longer, so its larger far plane makes the ratio cap bind first — the cap
+trading closeness for precision at scale, working as designed). No z-fighting
+at any zoom on either model, checked on the coplanar cases that show it first.
+
+**Follow-up this created — the measurement label needs a screen-space clamp.**
+The label sprite is world-scaled and clamped only in world units (≤ 2.0), so
+its screen area grows without bound as the camera closes in. That was
+theoretical while the camera could not get within 2.26 m. It is not any more:
+at normal measuring range the label now fills a large part of the viewport.
+Nothing is broken — the label was never a pick target (D9), which is exactly
+why that decision was right — but it is visually obtrusive at the range the
+tool is now most useful. Worth a small card: size the label in screen space
+rather than world space.
+
+*(This also revises a note above: Step 1 recorded that D9 "overstated" the
+label's size because it looked small at default framing. With the camera able
+to approach properly, D9's framing was closer to right than that correction
+was.)*
+
 ---
 
 ### Step 2 — Snapping
