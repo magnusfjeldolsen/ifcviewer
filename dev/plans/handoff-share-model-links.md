@@ -16,7 +16,8 @@
 |---|---|---|---|
 | **S1** | Where the share UI lives | **(a)** a "Share…" button in the model-tree header opening a checklist dialog · **(b)** right-click context menu on model-tree rows · **(c)** the contextual-action tray | **(a)** — the tree already lists models with checkboxes; see *Where it lives* |
 | **S2** | Link format | **(a)** repeated `?url=A&url=B` · **(b)** one packed+compressed param | **(a)** — backward compatible with the `?url=` that already ships |
-| **S3** | Recipient lacks access to some models | **(a)** load what works, name what failed · **(b)** all-or-nothing | **(a)** — this is the user's "warned which ones they don't have access to" |
+| **S3** | Recipient lacks access to some models | **(a)** load what works, name what failed · **(b)** all-or-nothing | **(a)** — the user's "warned which ones they don't have access to", and the backstop for the unverifiable case below |
+| **S8** | A model we cannot classify (HTTPS, public-looking host, no token) | **(a)** tickable, with a note that access is checked on open · **(b)** greyed until proven | **(a)** — greying a shareable model is a dead end; offering an unshareable one is recoverable |
 | **S4** | Replace the `window.confirm()` the recipient currently gets | **(a)** yes, one in-page dialog listing every model · **(b)** keep confirm | **(a)** — N models currently means N blocking native dialogs |
 | **S5** | Cap models per link | **(a)** soft cap ~8 with a warning · **(b)** hard cap · **(c)** none | **(a)** |
 | **S6** | Does the link also carry the **camera view**? | **(a)** no · **(b)** yes, optional "include current view" tick | **(b)** — cheap, and it is most of the "wow"; see *Carrying the view* |
@@ -58,17 +59,52 @@ hand-built `?url=<that>` deep link loaded it. **The mechanism works today.**
 
 ## The shape of the feature
 
-### Only remote models can be shared
+### Which models can be shared — three states, not two
 
-A model loaded from the user's own disk has no URL — there is nothing to put
-in a link, and no amount of UI can invent one. So:
+An earlier draft said "remote = shareable". **The user pushed back and was
+right**: a model can come from a URL and still be unshareable. The honest
+classification has three states.
 
-- `source.type === 'remote'` → tickable.
-- `source.type === 'local'` → greyed, with a reason on the row, not just a
-  disabled checkbox: *"Loaded from your computer — upload it and load it by
-  link to share it."* A disabled control with no explanation reads as a bug.
+The reasoning rests on one verified fact: **`RemoteLoader` never sends
+cookies cross-origin** (it calls `fetch` without `credentials: 'include'`, so
+the default `same-origin` applies). So if a model is on screen having been
+fetched anonymously, it was publicly fetchable — and anyone who can *reach
+that host* can fetch it too. That is what makes most remote models genuinely
+shareable rather than merely hopefully shareable.
 
-This is exactly the rule the user intuited, and it needs no new data.
+**1. Not shareable — detectable, so grey it out and say why**
+
+| case | why | message |
+|---|---|---|
+| `source.type === 'local'` | no URL exists | "Loaded from your computer — upload it and load it by link to share it." |
+| fetched with a **bearer token** | `RemoteLoader.fetch(url, token)` sets `Authorization`; the recipient has no token (`App.handleRemoteLoad`, wired via `urlInput.onTokenRetry`) | "Opened with your own credentials — a link would not work for anyone else." |
+| `file://` | not fetchable from a page | "Local file path." |
+| `http://` | mixed content, blocked from our HTTPS page | "Not served over HTTPS." |
+| `localhost`, `127.0.0.1`, `::1`, `10.x`, `192.168.x`, `172.16–31.x`, `*.local` | reachable only on the sender's network | **"On your local network — a client outside it cannot reach this."** |
+
+That last row is the **NAS case** specifically, and it matters: a Synology or
+QNAP share link works perfectly for the sender and is unreachable for the
+client. Detecting it at share time is far kinder than letting the recipient
+discover it.
+
+**2. Shareable** — remote, HTTPS, public host, fetched anonymously. Tickable.
+
+**3. Shareable but unverifiable** — remote and HTTPS, but we cannot prove the
+recipient's access will still hold. Two things we cannot see from here:
+
+- the share **expires or is revoked** between sending and opening;
+- the host is reachable for the sender but not the recipient for a reason we
+  cannot detect (VPN, corporate network, geo-restriction).
+
+Do **not** invent a checkmark for this. Ticking stays enabled; the dialog says
+once, plainly, that access is checked when the recipient opens the link, not
+now. This residual bucket is small, and it is precisely what the per-model
+recipient warning (S3) exists to handle — which is why S3 is not a nicety.
+
+**Do not grey out on a guess.** Anything not on the detectable list is
+tickable. A shareable model wrongly greyed is a worse failure than an
+unshareable one wrongly offered, because the second is recoverable by the
+recipient's warning and the first is a dead end with no explanation.
 
 ### Where it lives (S1)
 
@@ -219,8 +255,11 @@ actually be loaded. That work is small and independent:
 - [ ] Run existing tests (baseline)
 - [ ] Link building + parsing as a pure, tested module (multi-`url`, optional
       `view`, malformed input, the single-`url` legacy form)
-- [ ] Share dialog: tick list, local models greyed **with a reason**, copy
-      button, sensitivity warning, empty state
+- [ ] Shareability classification as a pure, tested function: local, bearer
+      token, `file://`, `http://`, localhost / private-IP / `.local`, and the
+      unverifiable-but-tickable default
+- [ ] Share dialog: tick list, unshareable models greyed **each with its own
+      reason**, copy button, sensitivity warning, empty state
 - [ ] Optional "open at this view"
 - [ ] Recipient dialog replacing `window.confirm`, one for all models
 - [ ] Per-model load outcomes with the four distinct messages
@@ -228,4 +267,7 @@ actually be loaded. That work is small and independent:
       browser profile** with access to only one of them; confirm partial load
       and the right message for the other; confirm a legacy single-`url` link
       still works
+- [ ] Manual test: a model loaded from a **LAN/NAS address** greys out with the
+      network reason, and one loaded **with a bearer token** greys out with the
+      credentials reason
 - [ ] PR
