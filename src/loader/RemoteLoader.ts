@@ -104,6 +104,21 @@ export class RemoteLoader {
 
     // Read with progress tracking
     const contentLength = Number(response.headers.get('content-length') || 0);
+
+    // Re-check the size here, not only in the HEAD pre-check above. That
+    // check is wrapped in a try/catch that falls through to this GET, so on
+    // any host that rejects or CORS-blocks HEAD the guard silently stopped
+    // guarding — and Google Drive's download endpoint is exactly such a host.
+    // Failing open on the one provider we most expect to serve huge files is
+    // worse than having no guard at all, because it looks like it is working.
+    if (contentLength > MAX_FILE_SIZE) {
+      const sizeMB = Math.round(contentLength / 1024 / 1024);
+      return {
+        status: 'too-large',
+        message: `File is too large (${sizeMB} MB). Maximum is 500 MB.`,
+      };
+    }
+
     let buffer: ArrayBuffer;
 
     if (onProgress && response.body && contentLength > 0) {
