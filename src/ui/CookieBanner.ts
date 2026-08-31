@@ -51,7 +51,7 @@ export class CookieBanner {
 
   private renderIcon(): void {
     this.teardownDialog();
-    this.container.innerHTML = '';
+    this.container.replaceChildren();
     this.container.classList.remove('cookie-banner-open');
 
     const icon = document.createElement('button');
@@ -65,7 +65,7 @@ export class CookieBanner {
   }
 
   private renderExpanded(): void {
-    this.container.innerHTML = '';
+    this.container.replaceChildren();
     // The open class is what turns the corner-anchored container into a
     // full-viewport overlay; the collapsed icon must not sit under one.
     this.container.classList.add('cookie-banner-open');

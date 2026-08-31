@@ -6,6 +6,7 @@ import { FileLoader } from '../loader/FileLoader';
 import { WorkerIfcParser } from '../parser/WorkerIfcParser';
 import { UrlInput } from '../ui/UrlInput';
 import { RemoteLoader } from '../loader/RemoteLoader';
+import { checkRemoteUrl, type UrlSource } from '../loader/urlSafety';
 import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
@@ -1348,13 +1349,35 @@ export class App {
     if (prompt) prompt.style.display = show ? 'flex' : 'none';
   }
 
-  async loadFromUrl(url: string): Promise<void> {
+  /**
+   * @param source Who chose this URL. `'link'` means it arrived in a shared
+   *   link and was authored by someone else, so it is held to public https
+   *   only; `'user'` means they typed it and may point at their own network.
+   */
+  async loadFromUrl(url: string, source: UrlSource = 'user'): Promise<void> {
+    const safety = checkRemoteUrl(url, source);
+    if (!safety.ok) {
+      this.urlInput.showMessage(safety.reason, 'error');
+      return;
+    }
+
     const { normalizeUrl } = await import('../loader/urlNormalizer');
     const { url: normalized } = normalizeUrl(url);
     await this.handleRemoteLoad(normalized);
   }
 
   private async handleRemoteLoad(url: string, token?: string): Promise<void> {
+    // Last gate before the fetch, and the only one every path passes through
+    // — `UrlInput` submits here directly, without going via `loadFromUrl`.
+    // Checked at `'user'` strictness because a link-sourced URL has already
+    // met the stricter bar above; what this catches is the scheme, so no
+    // path can reach `fetch` with `javascript:`, `data:` or `file:`.
+    const safety = checkRemoteUrl(url, 'user');
+    if (!safety.ok) {
+      this.urlInput.showMessage(safety.reason, 'error');
+      return;
+    }
+
     // Extract filename for the loading row
     let name = 'model.ifc';
     try {
