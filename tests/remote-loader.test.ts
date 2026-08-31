@@ -87,6 +87,51 @@ describe('RemoteLoader', () => {
     expect(result.status).toBe('too-large');
   });
 
+  it('still enforces the size limit when HEAD is rejected', async () => {
+    // The regression this guards: the 500 MB check used to live ONLY in the
+    // HEAD pre-check, which is wrapped in a try/catch that falls through to
+    // GET. Google Drive's download endpoint serves GET but rejects HEAD, so
+    // on the one provider most likely to hold a huge file the guard silently
+    // stopped guarding — and the browser would try to buffer the whole thing.
+    mockFetch(async (_url, init) => {
+      if (init?.method === 'HEAD') return new Response(null, { status: 405 });
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': String(600 * 1024 * 1024) },
+      });
+    });
+
+    const result = await loader.fetch('https://example.com/model.ifc');
+    expect(result.status).toBe('too-large');
+  });
+
+  it('still enforces the size limit when HEAD throws (CORS-blocked)', async () => {
+    mockFetch(async (_url, init) => {
+      if (init?.method === 'HEAD') throw new TypeError('Failed to fetch');
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': String(600 * 1024 * 1024) },
+      });
+    });
+
+    const result = await loader.fetch('https://example.com/model.ifc');
+    expect(result.status).toBe('too-large');
+  });
+
+  it('does not reject a file that is under the limit on the GET path', async () => {
+    // The guard must not become so eager that it blocks ordinary loads.
+    mockFetch(async (_url, init) => {
+      if (init?.method === 'HEAD') throw new TypeError('Failed to fetch');
+      return new Response(makeIfcBuffer(), {
+        status: 200,
+        headers: { 'content-length': '1024' },
+      });
+    });
+
+    const result = await loader.fetch('https://example.com/model.ifc');
+    expect(result.status).toBe('ok');
+  });
+
   it('should return cors on TypeError (CORS or network failure)', async () => {
     mockFetch(async (_url, init) => {
       if (init?.method === 'HEAD') throw new TypeError('Failed to fetch');
