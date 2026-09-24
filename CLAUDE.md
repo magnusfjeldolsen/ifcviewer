@@ -77,6 +77,28 @@ The comments are left pointing at the original paths on purpose — the path is
 the archive key. Two plans never reached main and live on their own branches:
 `plan/share-model-links` and `assess/mobile-tablet`.
 
+## Branches
+
+**One branch per issue, named `<issue-number>-<short-slug>`** — `58-share-button`.
+The branch list is then a readable view of what is in flight, and a branch with
+no issue behind it is a smell.
+
+The repo has **"automatically delete head branches" enabled**. This is not
+tidiness for its own sake: when a merged branch lingers, a PR stacked on top of
+it has nothing to be retargeted to, so it silently merges into the stale branch
+instead of `main`. That happened on 2026-09-24 — PR #54 merged into
+`feature/provider-url-rules`, the hardening never reached `main`, and the live
+site kept ignoring `#url=` links while every check looked green.
+
+Work that is worth keeping but not worth merging gets an **`archive/*` tag**
+rather than a branch that sits in the list forever:
+
+```
+git show archive/share-model-links:dev/plans/handoff-share-model-links.md
+git show archive/mobile-tablet:dev/plans/assessment-mobile-tablet.md
+git show archive/project-persistence:src/services/ProjectExporter.ts
+```
+
 ## Implementation Procedure
 
 Feature work runs through the `mattpocock-skills` pipeline, in this order:
