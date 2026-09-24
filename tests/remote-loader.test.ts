@@ -252,6 +252,37 @@ describe('RemoteLoader', () => {
       expect(result.file!.name).toBe('Good.ifc');
     });
 
+    // A name that renders as something other than what it is: the bidi
+    // override makes "evil<U+202E>fci.exe" display as "evil.ifc". It has to
+    // arrive percent-encoded through the extended form, because a header value
+    // is bytes and cannot carry the character directly — which is also why
+    // this is the only form the attack can take.
+    it('strips bidi overrides, so a name cannot lie about its extension', async () => {
+      respondWith("attachment; filename*=utf-8''evil%E2%80%AEfci.exe");
+
+      const result = await loader.fetch('https://example.com/d?id=7');
+
+      expect(result.file!.name).toBe('evilfci.exe');
+    });
+
+    // Anchored to a parameter boundary: without that, any header parameter
+    // ending in "filename" would be picked up as the filename.
+    it('does not mistake another parameter ending in filename for the real one', async () => {
+      respondWith('attachment; xfilename="spoofed.ifc"');
+
+      const result = await loader.fetch('https://example.com/path/Real.ifc');
+
+      expect(result.file!.name).toBe('Real.ifc');
+    });
+
+    it('sanitises a name taken from the URL too, not only from the header', async () => {
+      respondWith(undefined);
+
+      const result = await loader.fetch('https://example.com/a/%2E%2E%2Fescaped.ifc');
+
+      expect(result.file!.name).toBe('escaped.ifc');
+    });
+
     it('falls back to the URL when the header carries no usable name', async () => {
       respondWith('attachment; filename=""');
 
