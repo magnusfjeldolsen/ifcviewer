@@ -20,6 +20,63 @@ export interface RemoteFetchResult {
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 const FETCH_TIMEOUT = 120_000; // 2 minutes
 const IFC_HEADER = 'ISO-10303-21';
+const MAX_FILENAME_LENGTH = 200;
+
+/**
+ * Recover the file's real name from a `Content-Disposition` header.
+ *
+ * Needed because a provider's download endpoint often has no name in its path
+ * — SharePoint's is `_layouts/15/download.aspx?share=<id>`, which would leave
+ * every model called `download.aspx`. The name is in the header instead, and
+ * SharePoint lists `Content-Disposition` in `Access-Control-Expose-Headers`,
+ * so a cross-origin read is allowed.
+ *
+ * Returns null when there is no usable name, leaving the caller to fall back
+ * to the URL path.
+ */
+/**
+ * Reduce a server-supplied name to something safe to use as a model name.
+ *
+ * The value arrives from a third-party server we do not operate and ends up as
+ * a label in the UI and as part of a session-storage key, so only the final
+ * path segment is kept and control characters are dropped. Returns null when
+ * nothing usable is left, so the caller falls back to the URL.
+ */
+function sanitizeFilename(raw: string): string | null {
+  const lastSegment = raw.split(/[/\\]/).pop() ?? '';
+  // eslint-disable-next-line no-control-regex
+  const cleaned = lastSegment.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  if (!cleaned || cleaned === '.' || cleaned === '..') return null;
+  return cleaned.slice(0, MAX_FILENAME_LENGTH);
+}
+
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+
+  // RFC 5987 `filename*=UTF-8''percent%20encoded` wins when present: it is the
+  // form that survives non-ASCII, and SharePoint sends both.
+  const extended = /filename\*\s*=\s*[^']*''([^;]+)/i.exec(header);
+  if (extended) {
+    try {
+      // Only return on success: a value that sanitises away to nothing should
+      // fall through to the plain form, not abandon the header entirely.
+      const decoded = sanitizeFilename(decodeURIComponent(extended[1].trim()));
+      if (decoded) return decoded;
+    } catch {
+      // A malformed percent-sequence falls through to the plain form below.
+    }
+  }
+
+  // The plain form. Quoted when it contains spaces, bare otherwise; stop the
+  // bare form at the next parameter separator.
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  if (plain) {
+    const value = (plain[1] ?? plain[2] ?? '').trim();
+    if (value) return sanitizeFilename(value);
+  }
+
+  return null;
+}
 
 function extractFilename(url: string): string {
   try {
@@ -155,7 +212,9 @@ export class RemoteLoader {
       };
     }
 
-    const name = extractFilename(url);
+    const name =
+      filenameFromDisposition(response.headers.get('content-disposition')) ??
+      extractFilename(url);
     return {
       status: 'ok',
       file: { name, buffer },

@@ -186,4 +186,78 @@ describe('RemoteLoader', () => {
     const result = await loader.fetch('https://example.com/model.ifc');
     expect(result.status).toBe('ok');
   });
+
+  describe('naming the downloaded model', () => {
+    function respondWith(disposition?: string) {
+      const buffer = makeIfcBuffer();
+      mockFetch(
+        async () =>
+          new Response(buffer, {
+            status: 200,
+            headers: disposition ? { 'content-disposition': disposition } : {},
+          }),
+      );
+    }
+
+    // The case this exists for: SharePoint's download endpoint has no filename
+    // in its path, so the URL alone yields "download.aspx". The real name is in
+    // the header, and SharePoint lists Content-Disposition in
+    // Access-Control-Expose-Headers, so a browser is allowed to read it.
+    it('prefers the name in Content-Disposition over the URL path', async () => {
+      respondWith(
+        "attachment;filename*=utf-8''Project%2DTestConcrete%2Eifc;filename=\"Project-TestConcrete.ifc\"",
+      );
+
+      const result = await loader.fetch(
+        'https://tommerdal-my.sharepoint.com/personal/x/_layouts/15/download.aspx?share=abc',
+      );
+
+      expect(result.file!.name).toBe('Project-TestConcrete.ifc');
+    });
+
+    it('reads the plain quoted form when that is all the server sends', async () => {
+      respondWith('attachment; filename="Bygg A - Konstruksjon.ifc"');
+
+      const result = await loader.fetch('https://example.com/d?id=7');
+
+      expect(result.file!.name).toBe('Bygg A - Konstruksjon.ifc');
+    });
+
+    // The header comes from a third-party server we do not operate, and the
+    // name it yields becomes a model name shown in the UI and used as a
+    // session-storage key. Keep only the last path segment.
+    it('keeps only the final segment, so a path in the header cannot escape', async () => {
+      respondWith('attachment; filename="../../../etc/passwd"');
+
+      const result = await loader.fetch('https://example.com/d?id=7');
+
+      expect(result.file!.name).toBe('passwd');
+    });
+
+    it('ignores a backslash-separated path too', async () => {
+      respondWith('attachment; filename="C:\\\\Windows\\\\evil.ifc"');
+
+      const result = await loader.fetch('https://example.com/d?id=7');
+
+      expect(result.file!.name).toBe('evil.ifc');
+    });
+
+    // Both forms are present in real SharePoint headers, so a bad extended
+    // value must not abandon the header — the plain one is still good.
+    it('uses the plain form when the extended one sanitises away to nothing', async () => {
+      respondWith("attachment; filename*=utf-8''%2F%2F; filename=\"Good.ifc\"");
+
+      const result = await loader.fetch('https://example.com/d?id=7');
+
+      expect(result.file!.name).toBe('Good.ifc');
+    });
+
+    it('falls back to the URL when the header carries no usable name', async () => {
+      respondWith('attachment; filename=""');
+
+      const result = await loader.fetch('https://example.com/path/Real.ifc');
+
+      expect(result.file!.name).toBe('Real.ifc');
+    });
+  });
 });
