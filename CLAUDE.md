@@ -51,6 +51,28 @@ Exactly one thing may drive the camera at a time, and `_controlsMode` in `src/vi
 
 This section used to describe a "Deferred State Application" pattern: place a pivot, raise a flag to skip the render-loop update, and let the user's next gesture mask the resulting snap. It is gone, and the lesson is worth keeping — deferring a jarring visual consequence only moves it to the user's next gesture, where it still reads as the view lurching. Fix the state model that produces it instead. The pivot now lives outside `controls.target` precisely so there is nothing left to defer.
 
+## Documentation: what may live in the repo
+
+Markdown rots because the thing it describes gets built and then changes. Four
+homes, and nothing outside them:
+
+| Kind | Home | Lifetime |
+|---|---|---|
+| **Decisions** — why we chose this, when it was hard to reverse | `docs/adr/NNNN-slug.md` | Permanent |
+| **Vocabulary** — what our words mean | `CONTEXT.md` (root, one file) | Permanent |
+| **How the code works** — short-form orientation | the **GitHub wiki** | Living |
+| **Work to do** | GitHub issues | Until closed |
+
+**Working notes, plans and specs may exist on a branch, but must be deleted
+before that branch merges.** They are scaffolding: useful while building,
+misleading the moment the build finishes. If something in one is worth keeping,
+it is a decision (ADR), a word (CONTEXT.md), an explanation (wiki) or a task
+(issue) — promote it to the right home and delete the note.
+
+`CONTEXT.md` is the one root-level exception, because it is a glossary rather
+than a description: it says what *Source URL* and *shareable* mean, never how
+anything is implemented, so there is nothing in it for the code to contradict.
+
 ## Where work is tracked
 
 **GitHub issues are the single source of truth for upcoming work.** There is no
