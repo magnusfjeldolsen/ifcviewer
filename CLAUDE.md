@@ -51,16 +51,58 @@ Exactly one thing may drive the camera at a time, and `_controlsMode` in `src/vi
 
 This section used to describe a "Deferred State Application" pattern: place a pivot, raise a flag to skip the render-loop update, and let the user's next gesture mask the resulting snap. It is gone, and the lesson is worth keeping — deferring a jarring visual consequence only moves it to the user's next gesture, where it still reads as the view lurching. Fix the state model that produces it instead. The pivot now lives outside `controls.target` precisely so there is nothing left to defer.
 
+## Where work is tracked
+
+**GitHub issues are the single source of truth for upcoming work.** There is no
+roadmap file and no plan documents — both were retired on 2026-09-24 in favour
+of issues, which are readable by humans who are not reading this repo's
+markdown.
+
+Issues are written in plain language: the title says what a user would notice
+(*"Measurement labels get huge when you zoom in close"*), not what the code
+does. Labels carry the rest — `performance`, `blocked`, `epic`, `measurement`,
+`data-insight`, `sharing`, `mobile`.
+
+### Reading a retired plan document
+
+Around 30 source comments point at paths under `dev/plans/`. Those files no
+longer exist on `main`; they were deleted at **`83c9c0f`** and every one of
+them is still readable in history:
+
+```
+git show 83c9c0f:dev/plans/handoff-undo-redo.md
+```
+
+The comments are left pointing at the original paths on purpose — the path is
+the archive key. Two plans never reached main and live on their own branches:
+`plan/share-model-links` and `assess/mobile-tablet`.
+
 ## Implementation Procedure
 
-Every new feature follows this workflow:
+Feature work runs through the `mattpocock-skills` pipeline, in this order:
 
-1. Plan the implementation step
-2. Create checklists to track progress
-3. Branch off for feature development (`feature/<name>`)
-4. Run existing tests before writing any code
-5. Create/update tests as needed
-6. Implement the feature
-7. If all tests pass, ask the user to manually test
-8. Create PR to main — CI must pass
-9. Merge only after manual approval
+1. **`/grill-with-docs`** — interrogate the idea against real documentation
+   before committing to a shape.
+2. **`/to-spec`** — turn the result into a spec.
+3. **`/to-tickets`** — break the spec into issues.
+4. **`/implement`** — build it, on a branch off `main` (`feature/<name>`).
+5. **`/code-review`** — review before asking for a human.
+6. **`/pr`** — open the PR.
+
+Non-negotiables that sit on top of that pipeline:
+
+- **Run the existing tests before writing any code**, so a pre-existing failure
+  is never mistaken for one you caused.
+- **Tests accompany the change**, not a follow-up PR.
+- **CI must pass** before the PR is ready.
+- **The user is the gate.** Ask for a manual test, and merge only after they
+  approve. Never self-merge, and never bypass branch protection.
+
+### Verify before you build on it
+
+A claim about how the app behaves today gets checked **in the running app**
+before anything is built on it. This rule was bought the hard way: in August
+2026 a "unit bug" was diagnosed from two probes that agreed with each other
+while both read the wrong data structure, a feature was built on it, and the
+whole thing had to be reverted. Unit tests agreeing with each other is not
+evidence about the running app.
