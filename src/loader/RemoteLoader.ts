@@ -20,12 +20,92 @@ export interface RemoteFetchResult {
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 const FETCH_TIMEOUT = 120_000; // 2 minutes
 const IFC_HEADER = 'ISO-10303-21';
+const MAX_FILENAME_LENGTH = 200;
 
+/**
+ * Reduce a name to something safe to show as a model's label.
+ *
+ * It can come from a server we do not operate, or from a URL someone was sent,
+ * and it is rendered in the Models panel. So: keep only the final path segment,
+ * and drop characters that let a name lie about itself. Bidi overrides are the
+ * one worth naming — `evil‮fci.exe` renders as `evil.ifc` — and they cost
+ * one character class to remove.
+ *
+ * It is *not* a storage key. Models are keyed by UUID and cached geometry by
+ * content hash (see `SessionStore`); the name is only ever a displayed field.
+ *
+ * Returns null when nothing usable is left, so the caller can fall back.
+ */
+function sanitizeFilename(raw: string): string | null {
+  const lastSegment = raw.split(/[/\\]/).pop() ?? '';
+  const cleaned = lastSegment
+    // C0 and C1 control characters, DEL, and the bidi overrides.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '')
+    .slice(0, MAX_FILENAME_LENGTH)
+    // After the slice, so truncation cannot leave a trailing space behind.
+    .trim();
+  if (!cleaned || cleaned === '.' || cleaned === '..') return null;
+  return cleaned;
+}
+
+/**
+ * Recover the file's real name from a `Content-Disposition` header.
+ *
+ * Needed because a provider's download endpoint often has no name in its path
+ * — SharePoint's is `_layouts/15/download.aspx?share=<id>`, which would leave
+ * every model called `download.aspx`. The name is in the header instead, and
+ * SharePoint lists `Content-Disposition` in `Access-Control-Expose-Headers`,
+ * so a cross-origin read is allowed. That last claim is the one thing here
+ * that automated tests cannot check — a mocked `Response` is same-origin and
+ * never exercises CORS header filtering — so it belongs in the manual test.
+ * If it were false the header reads as null and we fall back to the URL, which
+ * is the old behaviour rather than a failure.
+ *
+ * Returns null when there is no usable name, leaving the caller to fall back
+ * to the URL path.
+ */
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+
+  // RFC 5987 `filename*=UTF-8''percent%20encoded` wins when present: it is the
+  // form that survives non-ASCII, and SharePoint sends both.
+  // Anchored to a parameter boundary so `xfilename=` cannot masquerade as it.
+  const extended = /(?:^|;)\s*filename\*\s*=\s*[^']*''([^;]+)/i.exec(header);
+  if (extended) {
+    try {
+      // Only return on success: a value that sanitises away to nothing should
+      // fall through to the plain form, not abandon the header entirely.
+      const decoded = sanitizeFilename(decodeURIComponent(extended[1].trim()));
+      if (decoded) return decoded;
+    } catch {
+      // A malformed percent-sequence falls through to the plain form below.
+    }
+  }
+
+  // The plain form. Quoted when it contains spaces, bare otherwise; stop the
+  // bare form at the next parameter separator.
+  const plain = /(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  if (plain) {
+    const value = (plain[1] ?? plain[2] ?? '').trim();
+    if (value) return sanitizeFilename(value);
+  }
+
+  return null;
+}
+
+/**
+ * Last resort: name the model after the last segment of its URL.
+ *
+ * Sanitised on the same terms as a header-supplied name — a URL is no more
+ * trustworthy than a header, since both arrive from whoever sent the link, and
+ * percent-decoding a path can produce control characters just as easily.
+ */
 function extractFilename(url: string): string {
   try {
     const pathname = new URL(url).pathname;
-    const decoded = decodeURIComponent(pathname.split('/').pop() || 'model.ifc');
-    return decoded;
+    const decoded = decodeURIComponent(pathname.split('/').pop() || '');
+    return sanitizeFilename(decoded) ?? 'model.ifc';
   } catch {
     return 'model.ifc';
   }
@@ -155,7 +235,9 @@ export class RemoteLoader {
       };
     }
 
-    const name = extractFilename(url);
+    const name =
+      filenameFromDisposition(response.headers.get('content-disposition')) ??
+      extractFilename(url);
     return {
       status: 'ok',
       file: { name, buffer },
