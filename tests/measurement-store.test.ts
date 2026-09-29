@@ -287,9 +287,17 @@ describe('MeasurementStore', () => {
     it('round-trips ids, points and model ids', () => {
       const a = store.add(v(1, 2, 3), v(4, 5, 6), ['model-a']);
       const wire = store.serialize();
-      expect(wire).toEqual([
-        { id: a.id, start: [1, 2, 3], end: [4, 5, 6], modelIds: ['model-a'] },
-      ]);
+      // Asserted field by field rather than by deep equality: the wire form
+      // gains fields as measurements learn to record more about themselves
+      // (snap targets, orthogonal mode), and this test is about the points
+      // surviving the trip, not about the shape being frozen.
+      expect(wire).toHaveLength(1);
+      expect(wire[0]).toMatchObject({
+        id: a.id,
+        start: [1, 2, 3],
+        end: [4, 5, 6],
+        modelIds: ['model-a'],
+      });
 
       const restored = new MeasurementStore();
       restored.deserialize(wire, new Set(['model-a']));

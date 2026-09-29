@@ -8,6 +8,10 @@ import {
 import { MeasurementRenderer } from './MeasurementRenderer';
 import { measurementViews } from './measurementViews';
 import { measurementCandidatesAt } from './measurementPicking';
+import { snapCandidatesAt, snapPayload, type SnapPayload } from './snapCandidates';
+import { resolveMeasurement, type SnapPoint } from './measureMath';
+import type { MeasurementEnd } from './MeasurementStore';
+import { rankCandidates, cycleIndex } from '../inspector/candidateMath';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
 import type { SelectionMode } from '../inspector/types';
 
@@ -22,6 +26,12 @@ export interface MeasurementToolDeps {
    * groups). No-op if omitted.
    */
   requestRender?: () => void;
+  /**
+   * Show the user a short message. Used for the one thing this tool can
+   * refuse: two surfaces that are not parallel have no single distance
+   * between them, and saying so is the whole point of refusing.
+   */
+  onMessage?: (message: string) => void;
 }
 
 /**
@@ -43,6 +53,12 @@ export interface MeasurementToolDeps {
  * restore and model-hide all share one path and the visuals have one place to
  * drift from.
  */
+/**
+ * How far the cursor may drift before a Tab cycle is treated as a new
+ * gesture. Matches the resolver's own hold radius.
+ */
+const SNAP_HOLD_RADIUS_PX = 4;
+
 export class MeasurementTool implements Tool {
   readonly name = 'measurement';
 
@@ -61,6 +77,25 @@ export class MeasurementTool implements Tool {
   private pickingEnd = false;
   private startPoint: THREE.Vector3 | null = null;
   private startModelId: string | null = null;
+
+  /**
+   * Snap targets under the cursor, best first, and which one Tab has landed on.
+   *
+   * The tool owns this rather than registering with `CandidateResolver`,
+   * which is where the spec expected it to live. The resolver's input layer is
+   * gated on no tool being active — that gate is what stops element selection
+   * fighting measurement placement — so a provider registered there would
+   * never be consulted while measuring. The pure ranking and cycling helpers
+   * are reused directly instead, which is the part that mattered.
+   */
+  private snaps: Candidate[] = [];
+  private snapIndex = 0;
+  /** Where the cursor was when `snaps` was last rebuilt, for the Tab hold radius. */
+  private snapCursor: ScreenPoint | null = null;
+  /** The first end, once placed: where it is and whether it caught a surface. */
+  private startSnap: SnapPoint | null = null;
+  private startEnd: MeasurementEnd | null = null;
+  private boundOnKeyDown: (e: KeyboardEvent) => void;
 
   // Click-vs-drag detection
   private pointerDownPos = { x: 0, y: 0 };
@@ -83,6 +118,7 @@ export class MeasurementTool implements Tool {
     this.boundOnPointerUp = this.onPointerUp.bind(this);
     this.boundOnPointerMove = this.onPointerMove.bind(this);
     this.boundOnContextMenu = this.onContextMenu.bind(this);
+    this.boundOnKeyDown = this.onKeyDown.bind(this);
     this.store.onChange(() => this.draw());
   }
 
@@ -235,6 +271,8 @@ export class MeasurementTool implements Tool {
     this.view.hidePendingStart();
     this.startPoint = null;
     this.startModelId = null;
+    this.startSnap = null;
+    this.startEnd = null;
   }
 
   // ── Event listener management ──────────────────────────────
@@ -244,6 +282,7 @@ export class MeasurementTool implements Tool {
     this.deps.canvas.addEventListener('pointerup', this.boundOnPointerUp);
     this.deps.canvas.addEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.addEventListener('contextmenu', this.boundOnContextMenu);
+    window.addEventListener('keydown', this.boundOnKeyDown);
   }
 
   private removeListeners(): void {
@@ -251,6 +290,7 @@ export class MeasurementTool implements Tool {
     this.deps.canvas.removeEventListener('pointerup', this.boundOnPointerUp);
     this.deps.canvas.removeEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.removeEventListener('contextmenu', this.boundOnContextMenu);
+    window.removeEventListener('keydown', this.boundOnKeyDown);
   }
 
   // ── Pointer handlers ───────────────────────────────────────
@@ -274,16 +314,45 @@ export class MeasurementTool implements Tool {
     const hit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
     if (!hit) return;
 
+    this.refreshSnaps(e, hit);
+    const snap = this.activeSnap();
+    const point = snap ? snap.position.clone() : hit.point.clone();
     const modelId = modelIdOf(hit.object);
 
     if (this.pickingStart) {
-      this.startPoint = hit.point.clone();
+      this.startPoint = point;
       this.startModelId = modelId;
-      this.view.showPendingStart(this.startPoint);
+      this.startSnap = { position: point, planeNormal: snap?.planeNormal };
+      this.startEnd = endFrom(snap);
+      this.view.showPendingStart(point);
       this.enterPickEnd();
-    } else if (this.pickingEnd && this.startPoint) {
+    } else if (this.pickingEnd && this.startSnap) {
+      const resolved = resolveMeasurement(this.startSnap, {
+        position: point,
+        planeNormal: snap?.planeNormal,
+      });
+
+      if (!resolved.ok) {
+        // Two surfaces that are not parallel have no single distance between
+        // them. Refusing and saying so beats recording a number nobody can
+        // check — the start stays placed so the second pick can be retried.
+        this.deps.onMessage?.(resolved.reason);
+        this.deps.requestRender?.();
+        return;
+      }
+
+      const endEnd = endFrom(snap);
+      // `from` can be either pick: orthogonal to the first surface drops the
+      // second point onto it, reversing the drawn direction.
+      const [startSnapEnd, endSnapEnd] =
+        resolved.fromEnd === 'a' ? [this.startEnd, endEnd] : [endEnd, this.startEnd];
+
       const modelIds = [this.startModelId, modelId].filter((id): id is string => id !== null);
-      this.store.add(this.startPoint, hit.point, modelIds);
+      this.store.add(resolved.from, resolved.to, modelIds, {
+        mode: resolved.mode,
+        startSnap: startSnapEnd ?? undefined,
+        endSnap: endSnapEnd ?? undefined,
+      });
       this.clearPendingStart();
       this.view.hidePreview();
       this.enterPickStart();
@@ -295,14 +364,17 @@ export class MeasurementTool implements Tool {
     this.updateMouse(e);
     const hit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
 
-    if (hit) {
-      this.view.showHoverMarker(hit.point);
+    this.refreshSnaps(e, hit);
+    const point = this.snapOrHit(hit);
+
+    if (point) {
+      this.view.showHoverMarker(point);
     } else {
       this.view.hideHoverMarker();
     }
 
-    if (this.pickingEnd && this.startPoint && hit) {
-      this.view.showPreview(this.startPoint, hit.point);
+    if (this.pickingEnd && this.startPoint && point) {
+      this.view.showPreview(this.startPoint, point);
     } else if (this.pickingEnd) {
       this.view.hidePreview();
     }
@@ -323,6 +395,80 @@ export class MeasurementTool implements Tool {
     }
   }
 
+  // ── Snapping ───────────────────────────────────────────────
+
+  /**
+   * Rebuild the snap candidates under the cursor.
+   *
+   * The Tab position survives small movements so a cycle is not undone by
+   * hand tremor, and resets once the cursor has clearly moved on — the same
+   * bargain `CandidateResolver` strikes, for the same reason.
+   */
+  private refreshSnaps(e: MouseEvent, hit: THREE.Intersection | null): void {
+    const mesh = hit?.object;
+    if (!hit || !(mesh instanceof THREE.Mesh) || hit.faceIndex == null) {
+      this.snaps = [];
+      this.snapIndex = 0;
+      this.snapCursor = null;
+      return;
+    }
+
+    const rect = this.deps.canvas.getBoundingClientRect();
+    const cursor: ScreenPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+    const moved =
+      !this.snapCursor || Math.hypot(cursor.x - this.snapCursor.x, cursor.y - this.snapCursor.y) > SNAP_HOLD_RADIUS_PX;
+
+    this.snaps = rankCandidates(
+      snapCandidatesAt({
+        mesh,
+        faceIndex: hit.faceIndex,
+        hitPoint: hit.point,
+        cursor,
+        camera: this.deps.camera,
+        canvas: { width: this.deps.canvas.clientWidth, height: this.deps.canvas.clientHeight },
+      }),
+    );
+
+    if (moved) {
+      this.snapIndex = 0;
+      this.snapCursor = cursor;
+    } else if (this.snapIndex >= this.snaps.length) {
+      this.snapIndex = 0;
+    }
+  }
+
+  /** The snap Tab has landed on, or the best one. */
+  private activeSnap(): SnapPayload | null {
+    const candidate = this.snaps[this.snapIndex];
+    return candidate ? snapPayload(candidate) : null;
+  }
+
+  private snapOrHit(hit: THREE.Intersection | null): THREE.Vector3 | null {
+    const snap = this.activeSnap();
+    if (snap) return snap.position;
+    return hit ? hit.point : null;
+  }
+
+  /**
+   * Tab steps to the next snap under the cursor: corner, then edge, then
+   * surface, then the raw point. That last one is why snapping needs no
+   * suppression modifier — "off" is simply the final alternative.
+   */
+  private onKeyDown(e: KeyboardEvent): void {
+    if (e.key !== 'Tab' || this.snaps.length < 2) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    this.snapIndex = cycleIndex(this.snapIndex, this.snaps.length, e.shiftKey ? -1 : 1);
+
+    const point = this.activeSnap()?.position;
+    if (point) {
+      this.view.showHoverMarker(point);
+      if (this.pickingEnd && this.startPoint) this.view.showPreview(this.startPoint, point);
+    }
+    this.deps.requestRender?.();
+  }
+
   // ── Helpers ────────────────────────────────────────────────
 
   private updateMouse(e: MouseEvent): void {
@@ -341,4 +487,13 @@ export class MeasurementTool implements Tool {
 function modelIdOf(object: THREE.Object3D): string | null {
   const parent = object.parent;
   return parent && parent.name ? parent.name : null;
+}
+
+/** The record's description of one end, from whatever the cursor caught there. */
+function endFrom(snap: SnapPayload | null): MeasurementEnd {
+  if (!snap) return { target: 'point' };
+  return {
+    target: snap.target,
+    direction: snap.edgeDirection?.clone(),
+  };
 }

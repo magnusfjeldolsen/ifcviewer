@@ -2,6 +2,7 @@ import * as THREE from 'three';
 // Shared vocabulary, not a dependency on the inspector: measurement clicks use
 // the SAME modifier semantics as element clicks (see `applySelection`).
 import type { SelectionMode } from '../inspector/types';
+import type { SnapTarget } from './snapCandidates';
 
 /**
  * The bookkeeping half of the measurement tool: what measurements exist, which
@@ -17,6 +18,22 @@ import type { SelectionMode } from '../inspector/types';
  * measurements list panel would need if it is ever wanted (D5 left that open).
  */
 
+/** How a measurement's distance was arrived at. */
+export type MeasurementMode = 'direct' | 'orthogonal';
+
+/**
+ * What one end of a measurement caught, and what the glyph there should show.
+ *
+ * `direction` is carried only for an edge, and only because it is the one
+ * thing the two endpoints cannot imply: for an orthogonal measurement the
+ * drawn segment *is* the surface normal, so a face's orientation is
+ * recoverable, and a vertex or a plain point has no orientation at all.
+ */
+export interface MeasurementEnd {
+  target: SnapTarget;
+  direction?: THREE.Vector3;
+}
+
 export interface MeasurementRecord {
   /** Stable for the lifetime of the measurement, including across a reload. */
   id: string;
@@ -29,6 +46,16 @@ export interface MeasurementRecord {
    * built without model attribution, which stays permanently visible.
    */
   modelIds: string[];
+  mode: MeasurementMode;
+  startSnap: MeasurementEnd;
+  endSnap: MeasurementEnd;
+}
+
+/** What `add` needs beyond the two points. All optional; a bare call is a plain point-to-point. */
+export interface MeasurementOptions {
+  mode?: MeasurementMode;
+  startSnap?: MeasurementEnd;
+  endSnap?: MeasurementEnd;
 }
 
 /** The wire form persisted in the session (D6). Plain JSON, no THREE types. */
@@ -37,7 +64,19 @@ export interface SerializedMeasurement {
   start: [number, number, number];
   end: [number, number, number];
   modelIds: string[];
+  /** Absent in sessions written before snapping existed. */
+  mode?: MeasurementMode;
+  startSnap?: SerializedEnd;
+  endSnap?: SerializedEnd;
 }
+
+export interface SerializedEnd {
+  target: SnapTarget;
+  direction?: [number, number, number];
+}
+
+/** What an end looks like when nothing was snapped — and what a legacy record becomes. */
+const PLAIN_END: MeasurementEnd = { target: 'point' };
 
 export class MeasurementStore {
   private records: MeasurementRecord[] = [];
@@ -94,12 +133,20 @@ export class MeasurementStore {
    * Record a new measurement. `modelIds` is deduplicated so a same-model
    * measurement carries one id rather than the same id twice.
    */
-  add(start: THREE.Vector3, end: THREE.Vector3, modelIds: readonly string[]): MeasurementRecord {
+  add(
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    modelIds: readonly string[],
+    options: MeasurementOptions = {},
+  ): MeasurementRecord {
     const record: MeasurementRecord = {
       id: newId(),
       start: start.clone(),
       end: end.clone(),
       modelIds: [...new Set(modelIds)],
+      mode: options.mode ?? 'direct',
+      startSnap: cloneEnd(options.startSnap) ?? { ...PLAIN_END },
+      endSnap: cloneEnd(options.endSnap) ?? { ...PLAIN_END },
     };
     this.records.push(record);
     this.notify();
@@ -207,6 +254,9 @@ export class MeasurementStore {
       start: [r.start.x, r.start.y, r.start.z],
       end: [r.end.x, r.end.y, r.end.z],
       modelIds: [...r.modelIds],
+      mode: r.mode,
+      startSnap: serializeEnd(r.startSnap),
+      endSnap: serializeEnd(r.endSnap),
     }));
   }
 
@@ -229,6 +279,11 @@ export class MeasurementStore {
         start: new THREE.Vector3(...e.start),
         end: new THREE.Vector3(...e.end),
         modelIds: [...e.modelIds],
+        // A session written before snapping existed carries none of this, and
+        // reads back as the plain point-to-point it was.
+        mode: e.mode ?? 'direct',
+        startSnap: deserializeEnd(e.startSnap),
+        endSnap: deserializeEnd(e.endSnap),
       }));
     this.selectedIds.clear();
     this.notify();
@@ -280,4 +335,23 @@ function newId(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return uuid;
   return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function cloneEnd(end: MeasurementEnd | undefined): MeasurementEnd | undefined {
+  if (!end) return undefined;
+  return { target: end.target, direction: end.direction?.clone() };
+}
+
+function serializeEnd(end: MeasurementEnd): SerializedEnd {
+  const out: SerializedEnd = { target: end.target };
+  if (end.direction) out.direction = [end.direction.x, end.direction.y, end.direction.z];
+  return out;
+}
+
+function deserializeEnd(end: SerializedEnd | undefined): MeasurementEnd {
+  if (!end) return { ...PLAIN_END };
+  return {
+    target: end.target,
+    direction: end.direction ? new THREE.Vector3(...end.direction) : undefined,
+  };
 }

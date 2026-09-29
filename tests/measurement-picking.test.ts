@@ -45,6 +45,11 @@ function record(
     start: new THREE.Vector3(...start),
     end: new THREE.Vector3(...end),
     modelIds,
+    // Picking is about where a measurement is drawn, not how it was made, so
+    // these are the plainest values that satisfy the record.
+    mode: 'direct',
+    startSnap: { target: 'point' },
+    endSnap: { target: 'point' },
   };
 }
 
