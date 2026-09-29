@@ -127,3 +127,78 @@ export function measurePlaneToPlane(
   // any and keeps the drawn segment where the user pointed.
   return { ok: true, ...measurePointToPlane(a.point, b) };
 }
+
+/** One end of a measurement: where it is, and the plane it caught if it caught one. */
+export interface SnapPoint {
+  position: THREE.Vector3;
+  /** Present only when a surface was snapped. Its presence is what makes a measurement orthogonal. */
+  planeNormal?: THREE.Vector3;
+}
+
+export type ResolvedMeasurement =
+  | {
+      ok: true;
+      mode: 'direct' | 'orthogonal';
+      from: THREE.Vector3;
+      to: THREE.Vector3;
+      distance: number;
+      /**
+       * Which picked end `from` came from. Orthogonal to the *first* surface
+       * means dropping the second point onto it, so the drawn segment can run
+       * opposite to the click order — and the record has to know, or the two
+       * ends would be labelled with each other's snap.
+       */
+      fromEnd: 'a' | 'b';
+    }
+  | { ok: false; reason: string; angleDeg: number };
+
+/**
+ * Turn two picked ends into a measurement.
+ *
+ * The mode is never selected — it follows from what was caught. A surface at
+ * either end means the distance is taken along that surface's normal, and if
+ * both ends are surfaces the second one wins, because that is the order the
+ * question is usually asked in ("this column, off that wall"). Two surfaces
+ * only work when they are parallel.
+ */
+export function resolveMeasurement(
+  a: SnapPoint,
+  b: SnapPoint,
+  toleranceDeg: number = PARALLEL_TOLERANCE_DEG,
+): ResolvedMeasurement {
+  if (a.planeNormal && b.planeNormal) {
+    const result = measurePlaneToPlane(
+      { point: a.position, normal: a.planeNormal },
+      { point: b.position, normal: b.planeNormal },
+      toleranceDeg,
+    );
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      mode: 'orthogonal',
+      from: result.from,
+      to: result.to,
+      distance: result.distance,
+      fromEnd: 'a',
+    };
+  }
+
+  if (b.planeNormal) {
+    const m = measurePointToPlane(a.position, { point: b.position, normal: b.planeNormal });
+    return { ok: true, mode: 'orthogonal', ...m, fromEnd: 'a' };
+  }
+
+  if (a.planeNormal) {
+    const m = measurePointToPlane(b.position, { point: a.position, normal: a.planeNormal });
+    return { ok: true, mode: 'orthogonal', ...m, fromEnd: 'b' };
+  }
+
+  return {
+    ok: true,
+    mode: 'direct',
+    from: a.position.clone(),
+    to: b.position.clone(),
+    distance: a.position.distanceTo(b.position),
+    fromEnd: 'a',
+  };
+}

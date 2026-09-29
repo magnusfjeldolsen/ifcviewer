@@ -6,6 +6,7 @@ import {
   measurePlaneToPlane,
   planeAngleDeg,
   PARALLEL_TOLERANCE_DEG,
+  resolveMeasurement,
 } from '../src/tools/measureMath';
 
 const groundPlane = {
@@ -137,5 +138,103 @@ describe('measurePlaneToPlane', () => {
 
   it('defaults to the documented tolerance', () => {
     expect(PARALLEL_TOLERANCE_DEG).toBe(1);
+  });
+});
+
+describe('resolveMeasurement', () => {
+  const point = (x: number, y: number, z: number) => ({ position: new THREE.Vector3(x, y, z) });
+  const onPlane = (x: number, y: number, z: number, normal: THREE.Vector3) => ({
+    position: new THREE.Vector3(x, y, z),
+    planeNormal: normal,
+  });
+  const up = () => new THREE.Vector3(0, 1, 0);
+  const acrossX = () => new THREE.Vector3(1, 0, 0);
+
+  it('measures point to point directly', () => {
+    const result = resolveMeasurement(point(0, 0, 0), point(3, 4, 0));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.mode).toBe('direct');
+      expect(result.distance).toBeCloseTo(5, 6);
+    }
+  });
+
+  // "How far is that column from the wall?" — pick the wall, pick the column.
+  it('goes orthogonal when the first end is a surface', () => {
+    const result = resolveMeasurement(onPlane(0, 0, 0, acrossX()), point(2.5, 0, 9));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.mode).toBe('orthogonal');
+      expect(result.distance).toBeCloseTo(2.5, 6);
+    }
+  });
+
+  // Clicking in the other order asks the same question, so it gets the same answer.
+  it('goes orthogonal when the second end is a surface', () => {
+    const result = resolveMeasurement(point(2.5, 0, 9), onPlane(0, 0, 0, acrossX()));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.distance).toBeCloseTo(2.5, 6);
+  });
+
+  it('measures between two parallel surfaces', () => {
+    const result = resolveMeasurement(onPlane(0, 0, 0, up()), onPlane(0, 2.7, 0, up()));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.mode).toBe('orthogonal');
+      expect(result.distance).toBeCloseTo(2.7, 6);
+    }
+  });
+
+  it('refuses two surfaces that are not parallel', () => {
+    const tiltedNormal = new THREE.Vector3(Math.sin(0.3), Math.cos(0.3), 0).normalize();
+    const result = resolveMeasurement(onPlane(0, 0, 0, up()), onPlane(0, 2, 0, tiltedNormal));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.angleDeg).toBeGreaterThan(1);
+  });
+
+  it('lands the measurement on the plane, not at the picked spot', () => {
+    // A column well past the end of the wall still measures to the wall line.
+    const result = resolveMeasurement(onPlane(0, 0, 0, acrossX()), point(4, 0, 900));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.to.x).toBeCloseTo(0, 6);
+      expect(result.to.z).toBeCloseTo(900, 6);
+    }
+  });
+});
+
+describe('which end the drawn segment starts from', () => {
+  const up = new THREE.Vector3(0, 1, 0);
+
+  it('starts at the picked point when the surface was picked first', () => {
+    // Orthogonal to the FIRST surface means dropping the second point onto
+    // it, so the segment runs from the second pick back to the plane.
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+      { position: new THREE.Vector3(0, 3, 0) },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.fromEnd).toBe('b');
+      expect(result.from.y).toBeCloseTo(3, 6);
+      expect(result.to.y).toBeCloseTo(0, 6);
+    }
+  });
+
+  it('starts at the first pick when the surface was picked second', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 3, 0) },
+      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.fromEnd).toBe('a');
   });
 });
