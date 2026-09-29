@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 /**
  * Pure measurement maths and formatting.
  *
@@ -30,4 +32,98 @@ export function formatDistance(metres: number): string {
     if (mm < MILLIMETRE_THRESHOLD_M * 1000) return `${mm} mm`;
   }
   return `${value.toFixed(2)} m`;
+}
+
+// ── Orthogonal measurement ───────────────────────────────────
+
+/**
+ * How far two surfaces may be from parallel and still be measured against
+ * each other, in degrees.
+ *
+ * Real IFC surfaces meant to be parallel are exactly parallel, so this only
+ * has to absorb tessellation noise. Named rather than inlined because it is
+ * the kind of number that wants tuning once someone meets a model that
+ * disagrees.
+ */
+export const PARALLEL_TOLERANCE_DEG = 1;
+
+/** An infinite plane: a point on it, and its unit normal. */
+export interface MeasurePlane {
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
+}
+
+export interface OrthogonalMeasurement {
+  /** Where the measurement starts — the point being measured. */
+  from: THREE.Vector3;
+  /** Where it lands on the plane. */
+  to: THREE.Vector3;
+  distance: number;
+}
+
+export type PlaneToPlaneResult =
+  | ({ ok: true } & OrthogonalMeasurement)
+  | { ok: false; reason: string; angleDeg: number };
+
+/**
+ * The angle between two planes, never more than 90°.
+ *
+ * Two walls facing each other across a corridor are parallel, but their
+ * outward normals point in opposite directions — so the raw angle between
+ * normals would be 180° and every corridor measurement would be refused.
+ * What matters is the angle between the planes, not between the arrows.
+ */
+export function planeAngleDeg(a: THREE.Vector3, b: THREE.Vector3): number {
+  const dot = Math.abs(a.clone().normalize().dot(b.clone().normalize()));
+  // Float error can push the dot product a hair past 1, where acos is NaN.
+  return (Math.acos(Math.min(1, dot)) * 180) / Math.PI;
+}
+
+/**
+ * Where a point lands when dropped perpendicular onto a plane.
+ *
+ * The plane is infinite. The patch that produced it is not — a column past
+ * the end of a wall still has a meaningful distance to that wall's line, and
+ * clamping to the patch would quietly answer a different question.
+ */
+export function footOnPlane(point: THREE.Vector3, plane: MeasurePlane): THREE.Vector3 {
+  const normal = plane.normal.clone().normalize();
+  const signed = point.clone().sub(plane.point).dot(normal);
+  return point.clone().sub(normal.multiplyScalar(signed));
+}
+
+/** Measure from a point to a plane, along the plane's normal. */
+export function measurePointToPlane(
+  point: THREE.Vector3,
+  plane: MeasurePlane,
+): OrthogonalMeasurement {
+  const to = footOnPlane(point, plane);
+  return { from: point.clone(), to, distance: point.distanceTo(to) };
+}
+
+/**
+ * Measure between two planes — the clear span between parallel walls.
+ *
+ * Refuses when they are not parallel, and says by how much. A measurement
+ * that silently returns a number for two skew surfaces is worse than one
+ * that declines, because nobody catches it.
+ */
+export function measurePlaneToPlane(
+  a: MeasurePlane,
+  b: MeasurePlane,
+  toleranceDeg: number = PARALLEL_TOLERANCE_DEG,
+): PlaneToPlaneResult {
+  const angleDeg = planeAngleDeg(a.normal, b.normal);
+  if (angleDeg > toleranceDeg) {
+    return {
+      ok: false,
+      angleDeg,
+      reason: `Those surfaces are ${angleDeg.toFixed(1)}° from parallel, so there is no single distance between them. Snap a point instead.`,
+    };
+  }
+
+  // Measure from a point on `a` straight to `b`. Any point on `a` gives the
+  // same answer once they are parallel, so the one we snapped is as good as
+  // any and keeps the drawn segment where the user pointed.
+  return { ok: true, ...measurePointToPlane(a.point, b) };
 }
