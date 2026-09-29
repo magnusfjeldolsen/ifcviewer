@@ -173,6 +173,13 @@ export class App {
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
       requestRender,
+      // The tool refuses a measurement between two surfaces that are not
+      // parallel. The status line is where it says so, and it clears itself
+      // like every other transient message.
+      onMessage: (message) => {
+        this.setStatus(message);
+        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      },
     });
     this.toolManager.register(this.measurementTool);
 
