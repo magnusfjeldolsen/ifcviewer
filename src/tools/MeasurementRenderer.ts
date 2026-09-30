@@ -59,6 +59,9 @@ const END_MARKER_COLOR = 0xef4444;
  */
 const GLYPH_SEGMENTS = 16;
 
+/** The hover glyph is white so it reads as "not placed yet". */
+const HOVER_COLOR = 0xffffff;
+
 export interface MeasurementRendererDeps {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -73,8 +76,10 @@ export class MeasurementRenderer {
   /** The line of each measurement, so hover / selection can restyle it. */
   private lines = new Map<string, Line2>();
 
-  /** The dot that follows the cursor over geometry. */
+  /** The glyph that follows the cursor over geometry. */
   private hoverMarker: THREE.Group | null = null;
+  /** Which glyph the hover marker currently is, so it is rebuilt only on a change. */
+  private hoverGlyph: string | null = null;
   /** The marker on a placed first point, before the second is picked. */
   private pendingStartMarker: THREE.Group | null = null;
 
@@ -112,42 +117,44 @@ export class MeasurementRenderer {
     this.restyle(views);
   }
 
-  /** Show the cursor dot at a world position. */
-  showHoverMarker(position: THREE.Vector3): void {
-    if (!this.hoverMarker) {
-      const group = new THREE.Group();
-      group.userData.isMeasurement = true;
-      group.userData.isMeasurementMarker = true;
-
-      const geom = new THREE.SphereGeometry(1, 8, 8);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        depthTest: false,
-        transparent: true,
-        opacity: 0.6,
-      });
-      const mesh = new THREE.Mesh(geom, mat);
-      mesh.renderOrder = 1002;
-      mesh.userData.isMeasurement = true;
-      group.add(mesh);
-
-      this.hoverMarker = group;
+  /**
+   * Show what the cursor has caught, in the shape of the thing it caught.
+   *
+   * Rebuilt whenever the kind changes rather than reused, because the glyph
+   * *is* the feedback: a measuring tool that snaps invisibly is one the user
+   * cannot trust, and a single white dot for every kind of snap is
+   * indistinguishable from no snapping at all.
+   */
+  showHoverMarker(position: THREE.Vector3, end?: MeasurementEnd, axis?: THREE.Vector3): void {
+    const signature = glyphSignature(end);
+    if (!this.hoverMarker || this.hoverGlyph !== signature) {
+      this.hideHoverMarker();
+      this.hoverMarker = this.createPointMarker(position, HOVER_COLOR, end, axis, 0.6);
+      this.hoverGlyph = signature;
       this.deps.scene.add(this.hoverMarker);
     }
 
     this.hoverMarker.position.copy(position);
+    // An edge glyph has to keep pointing along the edge, and a surface glyph
+    // along its normal, as the cursor travels over changing geometry.
+    reorientGlyph(this.hoverMarker, end, axis);
   }
 
   hideHoverMarker(): void {
     if (!this.hoverMarker) return;
     this.disposeGroup(this.hoverMarker);
     this.hoverMarker = null;
+    this.hoverGlyph = null;
   }
 
-  /** Mark a placed first point while the second is being chosen. */
-  showPendingStart(position: THREE.Vector3): void {
+  /**
+   * Mark a placed first point while the second is being chosen. Keeps its
+   * glyph, because the first pick is the reference and what it caught
+   * decides what the finished measurement will mean.
+   */
+  showPendingStart(position: THREE.Vector3, end?: MeasurementEnd, axis?: THREE.Vector3): void {
     this.hidePendingStart();
-    this.pendingStartMarker = this.createPointMarker(position, START_MARKER_COLOR);
+    this.pendingStartMarker = this.createPointMarker(position, START_MARKER_COLOR, end, axis);
     this.deps.scene.add(this.pendingStartMarker);
   }
 
@@ -306,6 +313,7 @@ export class MeasurementRenderer {
     color: number,
     end?: MeasurementEnd,
     axis?: THREE.Vector3,
+    opacity = 0.9,
   ): THREE.Group {
     const markerGroup = new THREE.Group();
     markerGroup.userData.isMeasurement = true;
@@ -316,7 +324,7 @@ export class MeasurementRenderer {
       color,
       depthTest: false,
       transparent: true,
-      opacity: 0.9,
+      opacity,
       side: THREE.DoubleSide,
     });
 
@@ -455,4 +463,28 @@ function roundRect(
   ctx.lineTo(x, y + r);
   ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
+}
+
+/** Identifies which glyph an end needs, so the hover marker rebuilds only on a change. */
+function glyphSignature(end: MeasurementEnd | undefined): string {
+  return end?.target ?? 'point';
+}
+
+/**
+ * Point a live glyph at the thing it is describing. Only the oriented kinds
+ * need it — a dot and a ring have no direction of their own, and the ring is
+ * turned to the camera every frame anyway.
+ */
+function reorientGlyph(
+  group: THREE.Group,
+  end: MeasurementEnd | undefined,
+  axis: THREE.Vector3 | undefined,
+): void {
+  const mesh = group.children[0];
+  if (!mesh) return;
+  if (end?.target === 'face' && axis) {
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis.clone().normalize());
+  } else if (end?.target === 'edge' && end.direction) {
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), end.direction.clone().normalize());
+  }
 }
