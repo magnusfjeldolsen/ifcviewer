@@ -332,7 +332,7 @@ export class MeasurementTool implements Tool {
       this.startModelId = modelId;
       this.startSnap = { position: point, planeNormal: snap?.planeNormal };
       this.startEnd = endFrom(snap);
-      this.view.showPendingStart(point);
+      this.view.showPendingStart(point, this.startEnd, snap?.planeNormal);
       this.enterPickEnd();
     } else if (this.pickingEnd && this.startSnap) {
       const resolved = resolveMeasurement(this.startSnap, {
@@ -373,19 +373,8 @@ export class MeasurementTool implements Tool {
     const hit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
 
     this.refreshSnaps(e, hit);
-    const point = this.snapOrHit(hit);
+    this.showActiveSnap(hit);
 
-    if (point) {
-      this.view.showHoverMarker(point);
-    } else {
-      this.view.hideHoverMarker();
-    }
-
-    if (this.pickingEnd && this.startPoint && point) {
-      this.view.showPreview(this.startPoint, point);
-    } else if (this.pickingEnd) {
-      this.view.hidePreview();
-    }
     // Hover marker and preview line track the cursor; every move mutates
     // scene state without touching the camera, so OrbitControls won't fire.
     this.deps.requestRender?.();
@@ -455,10 +444,23 @@ export class MeasurementTool implements Tool {
     return candidate ? snapPayload(candidate) : null;
   }
 
-  private snapOrHit(hit: THREE.Intersection | null): THREE.Vector3 | null {
+  /**
+   * Put the hover glyph on whatever is currently snapped, and keep the
+   * preview line attached to it. The glyph is the only thing that tells the
+   * user a snap happened at all, so it goes wherever the point goes.
+   */
+  private showActiveSnap(hit: THREE.Intersection | null): void {
     const snap = this.activeSnap();
-    if (snap) return snap.position;
-    return hit ? hit.point : null;
+    const point = snap?.position ?? hit?.point ?? null;
+
+    if (!point) {
+      this.view.hideHoverMarker();
+      if (this.pickingEnd) this.view.hidePreview();
+      return;
+    }
+
+    this.view.showHoverMarker(point, endFrom(snap), snap?.planeNormal);
+    if (this.pickingEnd && this.startPoint) this.view.showPreview(this.startPoint, point);
   }
 
   /**
@@ -480,11 +482,7 @@ export class MeasurementTool implements Tool {
     e.preventDefault();
     this.snapIndex = cycleIndex(this.snapIndex, this.snaps.length, e.shiftKey ? -1 : 1);
 
-    const point = this.activeSnap()?.position;
-    if (point) {
-      this.view.showHoverMarker(point);
-      if (this.pickingEnd && this.startPoint) this.view.showPreview(this.startPoint, point);
-    }
+    this.showActiveSnap(null);
     this.deps.requestRender?.();
   }
 
