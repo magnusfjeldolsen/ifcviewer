@@ -15,6 +15,9 @@ function record(id: string, modelIds: string[] = ['m1']): MeasurementRecord {
     start: new THREE.Vector3(0, 0, 0),
     end: new THREE.Vector3(1, 0, 0),
     modelIds,
+    mode: 'direct',
+    startSnap: { target: 'point' },
+    endSnap: { target: 'point' },
   } as MeasurementRecord;
 }
 
@@ -83,5 +86,17 @@ describe('measurementViews', () => {
 
   it('returns nothing for no records', () => {
     expect(measurementViews([], allVisible)).toEqual([]);
+  });
+
+  it('carries what each end caught, which is what picks the glyph', () => {
+    const r = record('a');
+    r.startSnap = { target: 'face' };
+    r.endSnap = { target: 'edge', direction: new THREE.Vector3(1, 0, 0) };
+
+    const [view] = measurementViews([r], allVisible);
+
+    expect(view.startSnap.target).toBe('face');
+    expect(view.endSnap.target).toBe('edge');
+    expect(view.endSnap.direction?.x).toBeCloseTo(1, 6);
   });
 });

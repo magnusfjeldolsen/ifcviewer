@@ -29,10 +29,17 @@ export interface SettingsShape {
    * than one somebody turns off.
    */
   hoverPreHighlight: boolean;
+  /**
+   * Offer corners, edges and surfaces while measuring. Off means every pick
+   * is the raw point under the cursor. Toggled with `S`; default on, because
+   * a measuring tool that lands near the corner is not a measuring tool.
+   */
+  measurementSnapping: boolean;
 }
 
 export const SETTINGS_DEFAULTS: Readonly<SettingsShape> = {
   hoverPreHighlight: true,
+  measurementSnapping: true,
 };
 
 type SettingsKey = keyof SettingsShape;

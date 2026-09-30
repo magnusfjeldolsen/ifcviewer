@@ -4,6 +4,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { formatDistance } from './measureMath';
 import type { MeasurementView } from './measurementViews';
+import type { MeasurementEnd } from './MeasurementStore';
 
 /**
  * Everything a measurement looks like, and nothing about what it means.
@@ -45,6 +46,18 @@ const HOVER_MARKER_SCREEN_SIZE = 0.005;
 
 const START_MARKER_COLOR = 0x22c55e;
 const END_MARKER_COLOR = 0xef4444;
+
+/**
+ * Each end shows what it caught, so a measurement can be read without
+ * remembering how it was made — which matters more than usual here, because
+ * the same two clicks in the other order mean a different thing.
+ *
+ *   surface — a small square lying in the surface
+ *   edge    — a short segment along the edge
+ *   vertex  — a hollow ring, turned to face the camera
+ *   point   — a filled dot, as before
+ */
+const GLYPH_SEGMENTS = 16;
 
 export interface MeasurementRendererDeps {
   scene: THREE.Scene;
@@ -209,8 +222,11 @@ export class MeasurementRenderer {
 
     const distance = view.start.distanceTo(view.end);
 
-    group.add(this.createPointMarker(view.start, START_MARKER_COLOR));
-    group.add(this.createPointMarker(view.end, END_MARKER_COLOR));
+    // For an orthogonal measurement the drawn segment IS the surface normal,
+    // so the square glyph can be oriented from it without storing a plane.
+    const axis = view.end.clone().sub(view.start);
+    group.add(this.createPointMarker(view.start, START_MARKER_COLOR, view.startSnap, axis));
+    group.add(this.createPointMarker(view.end, END_MARKER_COLOR, view.endSnap, axis));
 
     const line = this.createLine(view.start, view.end, LINE_COLOR, LINE_WIDTH_PX, false);
     group.add(line);
@@ -285,20 +301,49 @@ export class MeasurementRenderer {
     return this.deps.canvas.clientHeight || this.deps.canvas.height || 1;
   }
 
-  private createPointMarker(position: THREE.Vector3, color: number): THREE.Group {
+  private createPointMarker(
+    position: THREE.Vector3,
+    color: number,
+    end?: MeasurementEnd,
+    axis?: THREE.Vector3,
+  ): THREE.Group {
     const markerGroup = new THREE.Group();
     markerGroup.userData.isMeasurement = true;
     markerGroup.userData.isMeasurementMarker = true;
     markerGroup.position.copy(position);
 
-    const geom = new THREE.SphereGeometry(1, 10, 10);
     const mat = new THREE.MeshBasicMaterial({
       color,
       depthTest: false,
       transparent: true,
       opacity: 0.9,
+      side: THREE.DoubleSide,
     });
-    const mesh = new THREE.Mesh(geom, mat);
+
+    const target = end?.target ?? 'point';
+    let mesh: THREE.Object3D;
+
+    if (target === 'face' && axis) {
+      // A square lying in the surface: its own normal is the measurement's
+      // direction, which for an orthogonal measurement is the surface normal.
+      mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis.clone().normalize());
+    } else if (target === 'edge' && end?.direction) {
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 3, 6), mat);
+      // Cylinders are built along y; lay it along the edge.
+      mesh.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        end.direction.clone().normalize(),
+      );
+    } else if (target === 'vertex') {
+      mesh = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.3, GLYPH_SEGMENTS), mat);
+      // A ring is only legible face-on, so it is turned to the camera every
+      // frame by `scaleMarkers`.
+      markerGroup.userData.billboard = true;
+    } else {
+      mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 10), mat);
+    }
+
     mesh.renderOrder = 1000;
     mesh.userData.isMeasurement = true;
     markerGroup.add(mesh);
@@ -363,6 +408,7 @@ export class MeasurementRenderer {
       if (child instanceof THREE.Group && child.userData.isMeasurementMarker) {
         const dist = this.deps.camera.position.distanceTo(child.position);
         child.scale.setScalar(dist * MARKER_SCREEN_SIZE);
+        if (child.userData.billboard) child.quaternion.copy(this.deps.camera.quaternion);
       }
     });
   }

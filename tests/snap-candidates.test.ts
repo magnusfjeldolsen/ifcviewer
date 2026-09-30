@@ -183,4 +183,22 @@ describe('snapCandidatesAt', () => {
 
     expect(found).toEqual([]);
   });
+
+  // The `S` toggle. Snapping off does not mean no candidate — it means the
+  // only candidate is the raw point under the cursor.
+  it('offers only the raw point when features are switched off', () => {
+    const { mesh, camera } = scene();
+
+    const found = snapCandidatesAt({
+      mesh,
+      faceIndex: 0,
+      hitPoint: new THREE.Vector3(0, 0, 0),
+      cursor: CENTRE,
+      camera,
+      canvas: CANVAS,
+      featuresEnabled: false,
+    });
+
+    expect(targets(found)).toEqual(['point']);
+  });
 });
