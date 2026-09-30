@@ -35,11 +35,24 @@ export interface SettingsShape {
    * a measuring tool that lands near the corner is not a measuring tool.
    */
   measurementSnapping: boolean;
+  /**
+   * Which targets snapping offers. Independent of the master switch above, so
+   * "only edges" is expressible without turning snapping off and back on —
+   * the same shape as a CAD object-snap panel, and for the same reason: on a
+   * densely tessellated model corners are everywhere, and someone tracing
+   * edges wants them out of the way.
+   */
+  snapToVertices: boolean;
+  snapToEdges: boolean;
+  snapToSurfaces: boolean;
 }
 
 export const SETTINGS_DEFAULTS: Readonly<SettingsShape> = {
   hoverPreHighlight: true,
   measurementSnapping: true,
+  snapToVertices: true,
+  snapToEdges: true,
+  snapToSurfaces: true,
 };
 
 type SettingsKey = keyof SettingsShape;
