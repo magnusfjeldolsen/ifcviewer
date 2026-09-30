@@ -54,6 +54,11 @@ export interface SnapQuery {
   camera: THREE.PerspectiveCamera;
   canvas: { width: number; height: number };
   radiusPx?: number;
+  /**
+   * When false, only the raw point is offered. This is the `S` toggle: the
+   * tool still resolves a candidate, it is just always the plain one.
+   */
+  featuresEnabled?: boolean;
 }
 
 export function snapCandidatesAt(query: SnapQuery): Candidate[] {
@@ -61,9 +66,12 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
   const radius = query.radiusPx ?? SNAP_RADIUS_PX;
   if (canvas.width <= 0 || canvas.height <= 0) return [];
 
+  const out: Candidate[] = [];
+
+  if (query.featuresEnabled === false) return [plainPoint(hitPoint, camera)];
+
   const geo = snapGeometryFor(mesh.geometry);
   const matrix = mesh.matrixWorld;
-  const out: Candidate[] = [];
 
   const world = new THREE.Vector3();
   const a = new THREE.Vector3();
@@ -143,16 +151,20 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
   // The raw point, ranked last. This is what "no snapping" is, and why there
   // is no modifier key to hold: the escape hatch is a Tab away like any other
   // alternative.
-  out.push({
+  out.push(plainPoint(hitPoint, camera));
+
+  return out;
+}
+
+function plainPoint(hitPoint: THREE.Vector3, camera: THREE.PerspectiveCamera): Candidate {
+  return {
     kind: SNAP_KIND,
     priority: SNAP_PRIORITY.point,
     distance: 0,
     depth: camera.position.distanceTo(hitPoint),
     id: 'snap:point',
     payload: { target: 'point', position: hitPoint.clone() } satisfies SnapPayload,
-  });
-
-  return out;
+  };
 }
 
 /** The snap payload of a candidate, or null if it is not a snap. */

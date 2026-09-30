@@ -171,12 +171,16 @@ describe('resolveMeasurement', () => {
     }
   });
 
-  // Clicking in the other order asks the same question, so it gets the same answer.
-  it('goes orthogonal when the second end is a surface', () => {
+  // Clicking in the other order asks a different question: a surface picked
+  // second is only a point that happens to lie on one.
+  it('stays direct when the surface is picked second', () => {
     const result = resolveMeasurement(point(2.5, 0, 9), onPlane(0, 0, 0, acrossX()));
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.distance).toBeCloseTo(2.5, 6);
+    if (result.ok) {
+      expect(result.mode).toBe('direct');
+      expect(result.distance).toBeCloseTo(Math.hypot(2.5, 9), 6);
+    }
   });
 
   it('measures between two parallel surfaces', () => {
@@ -197,44 +201,77 @@ describe('resolveMeasurement', () => {
     if (!result.ok) expect(result.angleDeg).toBeGreaterThan(1);
   });
 
-  it('lands the measurement on the plane, not at the picked spot', () => {
+  it('lands on the plane, not at the spot the surface was picked', () => {
     // A column well past the end of the wall still measures to the wall line.
     const result = resolveMeasurement(onPlane(0, 0, 0, acrossX()), point(4, 0, 900));
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.to.x).toBeCloseTo(0, 6);
-      expect(result.to.z).toBeCloseTo(900, 6);
+      expect(result.from.x).toBeCloseTo(0, 6);
+      expect(result.from.z).toBeCloseTo(900, 6);
+      expect(result.distance).toBeCloseTo(4, 6);
     }
   });
 });
 
-describe('which end the drawn segment starts from', () => {
+describe('the first pick is the reference', () => {
   const up = new THREE.Vector3(0, 1, 0);
 
-  it('starts at the picked point when the surface was picked first', () => {
-    // Orthogonal to the FIRST surface means dropping the second point onto
-    // it, so the segment runs from the second pick back to the plane.
+  // A surface picked FIRST sets the reference, and the measurement runs
+  // perpendicular to it.
+  it('measures perpendicular when the surface came first', () => {
     const result = resolveMeasurement(
-      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+      { position: new THREE.Vector3(5, 0, 5), planeNormal: up },
       { position: new THREE.Vector3(0, 3, 0) },
     );
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.fromEnd).toBe('b');
-      expect(result.from.y).toBeCloseTo(3, 6);
-      expect(result.to.y).toBeCloseTo(0, 6);
+      expect(result.mode).toBe('orthogonal');
+      expect(result.distance).toBeCloseTo(3, 6);
+      // `from` lands on the plane beneath the point, not where the cursor
+      // happened to be when the surface was picked.
+      expect(result.from.x).toBeCloseTo(0, 6);
+      expect(result.from.z).toBeCloseTo(0, 6);
     }
   });
 
-  it('starts at the first pick when the surface was picked second', () => {
+  // The same surface picked SECOND is just a point on a surface.
+  it('measures straight-line when the surface came second', () => {
     const result = resolveMeasurement(
       { position: new THREE.Vector3(0, 3, 0) },
-      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+      { position: new THREE.Vector3(4, 0, 0), planeNormal: up },
     );
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.fromEnd).toBe('a');
+    if (result.ok) {
+      expect(result.mode).toBe('direct');
+      expect(result.distance).toBeCloseTo(5, 6);
+    }
+  });
+
+  it('gives the two orders different answers, which is the whole point', () => {
+    const surface = { position: new THREE.Vector3(0, 0, 0), planeNormal: up };
+    const point = { position: new THREE.Vector3(4, 3, 0) };
+
+    const surfaceFirst = resolveMeasurement(surface, point);
+    const pointFirst = resolveMeasurement(point, surface);
+
+    expect(surfaceFirst.ok && surfaceFirst.distance).toBeCloseTo(3, 6);
+    expect(pointFirst.ok && pointFirst.distance).toBeCloseTo(5, 6);
+  });
+
+  it('starts the drawn segment on the reference surface', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 0, 0), planeNormal: new THREE.Vector3(1, 0, 0) },
+      { position: new THREE.Vector3(2, 0, 900) },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.from.x).toBeCloseTo(0, 6);
+      expect(result.from.z).toBeCloseTo(900, 6);
+      expect(result.to.x).toBeCloseTo(2, 6);
+    }
   });
 });
