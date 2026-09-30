@@ -7,6 +7,18 @@ const MOUSE_CONTROLS = [
   { input: 'Scroll', action: 'Zoom' },
 ];
 
+/**
+ * Keys the measurement tool owns. Snapping is the reason both exist: the
+ * first pick of a measurement decides what it means, so being able to choose
+ * what the cursor caught — and to stop it catching anything — is not a
+ * nicety.
+ */
+const MEASUREMENT_KEYS = [
+  { input: 'Tab', action: 'Cycle what the cursor snaps to (corner, edge, surface, point)' },
+  { input: 'S', action: 'Snapping on / off' },
+  { input: 'Right-click', action: 'Cancel a half-placed measurement' },
+];
+
 export class HelpOverlay {
   private button: HTMLButtonElement;
   private overlay: HTMLElement | null = null;
@@ -63,6 +75,18 @@ export class HelpOverlay {
     const shortcuts = this.shortcuts.getAll();
     for (const entry of shortcuts) {
       this.overlay.appendChild(this.createRow(this.formatKey(entry.key), entry.label));
+    }
+
+    // Tool-scoped keys. Not in `KeyboardShortcuts` because they only mean
+    // anything while the measurement tool is active, and registering them
+    // globally would make them fire when it is not.
+    const measureHeading = document.createElement('h4');
+    measureHeading.className = 'help-overlay-section';
+    measureHeading.textContent = 'While measuring';
+    this.overlay.appendChild(measureHeading);
+
+    for (const entry of MEASUREMENT_KEYS) {
+      this.overlay.appendChild(this.createRow(entry.input, entry.action));
     }
 
     // Mouse controls section

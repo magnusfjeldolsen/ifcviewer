@@ -180,6 +180,12 @@ export class App {
         this.setStatus(message);
         setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
       },
+      snappingEnabled: () => this.settings.get('measurementSnapping'),
+      onToggleSnapping: () => {
+        const on = this.settings.toggle('measurementSnapping');
+        this.setStatus(on ? 'Snapping on' : 'Snapping off');
+        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      },
     });
     this.toolManager.register(this.measurementTool);
 

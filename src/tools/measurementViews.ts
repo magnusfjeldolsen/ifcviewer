@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import type { MeasurementRecord } from './MeasurementStore';
+import type { MeasurementEnd, MeasurementRecord } from './MeasurementStore';
 
 /**
  * The bridge between what a measurement *is* and what it *looks like*.
@@ -20,6 +20,9 @@ export interface MeasurementView {
   visible: boolean;
   selected: boolean;
   hovered: boolean;
+  /** What each end caught, which decides the glyph drawn there. */
+  startSnap: MeasurementEnd;
+  endSnap: MeasurementEnd;
 }
 
 export interface MeasurementViewState {
@@ -44,5 +47,7 @@ export function measurementViews(
     // anyway, and the candidate system only ever hovers visible ones — so
     // tightening it here would be a behaviour change smuggled into a refactor.
     hovered: state.hoveredId === record.id,
+    startSnap: record.startSnap,
+    endSnap: record.endSnap,
   }));
 }

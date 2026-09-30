@@ -139,66 +139,66 @@ export type ResolvedMeasurement =
   | {
       ok: true;
       mode: 'direct' | 'orthogonal';
+      /** Always the end corresponding to the FIRST pick. */
       from: THREE.Vector3;
       to: THREE.Vector3;
       distance: number;
-      /**
-       * Which picked end `from` came from. Orthogonal to the *first* surface
-       * means dropping the second point onto it, so the drawn segment can run
-       * opposite to the click order — and the record has to know, or the two
-       * ends would be labelled with each other's snap.
-       */
-      fromEnd: 'a' | 'b';
     }
   | { ok: false; reason: string; angleDeg: number };
 
 /**
- * Turn two picked ends into a measurement.
+ * Turn two picked ends into a measurement. **The first pick is the reference.**
  *
- * The mode is never selected — it follows from what was caught. A surface at
- * either end means the distance is taken along that surface's normal, and if
- * both ends are surfaces the second one wins, because that is the order the
- * question is usually asked in ("this column, off that wall"). Two surfaces
- * only work when they are parallel.
+ * | first | second | result |
+ * |---|---|---|
+ * | vertex / edge / point | anything | straight-line distance |
+ * | surface | vertex / edge / point | perpendicular from that surface |
+ * | surface | surface | between the planes, refused if not parallel |
+ *
+ * Order carries the intent, which is what removes the ambiguity: the same two
+ * clicks in the other order ask a different question and get a different
+ * answer. Nothing is hidden and nothing is guessed — but it does mean the
+ * drawing has to show which reading happened, or the ambiguity simply moves
+ * from the rule to the screen.
+ *
+ * `from` always belongs to the first pick. When that pick is a surface,
+ * `from` is the point on it that the measurement actually runs to, which is
+ * not necessarily where the cursor was: perpendicular means perpendicular.
  */
 export function resolveMeasurement(
   a: SnapPoint,
   b: SnapPoint,
   toleranceDeg: number = PARALLEL_TOLERANCE_DEG,
 ): ResolvedMeasurement {
-  if (a.planeNormal && b.planeNormal) {
-    const result = measurePlaneToPlane(
-      { point: a.position, normal: a.planeNormal },
-      { point: b.position, normal: b.planeNormal },
-      toleranceDeg,
-    );
-    if (!result.ok) return result;
+  // Only the first pick can make a measurement perpendicular. A surface
+  // picked second is just a point on a surface.
+  if (!a.planeNormal) {
     return {
       ok: true,
-      mode: 'orthogonal',
-      from: result.from,
-      to: result.to,
-      distance: result.distance,
-      fromEnd: 'a',
+      mode: 'direct',
+      from: a.position.clone(),
+      to: b.position.clone(),
+      distance: a.position.distanceTo(b.position),
     };
   }
 
+  const planeA = { point: a.position, normal: a.planeNormal };
+
   if (b.planeNormal) {
-    const m = measurePointToPlane(a.position, { point: b.position, normal: b.planeNormal });
-    return { ok: true, mode: 'orthogonal', ...m, fromEnd: 'a' };
+    const result = measurePlaneToPlane(planeA, { point: b.position, normal: b.planeNormal }, toleranceDeg);
+    if (!result.ok) return result;
+    return { ok: true, mode: 'orthogonal', from: result.from, to: result.to, distance: result.distance };
   }
 
-  if (a.planeNormal) {
-    const m = measurePointToPlane(b.position, { point: a.position, normal: a.planeNormal });
-    return { ok: true, mode: 'orthogonal', ...m, fromEnd: 'b' };
-  }
-
+  // Drop the second point onto the reference plane. The segment that gets
+  // drawn is the perpendicular itself, so it explains the number without any
+  // extra geometry: it starts on the surface and ends at what was measured.
+  const foot = footOnPlane(b.position, planeA);
   return {
     ok: true,
-    mode: 'direct',
-    from: a.position.clone(),
+    mode: 'orthogonal',
+    from: foot,
     to: b.position.clone(),
-    distance: a.position.distanceTo(b.position),
-    fromEnd: 'a',
+    distance: foot.distanceTo(b.position),
   };
 }

@@ -32,6 +32,14 @@ export interface MeasurementToolDeps {
    * between them, and saying so is the whole point of refusing.
    */
   onMessage?: (message: string) => void;
+  /**
+   * Whether snapping is on. Read on every resolve rather than cached, so the
+   * `S` toggle takes effect on the next pointer move without the tool having
+   * to subscribe to anything.
+   */
+  snappingEnabled?: () => boolean;
+  /** Called when `S` flips snapping, so the app can persist and report it. */
+  onToggleSnapping?: () => void;
 }
 
 /**
@@ -341,11 +349,11 @@ export class MeasurementTool implements Tool {
         return;
       }
 
-      const endEnd = endFrom(snap);
-      // `from` can be either pick: orthogonal to the first surface drops the
-      // second point onto it, reversing the drawn direction.
-      const [startSnapEnd, endSnapEnd] =
-        resolved.fromEnd === 'a' ? [this.startEnd, endEnd] : [endEnd, this.startEnd];
+      // `from` always belongs to the first pick, so the ends map straight
+      // across — one of the things that fell out of making order carry the
+      // intent rather than trying to infer it.
+      const startSnapEnd = this.startEnd;
+      const endSnapEnd = endFrom(snap);
 
       const modelIds = [this.startModelId, modelId].filter((id): id is string => id !== null);
       this.store.add(resolved.from, resolved.to, modelIds, {
@@ -419,8 +427,11 @@ export class MeasurementTool implements Tool {
     const moved =
       !this.snapCursor || Math.hypot(cursor.x - this.snapCursor.x, cursor.y - this.snapCursor.y) > SNAP_HOLD_RADIUS_PX;
 
+    const features = this.deps.snappingEnabled?.() ?? true;
+
     this.snaps = rankCandidates(
       snapCandidatesAt({
+        featuresEnabled: features,
         mesh,
         faceIndex: hit.faceIndex,
         hitPoint: hit.point,
@@ -456,8 +467,16 @@ export class MeasurementTool implements Tool {
    * suppression modifier — "off" is simply the final alternative.
    */
   private onKeyDown(e: KeyboardEvent): void {
-    if (e.key !== 'Tab' || this.snaps.length < 2) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    if (e.key === 's' || e.key === 'S') {
+      this.deps.onToggleSnapping?.();
+      this.snapIndex = 0;
+      this.snapCursor = null;
+      return;
+    }
+
+    if (e.key !== 'Tab' || this.snaps.length < 2) return;
     e.preventDefault();
     this.snapIndex = cycleIndex(this.snapIndex, this.snaps.length, e.shiftKey ? -1 : 1);
 
