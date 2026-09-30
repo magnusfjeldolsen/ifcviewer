@@ -16,6 +16,7 @@ const MOUSE_CONTROLS = [
 const MEASUREMENT_KEYS = [
   { input: 'Tab', action: 'Cycle what the cursor snaps to (corner, edge, surface, point)' },
   { input: 'S', action: 'Snapping on / off' },
+  { input: '1 / 2 / 3', action: 'Corners / edges / surfaces on or off' },
   { input: 'Right-click', action: 'Cancel a half-placed measurement' },
 ];
 

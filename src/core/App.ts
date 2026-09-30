@@ -10,6 +10,7 @@ import { checkRemoteUrl, type UrlSource } from '../loader/urlSafety';
 import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
+import type { SnapTarget } from '../tools/snapCandidates';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
@@ -181,6 +182,25 @@ export class App {
         setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
       },
       snappingEnabled: () => this.settings.get('measurementSnapping'),
+      allowedSnapTargets: () => {
+        const allowed = new Set<SnapTarget>(['point']);
+        if (this.settings.get('snapToVertices')) allowed.add('vertex');
+        if (this.settings.get('snapToEdges')) allowed.add('edge');
+        if (this.settings.get('snapToSurfaces')) allowed.add('face');
+        return allowed;
+      },
+      onToggleSnapTarget: (target) => {
+        const key =
+          target === 'vertex'
+            ? 'snapToVertices'
+            : target === 'edge'
+              ? 'snapToEdges'
+              : 'snapToSurfaces';
+        const on = this.settings.toggle(key);
+        const name = target === 'vertex' ? 'Corners' : target === 'edge' ? 'Edges' : 'Surfaces';
+        this.setStatus(`${name} ${on ? 'on' : 'off'}`);
+        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      },
       onToggleSnapping: () => {
         const on = this.settings.toggle('measurementSnapping');
         this.setStatus(on ? 'Snapping on' : 'Snapping off');
