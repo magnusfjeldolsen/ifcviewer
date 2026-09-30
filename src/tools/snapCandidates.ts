@@ -34,6 +34,22 @@ export const SNAP_PRIORITY: Record<SnapTarget, number> = {
 /** How near the cursor a corner or edge must be, in CSS pixels, to be offered. */
 export const SNAP_RADIUS_PX = 12;
 
+/**
+ * How much closer a less specific target must be before it beats a more
+ * specific one, in CSS pixels.
+ *
+ * Priority alone is too blunt: it lets a corner 11 px away beat the edge the
+ * cursor is sitting exactly on, which is what made edges feel unreachable.
+ * Distance alone is too blunt the other way: a corner and the edge it
+ * terminates are always within a pixel or two of each other, and there the
+ * corner is what someone means. So specificity wins, but only among targets
+ * that are effectively in the same place.
+ */
+export const SNAP_TIE_PX = 4;
+
+/** Targets that attract the cursor. The other two are always underfoot. */
+const FEATURE_TARGETS: ReadonlySet<SnapTarget> = new Set<SnapTarget>(['vertex', 'edge']);
+
 export interface SnapPayload {
   target: SnapTarget;
   /** Where the measurement point would go, in world space. */
@@ -59,6 +75,11 @@ export interface SnapQuery {
    * tool still resolves a candidate, it is just always the plain one.
    */
   featuresEnabled?: boolean;
+  /**
+   * Which targets to offer. Omitted means all of them. The raw point is never
+   * filtered out — it is the fallback that makes every other setting safe.
+   */
+  allowed?: ReadonlySet<SnapTarget>;
 }
 
 export function snapCandidatesAt(query: SnapQuery): Candidate[] {
@@ -67,6 +88,7 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
   if (canvas.width <= 0 || canvas.height <= 0) return [];
 
   const out: Candidate[] = [];
+  const allows = (target: SnapTarget) => query.allowed?.has(target) ?? true;
 
   if (query.featuresEnabled === false) return [plainPoint(hitPoint, camera)];
 
@@ -79,7 +101,7 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
 
   // Corners. Mesh vertices rather than feature-edge endpoints, because the
   // corner of a box is a mesh vertex and that is what people point at.
-  for (let i = 0; i < geo.positions.length / 3; i++) {
+  for (let i = 0; allows('vertex') && i < geo.positions.length / 3; i++) {
     world
       .set(geo.positions[i * 3], geo.positions[i * 3 + 1], geo.positions[i * 3 + 2])
       .applyMatrix4(matrix);
@@ -100,7 +122,7 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
   // Edges that survived the dihedral filter. A raw mesh edge would include
   // the diagonal of every quad, which is a line across a flat wall that
   // nobody drew.
-  for (let e = 0; e < geo.featureEdges.length / 2; e++) {
+  for (let e = 0; allows('edge') && e < geo.featureEdges.length / 2; e++) {
     const ia = geo.featureEdges[e * 2];
     const ib = geo.featureEdges[e * 2 + 1];
     a.set(geo.positions[ia * 3], geo.positions[ia * 3 + 1], geo.positions[ia * 3 + 2])
@@ -130,6 +152,7 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
 
   // The surface itself. Always offered, because the cursor is on it by
   // definition — and snapping to it is what makes a measurement orthogonal.
+  if (allows('face')) {
   const patch = growCoplanarPatch(geo, faceIndex);
   const planeNormal = patch.normal
     .clone()
@@ -147,6 +170,7 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
       planeNormal,
     } satisfies SnapPayload,
   });
+  }
 
   // The raw point, ranked last. This is what "no snapping" is, and why there
   // is no modifier key to hold: the escape hatch is a Tab away like any other
@@ -165,6 +189,52 @@ function plainPoint(hitPoint: THREE.Vector3, camera: THREE.PerspectiveCamera): C
     id: 'snap:point',
     payload: { target: 'point', position: hitPoint.clone() } satisfies SnapPayload,
   };
+}
+
+/**
+ * Put snap candidates in the order the cursor should offer them.
+ *
+ * Not `rankCandidates`, which sorts by priority first. That is right across
+ * providers — an element always outranks the annotation drawn over it — but
+ * wrong within snapping, where how close a target is matters as much as what
+ * kind it is. Face and point report distance zero because the cursor is on
+ * them by definition, so a plain distance sort would be wrong too.
+ */
+export function orderSnapCandidates(
+  candidates: readonly Candidate[],
+  tiePx: number = SNAP_TIE_PX,
+): Candidate[] {
+  const features: Candidate[] = [];
+  const fallbacks: Candidate[] = [];
+  for (const candidate of candidates) {
+    const target = (candidate.payload as SnapPayload | undefined)?.target;
+    if (target && FEATURE_TARGETS.has(target)) features.push(candidate);
+    else fallbacks.push(candidate);
+  }
+
+  const byDistance = (a: Candidate, b: Candidate) =>
+    a.distance - b.distance || a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+  features.sort(byDistance);
+
+  if (features.length > 0) {
+    // Everything effectively in the same place as the nearest feature is a
+    // contender; among those, the most specific wins.
+    const nearest = features[0].distance;
+    const contenders = features.filter((c) => c.distance <= nearest + tiePx);
+    contenders.sort(
+      (a, b) => a.priority - b.priority || byDistance(a, b),
+    );
+    const winner = contenders[0];
+    const rest = features.filter((c) => c !== winner);
+    features.length = 0;
+    features.push(winner, ...rest);
+  }
+
+  // Surface before raw point: the escape hatch is always the last stop.
+  fallbacks.sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : 1));
+
+  return [...features, ...fallbacks];
 }
 
 /** The snap payload of a candidate, or null if it is not a snap. */

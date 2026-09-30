@@ -11,7 +11,8 @@ import { measurementCandidatesAt } from './measurementPicking';
 import { snapCandidatesAt, snapPayload, type SnapPayload } from './snapCandidates';
 import { resolveMeasurement, type SnapPoint } from './measureMath';
 import type { MeasurementEnd } from './MeasurementStore';
-import { rankCandidates, cycleIndex } from '../inspector/candidateMath';
+import { orderSnapCandidates, type SnapTarget } from './snapCandidates';
+import { cycleIndex } from '../inspector/candidateMath';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
 import type { SelectionMode } from '../inspector/types';
 
@@ -38,6 +39,10 @@ export interface MeasurementToolDeps {
    * to subscribe to anything.
    */
   snappingEnabled?: () => boolean;
+  /** Which targets are currently offered. Omitted means all of them. */
+  allowedSnapTargets?: () => ReadonlySet<SnapTarget>;
+  /** Flip one target on or off. The app persists it and reports what happened. */
+  onToggleSnapTarget?: (target: SnapTarget) => void;
   /** Called when `S` flips snapping, so the app can persist and report it. */
   onToggleSnapping?: () => void;
 }
@@ -418,9 +423,10 @@ export class MeasurementTool implements Tool {
 
     const features = this.deps.snappingEnabled?.() ?? true;
 
-    this.snaps = rankCandidates(
+    this.snaps = orderSnapCandidates(
       snapCandidatesAt({
         featuresEnabled: features,
+        allowed: this.deps.allowedSnapTargets?.(),
         mesh,
         faceIndex: hit.faceIndex,
         hitPoint: hit.point,
@@ -470,6 +476,15 @@ export class MeasurementTool implements Tool {
    */
   private onKeyDown(e: KeyboardEvent): void {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    const byNumber: Record<string, SnapTarget> = { '1': 'vertex', '2': 'edge', '3': 'face' };
+    const target = byNumber[e.key];
+    if (target) {
+      this.deps.onToggleSnapTarget?.(target);
+      this.snapIndex = 0;
+      this.snapCursor = null;
+      return;
+    }
 
     if (e.key === 's' || e.key === 'S') {
       this.deps.onToggleSnapping?.();
