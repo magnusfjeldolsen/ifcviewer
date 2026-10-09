@@ -466,7 +466,26 @@ export class MeasurementTool implements Tool {
     }
 
     this.view.showHoverMarker(point, endFrom(snap), snap?.planeNormal);
-    if (this.pickingEnd && this.startPoint) this.view.showPreview(this.startPoint, point);
+    if (!this.pickingEnd || !this.startSnap) return;
+
+    // Preview what will actually be recorded, not a line between the two
+    // clicks. With the first pick as the reference, a surface picked first
+    // means the measurement runs perpendicular from it and lands somewhere
+    // the cursor never was — so a straight line from click to cursor would
+    // show the wrong shape AND the wrong number, right up until the click
+    // replaced it with something else.
+    const resolved = resolveMeasurement(this.startSnap, {
+      position: point,
+      planeNormal: snap?.planeNormal,
+    });
+
+    if (resolved.ok) {
+      this.view.showPreview(resolved.from, resolved.to);
+    } else {
+      // Two surfaces that are not parallel. Showing nothing says "this pick
+      // will not work" before the click does; the reason follows on click.
+      this.view.hidePreview();
+    }
   }
 
   /**
