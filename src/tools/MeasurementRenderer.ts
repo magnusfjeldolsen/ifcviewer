@@ -44,6 +44,13 @@ const LINE_WIDTH_PX_ACTIVE = 4;
 const MARKER_SCREEN_SIZE = 0.006;
 const HOVER_MARKER_SCREEN_SIZE = 0.005;
 
+/** The extension line is dimmer and thinner than any measurement. */
+const EXTENSION_COLOR = 0x94a3b8;
+const EXTENSION_WIDTH_PX = 1.5;
+
+/** What an end with nothing snapped looks like — used for the projection foot. */
+const PLAIN_END = { target: 'point' } as const;
+
 const START_MARKER_COLOR = 0x22c55e;
 const END_MARKER_COLOR = 0xef4444;
 
@@ -85,6 +92,7 @@ export class MeasurementRenderer {
 
   /** Live preview, shown while the second point is being chosen. */
   private previewLine: Line2 | null = null;
+  private previewExtension: Line2 | null = null;
   private previewLabel: THREE.Sprite | null = null;
 
   constructor(deps: MeasurementRendererDeps) {
@@ -165,8 +173,21 @@ export class MeasurementRenderer {
   }
 
   /** The dashed line and live distance between a placed point and the cursor. */
-  showPreview(start: THREE.Vector3, end: THREE.Vector3): void {
+  showPreview(start: THREE.Vector3, end: THREE.Vector3, anchor?: THREE.Vector3): void {
     const distance = start.distanceTo(end);
+
+    // The extension line has to follow the cursor too, or the plate appears
+    // detached from the measurement right up to the moment of the click.
+    if (anchor) {
+      if (this.previewExtension) {
+        this.setLinePoints(this.previewExtension, anchor, start);
+      } else {
+        this.previewExtension = this.createExtensionLine(anchor, start);
+        this.deps.scene.add(this.previewExtension);
+      }
+    } else if (this.previewExtension) {
+      this.removePreviewExtension();
+    }
 
     if (this.previewLine) {
       this.setLinePoints(this.previewLine, start, end);
@@ -183,6 +204,7 @@ export class MeasurementRenderer {
   }
 
   hidePreview(): void {
+    this.removePreviewExtension();
     if (this.previewLine) {
       this.deps.scene.remove(this.previewLine);
       this.previewLine.geometry.dispose();
@@ -209,6 +231,7 @@ export class MeasurementRenderer {
     const height = this.canvasHeight();
     for (const line of this.lines.values()) line.material.resolution.set(width, height);
     this.previewLine?.material.resolution.set(width, height);
+    this.previewExtension?.material.resolution.set(width, height);
   }
 
   dispose(): void {
@@ -232,7 +255,20 @@ export class MeasurementRenderer {
     // For an orthogonal measurement the drawn segment IS the surface normal,
     // so the square glyph can be oriented from it without storing a plane.
     const axis = view.end.clone().sub(view.start);
-    group.add(this.createPointMarker(view.start, START_MARKER_COLOR, view.startSnap, axis));
+
+    if (view.anchor) {
+      // The surface marker stays where it was put, like a plate held against
+      // a wall; the measurement strikes the plane square from the target,
+      // which lands at the foot instead. A thin dashed line joins the two so
+      // it is obvious they lie on the same plane — the extension line of an
+      // ordinary dimension.
+      group.add(this.createPointMarker(view.anchor, START_MARKER_COLOR, view.startSnap, axis));
+      group.add(this.createPointMarker(view.start, START_MARKER_COLOR, PLAIN_END, axis));
+      group.add(this.createExtensionLine(view.anchor, view.start));
+    } else {
+      group.add(this.createPointMarker(view.start, START_MARKER_COLOR, view.startSnap, axis));
+    }
+
     group.add(this.createPointMarker(view.end, END_MARKER_COLOR, view.endSnap, axis));
 
     const line = this.createLine(view.start, view.end, LINE_COLOR, LINE_WIDTH_PX, false);
@@ -292,6 +328,17 @@ export class MeasurementRenderer {
     // collect it and a measurement could steal clicks from the geometry it
     // annotates — the exact regression the screen-space pick path avoids.
     line.userData.isMeasurement = true;
+    return line;
+  }
+
+  /**
+   * The thin dashed run along the plane from the clicked point to the foot.
+   * Never the measurement itself — it carries no number and is drawn thinner
+   * so it cannot be mistaken for one.
+   */
+  private createExtensionLine(from: THREE.Vector3, to: THREE.Vector3): Line2 {
+    const line = this.createLine(from, to, EXTENSION_COLOR, EXTENSION_WIDTH_PX, true);
+    line.material.opacity = 0.7;
     return line;
   }
 
@@ -401,6 +448,14 @@ export class MeasurementRenderer {
     sprite.userData.isMeasurementLabel = true;
 
     return sprite;
+  }
+
+  private removePreviewExtension(): void {
+    if (!this.previewExtension) return;
+    this.deps.scene.remove(this.previewExtension);
+    this.previewExtension.geometry.dispose();
+    this.previewExtension.material.dispose();
+    this.previewExtension = null;
   }
 
   private removePreviewLabel(): void {

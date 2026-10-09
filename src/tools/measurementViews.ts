@@ -23,6 +23,8 @@ export interface MeasurementView {
   /** What each end caught, which decides the glyph drawn there. */
   startSnap: MeasurementEnd;
   endSnap: MeasurementEnd;
+  /** Where the reference surface was clicked, if that differs from `start`. */
+  anchor?: THREE.Vector3;
 }
 
 export interface MeasurementViewState {
@@ -49,5 +51,6 @@ export function measurementViews(
     hovered: state.hoveredId === record.id,
     startSnap: record.startSnap,
     endSnap: record.endSnap,
+    anchor: record.anchor,
   }));
 }
