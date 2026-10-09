@@ -143,6 +143,17 @@ export type ResolvedMeasurement =
       from: THREE.Vector3;
       to: THREE.Vector3;
       distance: number;
+      /**
+       * Where the reference surface was actually clicked, when it differs
+       * from `from`.
+       *
+       * The measurement runs perpendicular from the plane, so it lands at the
+       * foot — which is not where the user put the marker. Keeping the
+       * clicked point means the surface marker can stay where it was put, the
+       * way a plate held against a wall stays where you hold it, with the
+       * beam striking it square from wherever the target happens to be.
+       */
+      anchor?: THREE.Vector3;
     }
   | { ok: false; reason: string; angleDeg: number };
 
@@ -200,5 +211,6 @@ export function resolveMeasurement(
     from: foot,
     to: b.position.clone(),
     distance: foot.distanceTo(b.position),
+    anchor: a.position.clone(),
   };
 }

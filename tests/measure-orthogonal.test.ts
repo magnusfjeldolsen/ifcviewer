@@ -275,3 +275,44 @@ describe('the first pick is the reference', () => {
     }
   });
 });
+
+describe('the plate stays where it was put', () => {
+  const up = new THREE.Vector3(0, 1, 0);
+
+  it('reports the clicked point as the anchor, separate from the foot', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(5, 0, 5), planeNormal: up },
+      { position: new THREE.Vector3(0, 3, 0) },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The measurement lands under the target...
+      expect(result.from.x).toBeCloseTo(0, 6);
+      expect(result.from.z).toBeCloseTo(0, 6);
+      // ...but the surface marker belongs where the user clicked.
+      expect(result.anchor?.x).toBeCloseTo(5, 6);
+      expect(result.anchor?.z).toBeCloseTo(5, 6);
+    }
+  });
+
+  it('has no anchor for a straight-line measurement', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 0, 0) },
+      { position: new THREE.Vector3(1, 0, 0) },
+    );
+
+    expect(result.ok && result.anchor).toBeUndefined();
+  });
+
+  // Between two planes the measurement already starts on the first one, so
+  // there is nothing for an extension line to join.
+  it('has no anchor between two parallel surfaces', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+      { position: new THREE.Vector3(0, 2, 0), planeNormal: up },
+    );
+
+    expect(result.ok && result.anchor).toBeUndefined();
+  });
+});

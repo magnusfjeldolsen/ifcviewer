@@ -49,6 +49,12 @@ export interface MeasurementRecord {
   mode: MeasurementMode;
   startSnap: MeasurementEnd;
   endSnap: MeasurementEnd;
+  /**
+   * Where the reference surface was clicked, when that is not where the
+   * measurement starts. Present only for a measurement taken perpendicular
+   * from a surface, and only when the two differ.
+   */
+  anchor?: THREE.Vector3;
 }
 
 /** What `add` needs beyond the two points. All optional; a bare call is a plain point-to-point. */
@@ -56,6 +62,7 @@ export interface MeasurementOptions {
   mode?: MeasurementMode;
   startSnap?: MeasurementEnd;
   endSnap?: MeasurementEnd;
+  anchor?: THREE.Vector3;
 }
 
 /** The wire form persisted in the session (D6). Plain JSON, no THREE types. */
@@ -68,6 +75,7 @@ export interface SerializedMeasurement {
   mode?: MeasurementMode;
   startSnap?: SerializedEnd;
   endSnap?: SerializedEnd;
+  anchor?: [number, number, number];
 }
 
 export interface SerializedEnd {
@@ -147,6 +155,7 @@ export class MeasurementStore {
       mode: options.mode ?? 'direct',
       startSnap: cloneEnd(options.startSnap) ?? { ...PLAIN_END },
       endSnap: cloneEnd(options.endSnap) ?? { ...PLAIN_END },
+      anchor: options.anchor?.clone(),
     };
     this.records.push(record);
     this.notify();
@@ -257,6 +266,7 @@ export class MeasurementStore {
       mode: r.mode,
       startSnap: serializeEnd(r.startSnap),
       endSnap: serializeEnd(r.endSnap),
+      ...(r.anchor ? { anchor: [r.anchor.x, r.anchor.y, r.anchor.z] as [number, number, number] } : {}),
     }));
   }
 
@@ -284,6 +294,7 @@ export class MeasurementStore {
         mode: e.mode ?? 'direct',
         startSnap: deserializeEnd(e.startSnap),
         endSnap: deserializeEnd(e.endSnap),
+        anchor: e.anchor ? new THREE.Vector3(...e.anchor) : undefined,
       }));
     this.selectedIds.clear();
     this.notify();

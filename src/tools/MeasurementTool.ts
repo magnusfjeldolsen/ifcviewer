@@ -337,6 +337,8 @@ export class MeasurementTool implements Tool {
       this.startModelId = modelId;
       this.startSnap = { position: point, planeNormal: snap?.planeNormal };
       this.startEnd = endFrom(snap);
+      // Stays exactly where it was clicked for the rest of the placement —
+      // it is the plate, and a plate that drifts is not a reference.
       this.view.showPendingStart(point, this.startEnd, snap?.planeNormal);
       this.enterPickEnd();
     } else if (this.pickingEnd && this.startSnap) {
@@ -365,6 +367,7 @@ export class MeasurementTool implements Tool {
         mode: resolved.mode,
         startSnap: startSnapEnd ?? undefined,
         endSnap: endSnapEnd ?? undefined,
+        anchor: resolved.anchor,
       });
       this.clearPendingStart();
       this.view.hidePreview();
@@ -480,7 +483,7 @@ export class MeasurementTool implements Tool {
     });
 
     if (resolved.ok) {
-      this.view.showPreview(resolved.from, resolved.to);
+      this.view.showPreview(resolved.from, resolved.to, resolved.anchor);
     } else {
       // Two surfaces that are not parallel. Showing nothing says "this pick
       // will not work" before the click does; the reason follows on click.

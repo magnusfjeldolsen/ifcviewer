@@ -107,3 +107,26 @@ describe('round-tripping through a session', () => {
     expect(record.endSnap.target).toBe('point');
   });
 });
+
+describe('the plate position survives a session', () => {
+  it('round-trips the anchor', () => {
+    const store = new MeasurementStore();
+    store.add(A, B, ['m1'], { mode: 'orthogonal', anchor: new THREE.Vector3(7, 8, 9) });
+    const wire = JSON.parse(JSON.stringify(store.serialize()));
+
+    const restored = new MeasurementStore();
+    const [record] = restored.deserialize(wire, new Set(['m1']));
+
+    expect(record.anchor).toBeInstanceOf(THREE.Vector3);
+    expect(record.anchor?.x).toBeCloseTo(7, 6);
+  });
+
+  it('leaves it absent when there was none', () => {
+    const store = new MeasurementStore();
+    store.add(A, B, ['m1']);
+    const wire = JSON.parse(JSON.stringify(store.serialize()));
+
+    const restored = new MeasurementStore();
+    expect(restored.deserialize(wire, new Set(['m1']))[0].anchor).toBeUndefined();
+  });
+});
