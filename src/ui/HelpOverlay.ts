@@ -8,7 +8,8 @@ const MOUSE_CONTROLS = [
 ];
 
 /**
- * Keys the measurement tool owns. Snapping is the reason both exist: the
+ * Keys the measurement and position-marker tools own — both place points
+ * through the same `SnapCursor`, so the snap keys are the same in each. Snapping is the reason both exist: the
  * first pick of a measurement decides what it means, so being able to choose
  * what the cursor caught — and to stop it catching anything — is not a
  * nicety.

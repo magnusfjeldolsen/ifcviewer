@@ -8,11 +8,10 @@ import {
 import { MeasurementRenderer } from './MeasurementRenderer';
 import { measurementViews } from './measurementViews';
 import { measurementCandidatesAt } from './measurementPicking';
-import { snapCandidatesAt, snapPayload, type SnapPayload } from './snapCandidates';
+import type { SnapTarget } from './snapCandidates';
 import { resolveMeasurement, type SnapPoint } from './measureMath';
 import type { MeasurementEnd } from './MeasurementStore';
-import { orderSnapCandidates, type SnapTarget } from './snapCandidates';
-import { cycleIndex } from '../inspector/candidateMath';
+import { SnapCursor, endFrom, modelIdOf } from './SnapCursor';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
 import type { SelectionMode } from '../inspector/types';
 
@@ -66,12 +65,6 @@ export interface MeasurementToolDeps {
  * restore and model-hide all share one path and the visuals have one place to
  * drift from.
  */
-/**
- * How far the cursor may drift before a Tab cycle is treated as a new
- * gesture. Matches the resolver's own hold radius.
- */
-const SNAP_HOLD_RADIUS_PX = 4;
-
 export class MeasurementTool implements Tool {
   readonly name = 'measurement';
 
@@ -91,20 +84,8 @@ export class MeasurementTool implements Tool {
   private startPoint: THREE.Vector3 | null = null;
   private startModelId: string | null = null;
 
-  /**
-   * Snap targets under the cursor, best first, and which one Tab has landed on.
-   *
-   * The tool owns this rather than registering with `CandidateResolver`,
-   * which is where the spec expected it to live. The resolver's input layer is
-   * gated on no tool being active — that gate is what stops element selection
-   * fighting measurement placement — so a provider registered there would
-   * never be consulted while measuring. The pure ranking and cycling helpers
-   * are reused directly instead, which is the part that mattered.
-   */
-  private snaps: Candidate[] = [];
-  private snapIndex = 0;
-  /** Where the cursor was when `snaps` was last rebuilt, for the Tab hold radius. */
-  private snapCursor: ScreenPoint | null = null;
+  /** What the cursor is snapped to — shared with every tool that places a point. */
+  private snap: SnapCursor;
   /** The first end, once placed: where it is and whether it caught a surface. */
   private startSnap: SnapPoint | null = null;
   private startEnd: MeasurementEnd | null = null;
@@ -132,6 +113,7 @@ export class MeasurementTool implements Tool {
     this.boundOnPointerMove = this.onPointerMove.bind(this);
     this.boundOnContextMenu = this.onContextMenu.bind(this);
     this.boundOnKeyDown = this.onKeyDown.bind(this);
+    this.snap = new SnapCursor(deps);
     this.store.onChange(() => this.draw());
   }
 
@@ -327,8 +309,8 @@ export class MeasurementTool implements Tool {
     const hit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
     if (!hit) return;
 
-    this.refreshSnaps(e, hit);
-    const snap = this.activeSnap();
+    this.snap.refresh(e, hit);
+    const snap = this.snap.active();
     const point = snap ? snap.position.clone() : hit.point.clone();
     const modelId = modelIdOf(hit.object);
 
@@ -380,7 +362,7 @@ export class MeasurementTool implements Tool {
     this.updateMouse(e);
     const hit = raycastVisible(this.mouse, this.deps.camera, this.deps.scene, this.deps.renderer);
 
-    this.refreshSnaps(e, hit);
+    this.snap.refresh(e, hit);
     this.showActiveSnap(hit);
 
     // Hover marker and preview line track the cursor; every move mutates
@@ -403,63 +385,12 @@ export class MeasurementTool implements Tool {
   // ── Snapping ───────────────────────────────────────────────
 
   /**
-   * Rebuild the snap candidates under the cursor.
-   *
-   * The Tab position survives small movements so a cycle is not undone by
-   * hand tremor, and resets once the cursor has clearly moved on — the same
-   * bargain `CandidateResolver` strikes, for the same reason.
-   */
-  private refreshSnaps(e: MouseEvent, hit: THREE.Intersection | null): void {
-    const mesh = hit?.object;
-    if (!hit || !(mesh instanceof THREE.Mesh) || hit.faceIndex == null) {
-      this.snaps = [];
-      this.snapIndex = 0;
-      this.snapCursor = null;
-      return;
-    }
-
-    const rect = this.deps.canvas.getBoundingClientRect();
-    const cursor: ScreenPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-
-    const moved =
-      !this.snapCursor || Math.hypot(cursor.x - this.snapCursor.x, cursor.y - this.snapCursor.y) > SNAP_HOLD_RADIUS_PX;
-
-    const features = this.deps.snappingEnabled?.() ?? true;
-
-    this.snaps = orderSnapCandidates(
-      snapCandidatesAt({
-        featuresEnabled: features,
-        allowed: this.deps.allowedSnapTargets?.(),
-        mesh,
-        faceIndex: hit.faceIndex,
-        hitPoint: hit.point,
-        cursor,
-        camera: this.deps.camera,
-        canvas: { width: this.deps.canvas.clientWidth, height: this.deps.canvas.clientHeight },
-      }),
-    );
-
-    if (moved) {
-      this.snapIndex = 0;
-      this.snapCursor = cursor;
-    } else if (this.snapIndex >= this.snaps.length) {
-      this.snapIndex = 0;
-    }
-  }
-
-  /** The snap Tab has landed on, or the best one. */
-  private activeSnap(): SnapPayload | null {
-    const candidate = this.snaps[this.snapIndex];
-    return candidate ? snapPayload(candidate) : null;
-  }
-
-  /**
    * Put the hover glyph on whatever is currently snapped, and keep the
    * preview line attached to it. The glyph is the only thing that tells the
    * user a snap happened at all, so it goes wherever the point goes.
    */
   private showActiveSnap(hit: THREE.Intersection | null): void {
-    const snap = this.activeSnap();
+    const snap = this.snap.active();
     const point = snap?.position ?? hit?.point ?? null;
 
     if (!point) {
@@ -491,34 +422,9 @@ export class MeasurementTool implements Tool {
     }
   }
 
-  /**
-   * Tab steps to the next snap under the cursor: corner, then edge, then
-   * surface, then the raw point. That last one is why snapping needs no
-   * suppression modifier — "off" is simply the final alternative.
-   */
+  /** The snap keys — Tab, `S`, `1` `2` `3`. See `SnapCursor.onKeyDown`. */
   private onKeyDown(e: KeyboardEvent): void {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-
-    const byNumber: Record<string, SnapTarget> = { '1': 'vertex', '2': 'edge', '3': 'face' };
-    const target = byNumber[e.key];
-    if (target) {
-      this.deps.onToggleSnapTarget?.(target);
-      this.snapIndex = 0;
-      this.snapCursor = null;
-      return;
-    }
-
-    if (e.key === 's' || e.key === 'S') {
-      this.deps.onToggleSnapping?.();
-      this.snapIndex = 0;
-      this.snapCursor = null;
-      return;
-    }
-
-    if (e.key !== 'Tab' || this.snaps.length < 2) return;
-    e.preventDefault();
-    this.snapIndex = cycleIndex(this.snapIndex, this.snaps.length, e.shiftKey ? -1 : 1);
-
+    if (this.snap.onKeyDown(e) !== 'cycled') return;
     this.showActiveSnap(null);
     this.deps.requestRender?.();
   }
@@ -530,24 +436,4 @@ export class MeasurementTool implements Tool {
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   }
-}
-
-/**
- * The model a hit mesh belongs to. `ModelManager` names each model group with
- * the app's model UUID and parents the meshes directly under it, so the
- * parent's name is the id — the same lookup `SelectionManager.identityFromHit`
- * does. Null for anything not under a model group.
- */
-function modelIdOf(object: THREE.Object3D): string | null {
-  const parent = object.parent;
-  return parent && parent.name ? parent.name : null;
-}
-
-/** The record's description of one end, from whatever the cursor caught there. */
-function endFrom(snap: SnapPayload | null): MeasurementEnd {
-  if (!snap) return { target: 'point' };
-  return {
-    target: snap.target,
-    direction: snap.edgeDirection?.clone(),
-  };
 }

@@ -591,3 +591,43 @@ describe('WorkerPropertyRepository — crash rejects intersect requests too', ()
     await expect(promise).rejects.toThrow(/crashed/);
   });
 });
+
+describe('WorkerPropertyRepository.lengthUnit', () => {
+  it('asks the worker once per model and resolves with its symbol', async () => {
+    const { repo, worker } = setup();
+    const first = repo.lengthUnit('m');
+    const second = repo.lengthUnit('m');
+    const msg = lastOfType(worker, 'getLengthUnit');
+    expect(msg.id).toBe('m');
+    expect(worker.posted.filter((p) => p.type === 'getLengthUnit')).toHaveLength(1);
+
+    worker.reply({ type: 'lengthUnit', reqId: msg.reqId, symbol: 'mm' });
+    await expect(first).resolves.toBe('mm');
+    await expect(second).resolves.toBe('mm');
+  });
+
+  it('does not cache a failure', async () => {
+    const { repo, worker } = setup();
+    const failed = repo.lengthUnit('m');
+    worker.reply({ type: 'error', reqId: lastOfType(worker, 'getLengthUnit').reqId, message: 'boom' });
+    await expect(failed).rejects.toThrow('boom');
+
+    void repo.lengthUnit('m');
+    expect(worker.posted.filter((p) => p.type === 'getLengthUnit')).toHaveLength(2);
+  });
+
+  it('asks again after the model is disposed', () => {
+    const { repo, worker } = setup();
+    void repo.lengthUnit('m');
+    repo.disposeModel('m');
+    void repo.lengthUnit('m');
+    expect(worker.posted.filter((p) => p.type === 'getLengthUnit')).toHaveLength(2);
+  });
+
+  it('rejects an in-flight lookup when the worker crashes', async () => {
+    const { repo, worker } = setup();
+    const promise = repo.lengthUnit('m');
+    worker.crash();
+    await expect(promise).rejects.toThrow(/crashed/);
+  });
+});

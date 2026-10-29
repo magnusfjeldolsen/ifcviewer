@@ -10,6 +10,7 @@ import { checkRemoteUrl, type UrlSource } from '../loader/urlSafety';
 import { ToolManager } from '../tools/Tool';
 import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
+import { PositionMarkerTool } from '../tools/PositionMarkerTool';
 import type { SnapTarget } from '../tools/snapCandidates';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
@@ -73,6 +74,7 @@ export class App {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private clippingTool: ClippingTool;
   private measurementTool: MeasurementTool;
+  private positionTool: PositionMarkerTool;
   private footer: Footer;
   private cookieBanner: CookieBanner;
   private urlInput: UrlInput;
@@ -168,19 +170,8 @@ export class App {
     });
     this.toolManager.register(this.clippingTool);
 
-    this.measurementTool = new MeasurementTool({
-      renderer: this.viewer.getRenderer(),
-      scene: this.viewer.getScene(),
-      camera: this.viewer.getCamera(),
-      canvas: this.viewer.getCanvas(),
-      requestRender,
-      // The tool refuses a measurement between two surfaces that are not
-      // parallel. The status line is where it says so, and it clears itself
-      // like every other transient message.
-      onMessage: (message) => {
-        this.setStatus(message);
-        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
-      },
+    // One set of snap settings, shared by every tool that places a point.
+    const snapSettings = {
       snappingEnabled: () => this.settings.get('measurementSnapping'),
       allowedSnapTargets: () => {
         const allowed = new Set<SnapTarget>(['point']);
@@ -189,7 +180,7 @@ export class App {
         if (this.settings.get('snapToSurfaces')) allowed.add('face');
         return allowed;
       },
-      onToggleSnapTarget: (target) => {
+      onToggleSnapTarget: (target: SnapTarget) => {
         const key =
           target === 'vertex'
             ? 'snapToVertices'
@@ -206,13 +197,54 @@ export class App {
         this.setStatus(on ? 'Snapping on' : 'Snapping off');
         setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
       },
+    };
+
+    this.measurementTool = new MeasurementTool({
+      renderer: this.viewer.getRenderer(),
+      scene: this.viewer.getScene(),
+      camera: this.viewer.getCamera(),
+      canvas: this.viewer.getCanvas(),
+      requestRender,
+      // The tool refuses a measurement between two surfaces that are not
+      // parallel. The status line is where it says so, and it clears itself
+      // like every other transient message.
+      onMessage: (message) => {
+        this.setStatus(message);
+        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      },
+      ...snapSettings,
     });
     this.toolManager.register(this.measurementTool);
+
+    // Setting out a coordinate. Snaps through the same `SnapCursor` and reads
+    // the same snap settings as measuring, so `S` and `1` `2` `3` are one
+    // switch for both tools rather than two that disagree.
+    this.positionTool = new PositionMarkerTool({
+      renderer: this.viewer.getRenderer(),
+      scene: this.viewer.getScene(),
+      camera: this.viewer.getCamera(),
+      canvas: this.viewer.getCanvas(),
+      overlayParent: document.getElementById('app')!,
+      requestRender,
+      // `propertyRepository` is created later in the constructor; looked up
+      // at call time, by which point it exists.
+      lengthUnitFor: (modelId) => this.propertyRepository.lengthUnit(modelId),
+      onMessage: (message) => {
+        this.setStatus(message);
+        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      },
+      snappingEnabled: snapSettings.snappingEnabled,
+      allowedSnapTargets: snapSettings.allowedSnapTargets,
+      onToggleSnapTarget: snapSettings.onToggleSnapTarget,
+      onToggleSnapping: snapSettings.onToggleSnapping,
+    });
+    this.toolManager.register(this.positionTool);
 
     // Keep clipping handle and measurement markers at constant screen size
     this.viewer.onUpdate(() => {
       this.clippingTool.update();
       this.measurementTool.update();
+      this.positionTool.update();
     });
 
     // Undo/redo history. The single owner of the undo/redo stacks; injected
@@ -307,6 +339,11 @@ export class App {
       icon: '📏',
       title: 'Measure (M)',
     });
+    this.toolbar.addButton({
+      name: 'position',
+      icon: '📍',
+      title: 'Position marker — read X, Y, Z (P)',
+    });
     this.toolbar.addButton({ name: 'fit', icon: '⊡', title: 'Fit View (F)', onClick: () => this.fitSmart() });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', onClick: () => this.resetView() });
@@ -320,6 +357,7 @@ export class App {
         // the user just switched off is worse than no number, and a
         // measurement spanning two models hides while either is hidden.
         this.measurementTool.setModelVisible(id, visible);
+        this.positionTool.setModelVisible(id, visible);
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -337,6 +375,7 @@ export class App {
         // D15 — drop this model's measurements: two world points with no
         // geometry left to refer to are not a measurement.
         this.measurementTool.onModelRemoved(id);
+        this.positionTool.onModelRemoved(id);
         // Prune appearance overrides for the removed model (system change,
         // pushes no undo command). Its onChange triggers a debounced save.
         this.appearanceManager.onModelRemoved(id);
@@ -444,6 +483,16 @@ export class App {
       action: () => {
         if (!this.toolManager.isActive('measurement')) {
           this.toolManager.activate('measurement');
+        }
+      },
+    });
+
+    this.keyboardShortcuts.register({
+      key: 'p',
+      label: 'Position marker',
+      action: () => {
+        if (!this.toolManager.isActive('position')) {
+          this.toolManager.activate('position');
         }
       },
     });
@@ -594,6 +643,16 @@ export class App {
       isVisible: () => this.measurementTool.hasMeasurements(),
       onClick: () => this.measurementTool.clearMeasurements(),
       subscribe: (refresh) => this.measurementTool.onStateChange(refresh),
+    });
+
+    // Same idiom for position markers; visible only when one exists.
+    this.contextualActions.register({
+      id: 'clear-position-markers',
+      label: 'Clear position markers',
+      icon: '📍',
+      isVisible: () => this.positionTool.hasMarkers(),
+      onClick: () => this.positionTool.clearMarkers(),
+      subscribe: (refresh) => this.positionTool.onStateChange(refresh),
     });
 
     // Element appearance recovery (D) — always-available escape hatches so the
@@ -1318,6 +1377,7 @@ export class App {
     this.toolManager.abort();
     this.clippingTool.clearClipPlane();
     this.measurementTool.clearMeasurements();
+    this.positionTool.clearMarkers();
     this.viewer.clearPivot();
     // Clear inspector selection before disposing meshes — keeps the highlight
     // bookkeeping from referencing materials we're about to dispose.
