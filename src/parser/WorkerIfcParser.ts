@@ -185,6 +185,7 @@ export class WorkerIfcParser {
       case 'props':
       case 'intersection':
       case 'ids':
+      case 'lengthUnit':
       case 'progress':
         // Property-query / bulk-reduction / progress reply — belongs to
         // WorkerPropertyRepository.

@@ -78,6 +78,13 @@ export type ToWorker =
    * without posting a reply.
    */
   | { type: 'cancel'; reqId: number }
+  /**
+   * The model's length unit symbol (`"mm"`, `"m"`, …) from its
+   * `IfcUnitAssignment`. The scene is always in metres — web-ifc scales on
+   * the way out — so this is only for showing numbers in the unit the model
+   * was authored in.
+   */
+  | { type: 'getLengthUnit'; reqId: number; id: string }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -108,6 +115,8 @@ export type FromWorker =
    * candidate set never ships its properties across the boundary.
    */
   | { type: 'ids'; reqId: number; ids: number[] }
+  /** A `getLengthUnit` completed. `symbol` is `"m"` when the model names none. */
+  | { type: 'lengthUnit'; reqId: number; symbol: string }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.

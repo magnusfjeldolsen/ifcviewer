@@ -1537,3 +1537,71 @@ html, body {
   z-index: 100;
 }
 
+
+/* Position marker — coordinate labels pinned beside their points. The
+   overlay never takes a click; only the pinned labels' buttons do. */
+.position-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.position-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.88);
+  color: #f8fafc;
+  border-left: 3px solid #06b6d4;
+  border-radius: 4px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+  pointer-events: auto;
+  user-select: text;
+}
+
+.position-label-preview {
+  opacity: 0.8;
+  border-left-color: #ffffff;
+  pointer-events: none;
+}
+
+.position-label-axis {
+  display: inline-block;
+  width: 2.6em;
+  color: #67e8f9;
+}
+
+.position-label-value {
+  display: inline-block;
+  min-width: 9ch;
+  text-align: right;
+}
+
+.position-label-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.position-label-actions button {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.position-label-actions button:hover {
+  background: rgba(255, 255, 255, 0.25);
+}

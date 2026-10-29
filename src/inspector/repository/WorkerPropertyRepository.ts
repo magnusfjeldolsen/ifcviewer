@@ -40,6 +40,11 @@ interface PendingIntersect {
 }
 
 /** Resolve/reject pair + progress sink for an in-flight id-returning request. */
+interface PendingUnit {
+  resolve: (symbol: string) => void;
+  reject: (err: Error) => void;
+}
+
 interface PendingIds {
   resolve: (ids: number[]) => void;
   reject: (err: Error) => void;
@@ -55,6 +60,10 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   private intersectInflight = new Map<number, PendingIntersect>();
   /** In-flight `enumerateIds` / `findMatching` requests, correlated by reqId. */
   private idsInflight = new Map<number, PendingIds>();
+  /** In-flight `getLengthUnit` requests, correlated by reqId. */
+  private unitInflight = new Map<number, PendingUnit>();
+  /** Length unit per model. A model's units never change, so asked once. */
+  private lengthUnits = new Map<string, Promise<string>>();
   /** Monotonic request id for all property messages (getProps + intersect). */
   private nextReqId = 1;
 
@@ -73,6 +82,9 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       this.intersectInflight.clear();
       for (const p of this.idsInflight.values()) p.reject(err);
       this.idsInflight.clear();
+      for (const p of this.unitInflight.values()) p.reject(err);
+      this.unitInflight.clear();
+      this.lengthUnits.clear();
       // Drop the memo too: its promises may be unsettled and the worker
       // state behind them is gone.
       this.memo.clear();
@@ -224,6 +236,7 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
 
   disposeModel(modelId: string): void {
     this.memo.delete(modelId);
+    this.lengthUnits.delete(modelId);
     // Tell the worker to close the model and free its unit-table cache.
     this.parser.disposeModel(modelId);
   }
@@ -252,6 +265,25 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       selector,
       value,
     });
+    return reply;
+  }
+
+  /**
+   * The model's length unit symbol, e.g. `"mm"`. Memoized per model, and
+   * dropped with the model's other caches in `disposeModel`.
+   */
+  lengthUnit(modelId: string): Promise<string> {
+    const cached = this.lengthUnits.get(modelId);
+    if (cached) return cached;
+    const reqId = this.nextReqId++;
+    const reply = new Promise<string>((resolve, reject) => {
+      this.unitInflight.set(reqId, { resolve, reject });
+    });
+    this.parser.getWorker().postMessage({ type: 'getLengthUnit', reqId, id: modelId });
+    // A failed lookup must not be cached, or one transient error would stick
+    // for the life of the model.
+    reply.catch(() => this.lengthUnits.delete(modelId));
+    this.lengthUnits.set(modelId, reply);
     return reply;
   }
 
@@ -352,6 +384,13 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       pending.resolve(msg.ids);
       return;
     }
+    if (msg.type === 'lengthUnit') {
+      const pending = this.unitInflight.get(msg.reqId);
+      if (!pending) return;
+      this.unitInflight.delete(msg.reqId);
+      pending.resolve(msg.symbol);
+      return;
+    }
     if (msg.type === 'progress') {
       // One generic progress message serves every bulk primitive, so look
       // in both in-flight maps.
@@ -377,6 +416,12 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (pendingIds) {
         this.idsInflight.delete(msg.reqId);
         pendingIds.reject(new Error(msg.message));
+        return;
+      }
+      const pendingUnit = this.unitInflight.get(msg.reqId);
+      if (pendingUnit) {
+        this.unitInflight.delete(msg.reqId);
+        pendingUnit.reject(new Error(msg.message));
       }
     }
   }

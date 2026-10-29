@@ -37,7 +37,7 @@ import * as WebIFC from 'web-ifc';
 
 import { fetchElementProperties } from '../inspector/repository/fetchElementProperties';
 import { computeUnitTable } from '../inspector/repository/unitTable';
-import { buildUnitTable, type UnitTable } from '../inspector/format';
+import { buildUnitTable, DEFAULT_UNITS, type UnitTable } from '../inspector/format';
 import {
   intersectSeed,
   intersectStep,
@@ -505,6 +505,16 @@ async function handleEnumerateIds(
  * class never ships 50 000 property bags across the boundary — only the
  * matching ids come back.
  */
+async function handleGetLengthUnit(reqId: number, id: string): Promise<void> {
+  const ifc = await getApi();
+  const modelID = modelIds.get(id);
+  if (modelID === undefined) {
+    throw new Error(`ifcWorker: unknown modelId "${id}"`);
+  }
+  const unitTable = await ensureUnitTable(ifc, id, modelID);
+  post({ type: 'lengthUnit', reqId, symbol: unitTable.get('length') ?? DEFAULT_UNITS.length });
+}
+
 async function handleFindMatching(
   reqId: number,
   id: string,
@@ -649,6 +659,16 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
           await runBulk(msg.reqId, () =>
             handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value),
           );
+        } catch (err) {
+          post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
+        }
+      });
+      break;
+
+    case 'getLengthUnit':
+      enqueue(async () => {
+        try {
+          await handleGetLengthUnit(msg.reqId, msg.id);
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
         }
