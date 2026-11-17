@@ -236,3 +236,123 @@ describe('ClippingTool — the handle drag owns the gesture', () => {
     expect(navigation).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Follow-ups to #87, each reproduced in the running app:
+ *
+ * - grabbing the handle while Fit View was still flying the camera left the
+ *   fly-to running under the drag, because the handle claims the press before
+ *   the animator's interrupt listener can see it;
+ * - a second finger on a touch screen moved the plane too, and a cancelled
+ *   pointer could leave the drag stuck on;
+ * - the handle could be dragged beyond the far plane, where it vanished.
+ */
+describe('ClippingTool — handle drag follow-ups', () => {
+  let canvas: HTMLCanvasElement;
+  let tool: ClippingTool;
+  let renderer: THREE.WebGLRenderer;
+  let navigation: ReturnType<typeof vi.fn<(e: Event) => void>>;
+  let cancelCameraAnimation: ReturnType<typeof vi.fn<() => void>>;
+  let captured: Set<number>;
+
+  beforeEach(() => {
+    // Looking down -z at a floor-like plane: its normal (y) is vertical on
+    // screen, so dragging up and down moves it.
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    canvas = document.createElement('canvas');
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100, x: 0, y: 0 }) as DOMRect;
+    captured = new Set();
+    canvas.setPointerCapture = (id: number) => void captured.add(id);
+    canvas.releasePointerCapture = (id: number) => void captured.delete(id);
+    canvas.hasPointerCapture = (id: number) => captured.has(id);
+    document.body.appendChild(canvas);
+    navigation = vi.fn<(e: Event) => void>();
+    canvas.addEventListener('pointerdown', navigation);
+    cancelCameraAnimation = vi.fn<() => void>();
+    renderer = makeRenderer();
+    tool = new ClippingTool({ renderer, scene: new THREE.Scene(), camera, canvas, cancelCameraAnimation });
+    tool.enterPlacingMode();
+    const hit = makeSyntheticHit();
+    hit.face!.normal.set(0, 1, 0);
+    mockHit = hit;
+    canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+    mockHit = null;
+    tool.update();
+  });
+
+  afterEach(() => {
+    tool.dispose();
+    canvas.remove();
+  });
+
+  const pointer = (type: string, pointerId: number, x: number, y: number) =>
+    canvas.dispatchEvent(new PointerEvent(type, { button: 0, pointerId, clientX: x, clientY: y, bubbles: true }));
+  const planeConstant = () => renderer.clippingPlanes[0].constant;
+
+  it('stops a camera fly-to when the handle is grabbed', () => {
+    pointer('pointerdown', 1, 50, 50);
+    expect(cancelCameraAnimation).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a fly-to alone when the press misses the handle', () => {
+    pointer('pointerdown', 1, 5, 5);
+    expect(cancelCameraAnimation).not.toHaveBeenCalled();
+  });
+
+  it('moves the plane with the grabbing pointer only', () => {
+    pointer('pointerdown', 1, 50, 50);
+    const start = planeConstant();
+    pointer('pointermove', 1, 50, 40);
+    const afterFirst = planeConstant();
+    expect(afterFirst).not.toBeCloseTo(start);
+
+    // A second finger lands and moves: the plane must not follow it, and
+    // navigation must not see it either.
+    pointer('pointerdown', 2, 80, 80);
+    expect(navigation).not.toHaveBeenCalled();
+    pointer('pointermove', 2, 80, 20);
+    expect(planeConstant()).toBeCloseTo(afterFirst);
+
+    // Lifting the second finger does not end the first finger's drag.
+    pointer('pointerup', 2, 80, 20);
+    expect(tool.isDragging()).toBe(true);
+    pointer('pointerup', 1, 50, 40);
+    expect(tool.isDragging()).toBe(false);
+  });
+
+  it('ends the drag when the browser cancels the pointer', () => {
+    pointer('pointerdown', 1, 50, 50);
+    pointer('pointercancel', 1, 50, 50);
+    expect(tool.isDragging()).toBe(false);
+    expect(captured.size).toBe(0);
+    const before = planeConstant();
+    pointer('pointermove', 1, 50, 10);
+    expect(planeConstant()).toBeCloseTo(before);
+  });
+
+  it('ends the drag when pointer capture is lost', () => {
+    pointer('pointerdown', 1, 50, 50);
+    captured.clear();
+    pointer('lostpointercapture', 1, 50, 50);
+    expect(tool.isDragging()).toBe(false);
+  });
+
+  it('reports the handle, as drawn, for the view to keep between its planes', () => {
+    const box = new THREE.Box3();
+    tool.expandViewBounds(box);
+    // update() scales the handle to the camera distance (5) times 0.03.
+    const reach = 5 * 0.03 * 2;
+    expect(box.containsPoint(new THREE.Vector3(0, 0, 0))).toBe(true);
+    expect(box.max.x).toBeCloseTo(reach);
+    expect(box.min.y).toBeCloseTo(-reach);
+
+    tool.clearClipPlane();
+    const empty = new THREE.Box3();
+    tool.expandViewBounds(empty);
+    expect(empty.isEmpty()).toBe(true);
+  });
+});

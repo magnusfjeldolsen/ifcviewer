@@ -117,6 +117,15 @@ export class Viewer {
   private sceneBoundsProvider: (() => THREE.Box3) | null = null;
 
   /**
+   * Things drawn outside the model that must stay between the planes, such as
+   * the section handle. Asked on every frame the planes are recomputed.
+   */
+  private viewBoundsSources: Array<(box: THREE.Box3) => void> = [];
+
+  /** `sceneBox` grown by `viewBoundsSources`, as of the last plane update. */
+  private viewBox = new THREE.Box3();
+
+  /**
    * Distance to the geometry last found under the cursor, or null when the
    * cursor was over empty space.
    *
@@ -255,6 +264,27 @@ export class Viewer {
     if (!box || box.isEmpty()) return;
     this.sceneBox.copy(box);
     this.needsRender = true;
+  }
+
+  /**
+   * Keep something drawn outside the model between the clipping planes: the
+   * source grows the box it is handed to cover it. Returns an unsubscribe.
+   */
+  addViewBoundsSource(source: (box: THREE.Box3) => void): () => void {
+    this.viewBoundsSources.push(source);
+    return () => {
+      this.viewBoundsSources = this.viewBoundsSources.filter((s) => s !== source);
+    };
+  }
+
+  /**
+   * Stop a fly-to in progress, leaving the camera where it is and in the
+   * user's hands. For gestures that claim the pointer before the animation's
+   * own interrupt listener can see it, like grabbing the section handle.
+   */
+  cancelCameraAnimation(): void {
+    this.animator.cancel();
+    this._controlsMode = 'user';
   }
 
   /**
@@ -713,7 +743,8 @@ export class Viewer {
 
   /** The sphere a zoom-out may not leave: `maxViewDistance` about the scene centre. */
   private zoomOutLimit(): THREE.Sphere {
-    const sphere = this.sceneBox.getBoundingSphere(new THREE.Sphere());
+    // `dollyTo` refreshes the planes, and with them `viewBox`, first.
+    const sphere = this.viewBox.getBoundingSphere(new THREE.Sphere());
     sphere.radius = maxViewDistance(sphere.radius);
     return sphere;
   }
@@ -726,10 +757,12 @@ export class Viewer {
    * rebuild when nothing moved enough to matter.
    */
   private updateClipping(): void {
+    this.viewBox.copy(this.sceneBox);
+    for (const source of this.viewBoundsSources) source(this.viewBox);
     const { near, far } = clippingPlanesForView({
       position: this.camera.position,
       hitDistance: this.lastHitDistance,
-      scene: this.sceneBox,
+      scene: this.viewBox,
       clearOf: [this.gridBox],
     });
     if (near === this.camera.near && far === this.camera.far) return;

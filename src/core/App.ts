@@ -195,8 +195,11 @@ export class App {
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
       requestRender,
+      cancelCameraAnimation: () => this.viewer.cancelCameraAnimation(),
     });
     this.toolManager.register(this.clippingTool);
+    // The handle can be dragged outside the model; keep it between the planes.
+    this.viewer.addViewBoundsSource((box) => this.clippingTool.expandViewBounds(box));
 
     // One set of snap settings, shared by every tool that places a point.
     const snapSettings = {
