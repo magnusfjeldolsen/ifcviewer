@@ -10,9 +10,19 @@
 //   orbit          a scripted 360° orbit about the model centre at fit-view
 //                  distance and again zoomed in close: median fps, p95 frame
 //                  time, CPU ms inside renderer.render
+//   orbit, synced  the same two orbits with a 1-pixel readPixels after every
+//                  frame, so each frame waits for the GPU to finish it: render
+//                  CPU + GPU wait per frame. Once render CPU is small, an
+//                  unthrottled run (vsync off) reports rAF rates the GPU never
+//                  drew; the synced frame time is the honest one.
 //   pick           a raycast pick at a 5×5 grid of screen points: median, p95
 //   heap           main-thread JS heap after load (after a forced GC). The IFC
-//                  worker's heap is NOT included.
+//                  worker's heap is NOT included, and neither are ArrayBuffer
+//                  backing stores — which is where geometry lives.
+//   process memory private bytes of this run's Chrome processes (Windows),
+//                  sampled once a second: peak per process type (renderer —
+//                  which also hosts the IFC worker — and gpu-process) and
+//                  peak total, over the cold load and again over the whole run
 //   warm load      the page reloaded in the same profile, so session restore
 //                  brings the model back from IndexedDB — from the geometry
 //                  cache when it holds the model (`fromCache` says which)
@@ -57,7 +67,7 @@
 
 import { chromium } from 'playwright-core';
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT, build, startPreview } from './server.mjs';
@@ -215,6 +225,70 @@ function topSelfTime(profile, n) {
     .map(([fn, us]) => ({ fn, ms: round(us / 1000, 0), pct: round((100 * us) / total, 1) }));
 }
 
+/**
+ * Sample the private memory of this run's Chrome processes once a second
+ * (Windows only) and keep the peaks. The JS heap figure excludes ArrayBuffer
+ * backing stores — where geometry lives — and the GPU process, so this is the
+ * number that says whether a model fits.
+ *
+ * One long-lived PowerShell loop rather than a process per sample, so the
+ * sampling itself barely disturbs the frame-rate measurements.
+ */
+function startProcessMemorySampler(profileDir) {
+  const peaks = { byType: {}, total: 0, samples: 0 };
+  if (process.platform !== 'win32') return { peaks, stop: () => {} };
+  const dir = profileDir.replace(/'/g, "''");
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+while ($true) {
+  $all = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'"
+  $root = $all | Where-Object { $_.CommandLine -like '*${dir}*' -and $_.CommandLine -notlike '*--type=*' } | Select-Object -First 1
+  if ($root) {
+    $rows = $all | Where-Object { $_.ProcessId -eq $root.ProcessId -or $_.ParentProcessId -eq $root.ProcessId } | ForEach-Object {
+      $t = 'browser'; if ($_.CommandLine -match '--type=([\\w-]+)') { $t = $Matches[1] }
+      if ($t -eq 'utility' -and $_.CommandLine -match '--utility-sub-type=([\\w.]+)') { $t = 'utility:' + $Matches[1] }
+      '{0}={1}' -f $t, $_.PrivatePageCount
+    }
+    [Console]::Out.WriteLine(($rows -join ';'))
+  }
+  Start-Sleep -Milliseconds 1000
+}`;
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+  });
+  let buf = '';
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const now = {};
+      let total = 0;
+      for (const part of line.split(';')) {
+        const [type, bytes] = part.split('=');
+        const v = Number(bytes);
+        if (!Number.isFinite(v)) continue;
+        // Several renderers or utilities: the biggest one is the one that matters.
+        now[type] = Math.max(now[type] ?? 0, v);
+        total += v;
+      }
+      for (const [type, v] of Object.entries(now)) peaks.byType[type] = Math.max(peaks.byType[type] ?? 0, v);
+      peaks.total = Math.max(peaks.total, total);
+      peaks.last = { ...now, total };
+      peaks.samples++;
+    }
+  });
+  return {
+    peaks,
+    stop: () => {
+      if (child.exitCode === null) child.kill();
+    },
+  };
+}
+
 function gitCommit() {
   try {
     return execSync('git rev-parse --short HEAD', { cwd: ROOT }).toString().trim();
@@ -274,6 +348,13 @@ async function main() {
   const events = { crashed: false, progress: [] };
 
   let context = null;
+  const sampler = startProcessMemorySampler(profileDir);
+  const memSnapshot = () => ({
+    peakTotalMB: mb(sampler.peaks.total),
+    peakByTypeMB: Object.fromEntries(Object.entries(sampler.peaks.byType).map(([k, v]) => [k, mb(v)])),
+    nowMB: sampler.peaks.last ? Object.fromEntries(Object.entries(sampler.peaks.last).map(([k, v]) => [k, mb(v)])) : null,
+    samples: sampler.peaks.samples,
+  });
   try {
     context = await chromium.launchPersistentContext(profileDir, {
       channel: 'chrome',
@@ -328,6 +409,7 @@ async function main() {
     const heap = await cdp.send('Runtime.getHeapUsage');
     result.heapAfterLoad = { usedMB: mb(heap.usedSize), totalMB: mb(heap.totalSize) };
     log(`Scene: ${result.scene.meshes} meshes, ${result.scene.drawCalls} draw calls, ${result.scene.triangles} triangles; heap ${result.heapAfterLoad.usedMB} MB`);
+    if (result.model?.batches) log(`Batches: ${JSON.stringify(result.model.batches)}`);
 
     // ── Pick (at the fit view, before any orbit) ──
     await page.evaluate(() => window.__ifcPerf.pick({ cols: 1, rows: 1 })); // warm-up
@@ -336,11 +418,24 @@ async function main() {
     log(`Pick: median ${result.pick.medianMs} ms, p95 ${result.pick.p95Ms} ms (${pick.hits}/${pick.samples} hit; median of hits ${result.pick.hitMedianMs} ms)`);
 
     // ── Orbits ──
-    const orbit = async (distanceScale) => {
+    const orbit = async (distanceScale, gpuSync = false) => {
       const o = await page.evaluate(
-        ([frames, scale]) => window.__ifcPerf.orbit({ frames, distanceScale: scale }),
-        [opts.orbitFrames, distanceScale],
+        ([frames, scale, sync]) => window.__ifcPerf.orbit({ frames, distanceScale: scale, gpuSync: sync }),
+        [opts.orbitFrames, distanceScale, gpuSync],
       );
+      if (gpuSync) {
+        return {
+          distanceScale,
+          frames: o.frames,
+          // What the frame really cost: render CPU + waiting for the GPU to finish it.
+          syncedFrameMedianMs: round(o.syncedFrameMedianMs, 2),
+          syncedFrameP95Ms: round(o.syncedFrameP95Ms, 2),
+          syncedFps: round(1000 / o.syncedFrameMedianMs),
+          gpuWaitMedianMs: round(o.gpuWaitMedianMs, 2),
+          renderCpuMedianMs: round(o.renderCpuMedianMs, 2),
+          drawCalls: o.info.drawCalls,
+        };
+      }
       return {
         distanceScale,
         frames: o.frames,
@@ -376,6 +471,18 @@ async function main() {
     log(`Orbit (fit):   ${result.orbitFit.medianFps} fps median, p95 ${result.orbitFit.p95FrameMs} ms, render CPU ${result.orbitFit.renderCpuMedianMs} ms`);
     result.orbitClose = await orbit(opts.closeScale);
     log(`Orbit (close): ${result.orbitClose.medianFps} fps median, p95 ${result.orbitClose.p95FrameMs} ms, render CPU ${result.orbitClose.renderCpuMedianMs} ms`);
+    // The same two orbits with a GPU sync after every frame. Once the CPU cost
+    // is small, an unthrottled run (vsync off) can report frame rates the GPU
+    // never drew; these say what each frame cost the GPU too.
+    result.orbitFitSynced = await orbit(1, true);
+    log(`Orbit (fit, GPU-synced):   ${result.orbitFitSynced.syncedFps} fps (frame ${result.orbitFitSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitFitSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitFitSynced.gpuWaitMedianMs} ms)`);
+    result.orbitCloseSynced = await orbit(opts.closeScale, true);
+    log(`Orbit (close, GPU-synced): ${result.orbitCloseSynced.syncedFps} fps (frame ${result.orbitCloseSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitCloseSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitCloseSynced.gpuWaitMedianMs} ms)`);
+
+    // Private bytes per Chrome process: peak over the cold load and orbits,
+    // and the level now that the model is loaded and has been drawn.
+    result.processMemoryCold = memSnapshot();
+    log(`Process memory (cold): peak total ${result.processMemoryCold.peakTotalMB} MB; peak per process ${JSON.stringify(result.processMemoryCold.peakByTypeMB)}`);
 
     // ── Warm load: reload, let session restore bring it back ──
     if (opts.warm) {
@@ -402,12 +509,15 @@ async function main() {
       const [warm] = await page.evaluate(() => window.__ifcPerf.loads);
       result.warm = { ...loadTimes(warm), note: 'times from navigation start (session restore)' };
       log(`Warm load (${warm.fromCache ? 'geometry cache' : 'full parse'}): first geometry ${result.warm.firstGeometryMs} ms, loaded ${result.warm.loadedMs} ms`);
+      result.processMemoryRun = memSnapshot();
+      log(`Process memory (whole run): peak total ${result.processMemoryRun.peakTotalMB} MB`);
     }
   } catch (err) {
     result.failure = String(err?.message ?? err);
     log(`FAILED: ${result.failure}`);
   } finally {
     result.progress = events.progress;
+    sampler.stop();
     await context?.close().catch(() => {});
     server?.stop();
     rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
