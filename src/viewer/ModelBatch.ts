@@ -59,6 +59,9 @@ export const SEE_THROUGH_SETTLE_MS = 120;
 /** Depth bands the see-through pieces are drawn in, far to near. */
 export const SEE_THROUGH_BANDS = 32;
 
+/** Share of a chunk's triangles hidden from which it draws a compacted list instead. */
+export const COMPACT_HIDDEN_SHARE = 0.5;
+
 /** Opacity below this counts as see-through. */
 const OPAQUE_ALPHA = 0.999;
 
@@ -128,6 +131,13 @@ interface Chunk {
   bands: THREE.Mesh[];
   /** A see-through chunk's triangles sorted for the view, drawn by its bands. */
   sortedIndex: THREE.BufferAttribute | null;
+  /** Index entries (triangles × 3) of the chunk's hidden pieces. */
+  hiddenIndexCount: number;
+  /**
+   * When most of an opaque chunk is hidden: the triangles of its other
+   * pieces only, drawn instead of the whole chunk. Shares its vertex buffers.
+   */
+  compact: THREE.BufferGeometry | null;
   /** Set when a split found no axis to cut along; the chunk just grows. */
   unsplittable: boolean;
   /** One big piece, sized exactly, outside the k-d tree: never grown or split. */
@@ -824,6 +834,7 @@ export class ModelBatch {
     this.pieceVertexStart[p] = vStart;
     this.pieceIndexStart[p] = iStart;
     this.expandByPiece(chunk.box, p);
+    if (this.flags[p] & FLAG_HIDDEN) chunk.hiddenIndexCount += this.pieceIndexCount[p];
     if (this.effectiveAlpha(p) < OPAQUE_ALPHA && !chunk.transparent) chunk.overlayDirty = true;
   }
 
@@ -927,6 +938,8 @@ export class ModelBatch {
 
   private updateFlags(expressIds: Iterable<number>, flag: number, on: boolean): void {
     let changed = false;
+    const hiding = flag === FLAG_HIDDEN;
+    const touched = new Set<Chunk>();
     for (const id of expressIds) {
       const pieces = this.elements.get(id);
       if (!pieces) continue;
@@ -936,9 +949,57 @@ export class ModelBatch {
         this.flags[p] = next;
         this.writeState(p);
         changed = true;
+        const chunk = hiding ? this.pieceChunk[p] : null;
+        if (chunk) {
+          chunk.hiddenIndexCount += on ? this.pieceIndexCount[p] : -this.pieceIndexCount[p];
+          touched.add(chunk);
+        }
       }
     }
-    if (changed) this.uploadState();
+    if (!changed) return;
+    for (const chunk of touched) this.refreshDraw(chunk);
+    this.uploadState();
+  }
+
+  /**
+   * Draw only what is not hidden, cheaply. A hidden piece is otherwise still
+   * sent through the vertex stage (the shader just throws its triangles
+   * away), so isolating a few elements of a large model cost as much as
+   * drawing all of it. A chunk whose pieces are all hidden is not drawn; one
+   * mostly hidden (`COMPACT_HIDDEN_SHARE`) draws a compacted list of its
+   * other triangles, which costs a copy of those — only the visible part, of
+   * only the chunks that changed.
+   */
+  private refreshDraw(chunk: Chunk): void {
+    const g = chunk.geometry;
+    if (!g) return;
+    const total = chunk.indexCount;
+    const hidden = chunk.hiddenIndexCount;
+    chunk.mesh.visible = hidden < total;
+    const compact = !chunk.transparent && hidden < total && hidden >= total * COMPACT_HIDDEN_SHARE;
+    if (chunk.compact) {
+      disposeIndexOnly(chunk.compact);
+      chunk.compact = null;
+    }
+    if (!compact) {
+      chunk.mesh.geometry = g;
+      return;
+    }
+    const index = new Uint32Array(total - hidden);
+    let n = 0;
+    for (const p of chunk.pieces) {
+      if (this.flags[p] & FLAG_HIDDEN) continue;
+      const s = this.pieceIndexStart[p];
+      index.set(chunk.index.subarray(s, s + this.pieceIndexCount[p]), n);
+      n += this.pieceIndexCount[p];
+    }
+    const c = new THREE.BufferGeometry();
+    for (const name of ['position', 'normal', 'pieceIndex']) c.setAttribute(name, g.getAttribute(name));
+    c.setIndex(new THREE.BufferAttribute(index, 1));
+    c.boundingBox = g.boundingBox!.clone();
+    c.boundingSphere = g.boundingSphere!.clone();
+    chunk.compact = c;
+    chunk.mesh.geometry = c;
   }
 
   // ── Internals: chunks ────────────────────────────────────────
@@ -972,6 +1033,8 @@ export class ModelBatch {
       overlayPieces: new Int32Array(0),
       bands: [],
       sortedIndex: null,
+      hiddenIndexCount: 0,
+      compact: null,
       unsplittable: false,
       solo: false,
     };
@@ -1155,6 +1218,7 @@ export class ModelBatch {
       this.pieceVertexStart[p] = vStart;
       this.pieceIndexStart[p] = iStart;
       this.expandByPiece(chunk.box, p);
+    if (this.flags[p] & FLAG_HIDDEN) chunk.hiddenIndexCount += this.pieceIndexCount[p];
       if (!chunk.transparent && this.effectiveAlpha(p) < OPAQUE_ALPHA) chunk.overlayDirty = true;
     }
     return chunk;
@@ -1213,6 +1277,7 @@ export class ModelBatch {
     g.boundingBox = chunk.box.clone().translate(_b.copy(chunk.anchor).negate());
     g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
     if (chunk.overlayDirty) this.rebuildOverlay(chunk);
+    if (chunk.hiddenIndexCount > 0 || chunk.compact || !chunk.mesh.visible) this.refreshDraw(chunk);
   }
 
   /** Rebuild the index list of an opaque chunk's see-through pieces. */
@@ -1436,6 +1501,10 @@ export class ModelBatch {
 
   private disposeChunk(chunk: Chunk): void {
     this.dropBands(chunk);
+    if (chunk.compact) {
+      disposeIndexOnly(chunk.compact);
+      chunk.compact = null;
+    }
     this.group.remove(chunk.mesh);
     chunk.geometry?.dispose();
     chunk.geometry = null;

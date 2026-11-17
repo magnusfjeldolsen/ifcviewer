@@ -775,6 +775,74 @@ describe('ModelBatch — see-through order', () => {
   }
 });
 
+describe('ModelBatch — hidden elements cost nothing to draw', () => {
+  /** Triangles each drawn chunk sends through the vertex stage. */
+  function drawnTriangles(batch: ModelBatch): number {
+    let n = 0;
+    for (const mesh of batch.chunkMeshes()) {
+      if (!mesh.visible) continue;
+      const g = mesh.geometry;
+      n += Math.min(g.drawRange.count, g.getIndex()!.count) / 3;
+    }
+    return n;
+  }
+  const grid = (count: number) => Array.from({ length: count }, (_, i) => boxMesh(i + 1, { at: [(i % 20) * 3, Math.floor(i / 20) * 3, 0] }));
+
+  it('a chunk whose pieces are all hidden is not drawn; one mostly hidden draws only the rest', () => {
+    const batch = new ModelBatch('m', { chunkVertexCap: 24 * 50 });
+    batch.append(grid(400));
+    batch.finish();
+    const all = drawnTriangles(batch);
+    expect(all).toBe(400 * 12);
+
+    // Isolate a handful: almost nothing is sent any more.
+    const keep = [1, 2, 3, 200, 399];
+    batch.setHidden(Array.from({ length: 400 }, (_, i) => i + 1).filter((id) => !keep.includes(id)), true);
+    expect(drawnTriangles(batch)).toBe(keep.length * 12);
+
+    // Half the model, spatially: about half the work.
+    batch.setHidden(Array.from({ length: 400 }, (_, i) => i + 1), false);
+    batch.setHidden(Array.from({ length: 200 }, (_, i) => i + 1), true);
+    expect(drawnTriangles(batch)).toBeLessThanOrEqual(220 * 12);
+
+    // Everything back: the full chunks again.
+    batch.setHidden(Array.from({ length: 400 }, (_, i) => i + 1), false);
+    expect(drawnTriangles(batch)).toBe(all);
+    expect(batch.chunkMeshes().every((m) => m.visible)).toBe(true);
+  });
+
+  it('still picks the elements left visible in a compacted chunk', () => {
+    const scene = new THREE.Scene();
+    const batch = new ModelBatch('m', { chunkVertexCap: 24 * 50 });
+    batch.append(grid(400));
+    batch.finish();
+    scene.add(batch.group);
+    batch.setHidden(Array.from({ length: 400 }, (_, i) => i + 1).filter((id) => id !== 77), true);
+    const i = 76;
+    const hit = pick(scene, new THREE.Vector3((i % 20) * 3, Math.floor(i / 20) * 3, 10), new THREE.Vector3(0, 0, -1));
+    expect(elementOfHit(hit)).toEqual({ modelId: 'm', expressId: 77 });
+  });
+
+  it('pieces streamed in for an element that is already hidden stay out of the draw', () => {
+    const hidden = Array.from({ length: 150 }, (_, i) => i + 1);
+    const late = [boxMesh(10, { at: [100, 0, 0] }), ...grid(400).slice(150)];
+    // Hidden while streaming: later pieces of a hidden element join hidden.
+    const streamed = new ModelBatch('m', { chunkVertexCap: 24 * 50 });
+    streamed.append(grid(150));
+    streamed.setHidden(hidden, true);
+    streamed.append(late);
+    streamed.finish();
+    // Hidden once everything is in.
+    const after = new ModelBatch('m', { chunkVertexCap: 24 * 50 });
+    after.append(grid(150));
+    after.append(late);
+    after.finish();
+    after.setHidden(hidden, true);
+    expect(drawnTriangles(streamed)).toBe(drawnTriangles(after));
+    expect(drawnTriangles(after)).toBeLessThan(400 * 12);
+  });
+});
+
 describe('ModelBatch — freeing memory', () => {
   it('removeModel disposes every geometry and material', () => {
     const { modelManager } = makeModelManager([
