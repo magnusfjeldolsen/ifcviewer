@@ -525,10 +525,13 @@ describe('ModelBatch — precision far from the origin', () => {
  * What a WebGL renderer would hold for each buffer, uploaded by three r183's
  * rules (WebGLAttributes): the whole array the first time, then — on each
  * version bump — the queued update ranges, or the whole array when none are
- * queued. A new array object is a new buffer.
+ * queued. A buffer belongs to an attribute object: swapping the attribute's
+ * array without marking it for update sends nothing.
  */
 class GpuMirror {
-  private held = new Map<THREE.BufferAttribute, { array: ArrayLike<number>; copy: number[]; version: number }>();
+  private held = new Map<THREE.BufferAttribute, { copy: number[]; version: number }>();
+  /** Elements sent as whole buffers (new buffers, or updates without ranges). */
+  wholeElements = 0;
 
   sync(batch: ModelBatch): void {
     for (const mesh of batch.chunkMeshes()) {
@@ -538,24 +541,26 @@ class GpuMirror {
     }
   }
 
-  /** Elements of `attribute` whose GPU copy differs from the CPU array. */
-  stale(attribute: THREE.BufferAttribute, count: number): number {
+  /** Elements of the CPU array whose GPU copy differs from it. */
+  stale(attribute: THREE.BufferAttribute): number {
     const h = this.held.get(attribute)!;
     let n = 0;
-    for (let i = 0; i < count; i++) if (h.copy[i] !== attribute.array[i]) n++;
+    for (let i = 0; i < attribute.array.length; i++) if (h.copy[i] !== attribute.array[i]) n++;
     return n;
   }
 
   private upload(a: THREE.BufferAttribute): void {
     const h = this.held.get(a);
-    if (!h || h.array !== a.array) {
-      this.held.set(a, { array: a.array, copy: Array.from(a.array), version: a.version });
+    if (!h) {
+      this.held.set(a, { copy: Array.from(a.array), version: a.version });
+      this.wholeElements += a.array.length;
       a.onUploadCallback();
       return;
     }
     if (h.version >= a.version) return;
     if (a.updateRanges.length === 0) {
       h.copy = Array.from(a.array);
+      this.wholeElements += a.array.length;
     } else {
       for (const r of a.updateRanges) for (let i = r.start; i < r.start + r.count; i++) h.copy[i] = a.array[i];
       a.clearUpdateRanges();
@@ -594,20 +599,15 @@ describe('ModelBatch — what reaches the GPU', () => {
     const expectInSync = (names: string[]) => {
       for (const mesh of batch.chunkMeshes()) {
         const g = mesh.geometry;
-        const vertices = g.getAttribute('pieceIndex').count;
-        for (const name of names) {
-          const a = g.getAttribute(name) as THREE.BufferAttribute;
-          expect(gpu.stale(a, vertices * a.itemSize), name).toBe(0);
-        }
-        expect(gpu.stale(g.getIndex()!, g.drawRange.count)).toBe(0);
+        for (const name of names) expect(gpu.stale(g.getAttribute(name) as THREE.BufferAttribute), name).toBe(0);
+        expect(gpu.stale(g.getIndex()!)).toBe(0);
       }
     };
     for (let i = 0; i < meshes.length; i += 7) {
       batch.append(meshes.slice(i, i + 7));
       gpu.sync(batch);
     }
-    // Before `finish` too: it rebuilds trimmed chunks whole, which would hide
-    // a partial upload that missed something.
+    // Before `finish` as well as after: `finish` trims what the CPU keeps.
     expectInSync(['position', 'normal', 'pieceIndex']);
     batch.finish();
     gpu.sync(batch);
@@ -635,6 +635,55 @@ describe('ModelBatch — what reaches the GPU', () => {
     expect(g.getAttribute('position').array.length).toBeGreaterThanOrEqual(50 * 24 * 3);
     expect(batch.pieceGeometry(30)!.geometry.getIndex()!.count).toBe(36);
     expect(() => batch.append([boxMesh(99)])).toThrow();
+  });
+});
+
+describe('ModelBatch — cheap to stream', () => {
+  it('a piece of half a chunk or more gets an exactly sized chunk that later splits never copy', () => {
+    const big = boxMesh(1, { at: [30, 30, 0] });
+    big.vertices = new Float32Array(Array.from({ length: 700 }, () => Array.from(big.vertices)).flat());
+    big.normals = new Float32Array(Array.from({ length: 700 }, () => Array.from(big.normals)).flat());
+    big.indices = new Uint32Array(Array.from({ length: 700 }, (_, k) => Array.from(boxMesh(1).indices, (i) => i + k * 24)).flat());
+    const batch = new ModelBatch('m', { chunkVertexCap: 24 * 1400 }); // the big piece is exactly half
+    batch.append([big]);
+    const [solo] = batch.chunkMeshes();
+    const positions = solo.geometry.getAttribute('position');
+    expect(positions.count).toBe(700 * 24);
+    // Enough small pieces around it to split the rest many times over.
+    const small = Array.from({ length: 4000 }, (_, i) => boxMesh(i + 2, { at: [(i % 60) * 1.1, Math.floor(i / 60) * 1.1, 0] }));
+    for (let i = 0; i < small.length; i += 100) batch.append(small.slice(i, i + 100));
+    batch.finish();
+    expect(batch.chunkMeshes().length).toBeGreaterThan(3);
+    expect(batch.chunkMeshes()).toContain(solo);
+    expect(solo.geometry.getAttribute('position')).toBe(positions);
+    expect(solo.geometry.drawRange.count).toBe(700 * 36);
+  });
+
+  it('streams with little more upload than the model itself, and finishing uploads nothing', () => {
+    const meshes = Array.from({ length: 2000 }, (_, i) => boxMesh(i + 1, { at: [(i % 50) * 3, Math.floor(i / 50) * 3, 0] }));
+    const batch = new ModelBatch('m', { chunkVertexCap: 24 * 200 });
+    const gpu = new GpuMirror();
+    for (let i = 0; i < meshes.length; i += 25) {
+      batch.append(meshes.slice(i, i + 25));
+      gpu.sync(batch);
+    }
+    const streamed = gpu.wholeElements;
+    batch.finish();
+    gpu.sync(batch);
+    expect(gpu.wholeElements).toBe(streamed);
+    // Whole-buffer uploads (positions, normals, piece index, index — counted
+    // in array elements, capacity included) stay within a few times the
+    // model's own size, however often the regions split.
+    const modelElements = 2000 * 24 * (3 + 4 + 1) + 2000 * 36;
+    expect(streamed / modelElements).toBeLessThan(4);
+    // The CPU keeps exactly what the chunks hold.
+    let positions = 0;
+    for (const mesh of batch.chunkMeshes()) {
+      const g = mesh.geometry;
+      positions += g.getAttribute('position').array.length;
+      expect(g.getIndex()!.array.length).toBe(g.drawRange.count);
+    }
+    expect(positions).toBe(batch.stats().vertices * 3);
   });
 });
 

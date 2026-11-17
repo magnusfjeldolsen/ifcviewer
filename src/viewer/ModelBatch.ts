@@ -16,7 +16,9 @@ import type { ParsedMesh } from '../parser/types';
  * one draw call each. Chunks are the leaves of a k-d tree that splits a chunk
  * in two along its longest axis once it holds more than `chunkVertexCap`
  * vertices, so each chunk covers a compact region of the building and frustum
- * culling still drops what is off screen. Pieces whose own colour is
+ * culling still drops what is off screen. A piece of half the cap or more
+ * gets an exactly sized chunk of its own instead, outside the tree, so the
+ * biggest pieces are written once and never copied by a split. Pieces whose own colour is
  * see-through (glass) go to a separate tree drawn in the transparent pass.
  *
  * Per-piece appearance lives in a float texture, two texels per piece:
@@ -113,6 +115,8 @@ interface Chunk {
   overlayDirty: boolean;
   /** Set when a split found no axis to cut along; the chunk just grows. */
   unsplittable: boolean;
+  /** One big piece, sized exactly, outside the k-d tree: never grown or split. */
+  solo: boolean;
 }
 
 interface KdNode {
@@ -357,32 +361,31 @@ export class ModelBatch {
   }
 
   /**
-   * The stream is complete: shrink every chunk's buffers to what it holds.
-   * Chunks grow by doubling while a stream is open, so up to half of a
-   * chunk's allocation can be slack at this point.
-   *
-   * Then let go of the CPU copies only the GPU needs — normals and piece
-   * indices, two fifths of a chunk's vertex data — once they have been
-   * uploaded. Positions and the index stay: picking and snapping read them.
-   * Nothing can be appended afterwards.
+   * The stream is complete. Chunks keep room to grow while it is open; now
+   * the CPU copies of positions and index are cut to what each chunk holds,
+   * and the copies only the GPU reads — normals and piece indices — are let
+   * go. Both wait until the GPU has the current data, and neither re-uploads
+   * anything: the GPU buffers keep their room, which costs less than sending
+   * every chunk again at the end of a load. Positions and the index stay on
+   * the CPU because picking and snapping read them. Nothing can be appended
+   * afterwards.
    */
   finish(): void {
     if (this.finished) return;
     this.finished = true;
     for (const chunk of this.chunks) {
-      const slackV = chunk.positions.length / 3 - chunk.vertexCount;
-      const slackI = chunk.index.length - chunk.indexCount;
-      if (slackV <= chunk.vertexCount * 0.1 && slackI <= chunk.indexCount * 0.1) continue;
-      chunk.positions = chunk.positions.slice(0, chunk.vertexCount * 3);
-      chunk.normals = chunk.normals.slice(0, chunk.vertexCount * 4);
-      chunk.pieceIndex = chunk.pieceIndex.slice(0, chunk.vertexCount);
-      chunk.index = chunk.index.slice(0, chunk.indexCount);
-      this.rebuildChunkGeometry(chunk);
-    }
-    for (const chunk of this.chunks) {
       const g = chunk.geometry;
       if (!g) continue;
-      for (const name of GPU_ONLY_ATTRIBUTES) dropOnceUploaded(g.getAttribute(name) as THREE.BufferAttribute);
+      if (chunk.positions.length > chunk.vertexCount * 3) {
+        chunk.positions = chunk.positions.slice(0, chunk.vertexCount * 3);
+        replaceOnceUploaded(g.getAttribute('position') as THREE.BufferAttribute, chunk.positions);
+      }
+      if (chunk.index.length > chunk.indexCount) {
+        chunk.index = chunk.index.slice(0, chunk.indexCount);
+        replaceOnceUploaded(g.getIndex()!, chunk.index);
+      }
+      replaceOnceUploaded(g.getAttribute('normal') as THREE.BufferAttribute, new Int8Array(0));
+      replaceOnceUploaded(g.getAttribute('pieceIndex') as THREE.BufferAttribute, new Float32Array(0));
       chunk.normals = new Int8Array(0);
       chunk.pieceIndex = new Float32Array(0);
     }
@@ -702,12 +705,14 @@ export class ModelBatch {
     // bounds; which chunk it joins depends on where it landed.
     const world = this.transformPositions(mesh.vertices, m, p);
     const transparent = c.a < OPAQUE_ALPHA;
-    const chunk = this.leafFor(p, transparent);
+    // A piece of half a chunk or more is a chunk on its own: merged, it
+    // would only be copied again by every split that followed.
+    const chunk = vertexCount * 2 >= this.cap ? this.soloChunk(p, transparent) : this.leafFor(p, transparent);
     this.ensureChunkCapacity(chunk, chunk.vertexCount + vertexCount, chunk.indexCount + indexCount);
     this.writePiece(chunk, p, world, mesh.normals, mesh.indices, indexCount, m);
     touched.add(chunk);
 
-    if (chunk.vertexCount > this.cap && chunk.pieces.length > 1 && !chunk.unsplittable) {
+    if (chunk.vertexCount > this.cap && chunk.pieces.length > 1 && !chunk.unsplittable && !chunk.solo) {
       for (const c2 of this.splitLeaf(transparent ? this.transparentRoot! : this.opaqueRoot!, chunk)) {
         touched.add(c2);
       }
@@ -917,6 +922,7 @@ export class ModelBatch {
       overlay: null,
       overlayDirty: false,
       unsplittable: false,
+      solo: false,
     };
     mesh.userData.chunk = chunk;
     this.chunks.add(chunk);
@@ -979,6 +985,15 @@ export class ModelBatch {
       left: null,
       right: null,
     };
+  }
+
+  /** An exactly sized chunk of its own for big piece `p`. */
+  private soloChunk(p: number, transparent: boolean): Chunk {
+    const c = this.pieceCentre(p, new THREE.Vector3());
+    const anchor = new THREE.Vector3(Math.round(c.x), Math.round(c.y), Math.round(c.z));
+    const chunk = this.newChunk(transparent, anchor, this.pieceVertexCount[p], this.pieceIndexCount[p]);
+    chunk.solo = true;
+    return chunk;
   }
 
   private pieceCentre(p: number, out: THREE.Vector3): THREE.Vector3 {
@@ -1063,9 +1078,13 @@ export class ModelBatch {
       vertices += this.pieceVertexCount[p];
       indices += this.pieceIndexCount[p];
     }
-    // Headroom: the stream usually keeps feeding this region. The parent's
-    // anchor is kept, so positions copy across unchanged.
-    const chunk = this.newChunk(from.transparent, from.anchor, Math.ceil(vertices * 1.5), Math.ceil(indices * 1.5));
+    // Room for a full chunk: the stream usually keeps feeding this region,
+    // and a chunk that never regrows never needs a whole new GPU buffer
+    // before its own split. The parent's anchor is kept, so positions copy
+    // across unchanged.
+    const room = Math.max(this.cap, vertices);
+    const indexRoom = Math.max(indices * 2, Math.ceil((indices * room) / Math.max(vertices, 1)));
+    const chunk = this.newChunk(from.transparent, from.anchor, room, indexRoom);
     for (const p of pieces) {
       const vStart = chunk.vertexCount;
       const iStart = chunk.indexCount;
@@ -1216,37 +1235,35 @@ function uploadTail(attribute: THREE.BufferAttribute, from: number, to: number):
   attribute.needsUpdate = true;
 }
 
-/** Per-vertex attributes nothing on the CPU reads once they are drawn. */
-const GPU_ONLY_ATTRIBUTES = ['normal', 'pieceIndex'] as const;
-
 /** The version of each buffer the GPU last received. */
 const uploadedVersion = new WeakMap<THREE.BufferAttribute, number>();
-/** Buffers whose CPU array goes as soon as the GPU has their current version. */
-const dropAfterUpload = new WeakSet<THREE.BufferAttribute>();
+/** CPU arrays to swap in as soon as the GPU has a buffer's current version. */
+const afterUpload = new WeakMap<THREE.BufferAttribute, THREE.TypedArray>();
 
 function clearRangesOnUpload(attribute: THREE.BufferAttribute): void {
   attribute.onUpload(() => {
     attribute.clearUpdateRanges();
     uploadedVersion.set(attribute, attribute.version);
-    if (dropAfterUpload.has(attribute)) dropArray(attribute);
+    const next = afterUpload.get(attribute);
+    if (next) swapArray(attribute, next);
   });
 }
 
 /**
- * Free `attribute`'s CPU array once the GPU holds its current contents — now
- * if it already does, else right after the next upload. The renderer never
- * reads the array of an uploaded buffer that is not marked for update; its
- * `count` is kept.
+ * Give `attribute` a smaller CPU array (a trimmed copy, or an empty one to
+ * free it) once the GPU holds its current contents: now if it already does,
+ * else right after the next upload, which must still send the full array.
+ * The renderer never reads the array of an uploaded buffer that is not
+ * marked for update, so the GPU buffer and `count` stay as they are.
  */
-function dropOnceUploaded(attribute: THREE.BufferAttribute): void {
-  if (uploadedVersion.get(attribute) === attribute.version) dropArray(attribute);
-  else dropAfterUpload.add(attribute);
+function replaceOnceUploaded(attribute: THREE.BufferAttribute, array: THREE.TypedArray): void {
+  if (uploadedVersion.get(attribute) === attribute.version) swapArray(attribute, array);
+  else afterUpload.set(attribute, array);
 }
 
-function dropArray(attribute: THREE.BufferAttribute): void {
-  const empty = new (attribute.array.constructor as new (n: number) => THREE.TypedArray)(0);
-  (attribute as { array: THREE.TypedArray }).array = empty;
-  dropAfterUpload.delete(attribute);
+function swapArray(attribute: THREE.BufferAttribute, array: THREE.TypedArray): void {
+  (attribute as { array: THREE.TypedArray }).array = array;
+  afterUpload.delete(attribute);
 }
 
 function findLeaf(node: KdNode | null, chunk: Chunk): KdNode | null {
