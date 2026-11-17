@@ -52,6 +52,7 @@ import { SIMILAR_MENU_ENRICH_MAX } from '../inspector/limits';
 import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
+import { SceneBounds } from '../viewer/SceneBounds';
 
 /**
  * A model load has finished, one way or the other. `source` says whether it
@@ -95,6 +96,8 @@ export class App {
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private clippingTool: ClippingTool;
+  /** World extent of everything loaded, fed batch by batch from parsed data. */
+  private sceneBounds = new SceneBounds();
   private measurementTool: MeasurementTool;
   private positionTool: PositionMarkerTool;
   private footer: Footer;
@@ -332,13 +335,11 @@ export class App {
     // Orbiting over empty space with something selected almost always means
     // "turn around that", so give the viewer a way to ask where it is.
     this.viewer.setSelectionCenterProvider(() => this.selectionManager.getSelectionCenter());
-    // Everything loaded, hidden included: Box3.expandByObject does not skip
-    // invisible children. Sizes the far plane, so unhiding never reveals a cut.
-    this.viewer.setSceneBoundsProvider(() => {
-      const box = new THREE.Box3();
-      for (const entry of this.modelManager.getAllModels()) box.expandByObject(entry.group);
-      return box;
-    });
+    // Everything loaded, hidden included, kept up to date as each batch
+    // arrives (see SceneBounds). Sizes the clipping planes, so neither a
+    // streaming load nor unhiding can reveal a cut.
+    this.viewer.setSceneBoundsProvider(() => this.sceneBounds.box());
+    this.sceneBounds.onChange(() => this.viewer.refreshSceneBounds());
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency
     // graph as SelectionManager; coexists via capture-phase pointerdown
@@ -422,7 +423,7 @@ export class App {
           this.parser.disposeModel(id);
         }
         this.modelManager.removeModel(id);
-        this.viewer.refreshSceneBounds();
+        this.sceneBounds.removeModel(id);
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
         this.modelRecords.delete(id);
@@ -893,6 +894,7 @@ export class App {
             this.modelManager.beginStream(id);
             const parsed = await this.parser.parseStreaming(stored.buffer, id, (batch) => {
               this.modelManager.appendMeshes(id, batch);
+              this.sceneBounds.addMeshes(id, batch);
             });
             this.modelManager.endStream(id);
             this.modelTreePanel.addModel(id, stored.name, parsed.meshes.length);
@@ -908,6 +910,7 @@ export class App {
           } catch {
             // skip files that fail to parse on restore — drop a partial stream
             this.modelManager.removeModel(stored.id);
+            this.sceneBounds.removeModel(stored.id);
           }
         }
         const box = this.modelManager.getBoundingBox();
@@ -945,6 +948,7 @@ export class App {
                 id: record.id,
                 meshes: cachedMeshes,
               });
+              this.sceneBounds.addMeshes(record.id, cachedMeshes);
               this.modelTreePanel.addModel(
                 record.id, record.name, cachedMeshes.length, record.source.type,
               );
@@ -969,6 +973,7 @@ export class App {
               const parsed = await this.parser.parseStreaming(
                 stored.buffer, record.id, (batch) => {
                   this.modelManager.appendMeshes(record.id, batch);
+                  this.sceneBounds.addMeshes(record.id, batch);
                 },
               );
               this.modelManager.endStream(record.id);
@@ -1008,6 +1013,7 @@ export class App {
         } catch (err) {
           // skip models that fail to restore — drop any partial stream
           this.modelManager.removeModel(record.id);
+          this.sceneBounds.removeModel(record.id);
           this.emitLoadSettled({
             name: record.name, source: 'restore', ok: false, meshCount: 0, fromCache: false,
             error: err instanceof Error ? err.message : 'Unknown error',
@@ -1100,6 +1106,7 @@ export class App {
       let framed = false;
       const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
         this.modelManager.appendMeshes(id, batch);
+        this.sceneBounds.addMeshes(id, batch);
         totalElements = progress.total;
         this.setStatus(
           `Loading ${file.name}… ` +
@@ -1159,7 +1166,10 @@ export class App {
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
-      if (streamId) this.modelManager.removeModel(streamId);
+      if (streamId) {
+        this.modelManager.removeModel(streamId);
+        this.sceneBounds.removeModel(streamId);
+      }
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
       this.emitLoadSettled({
@@ -1456,6 +1466,7 @@ export class App {
         this.parser.disposeModel(id);
       }
       this.modelManager.removeModel(id);
+      this.sceneBounds.removeModel(id);
       this.modelTreePanel.removeModel(id);
     }
 
@@ -1470,12 +1481,14 @@ export class App {
         this.modelManager.beginStream(id);
         const parsed = await this.parser.parseStreaming(buffer, id, (batch) => {
           this.modelManager.appendMeshes(id, batch);
+          this.sceneBounds.addMeshes(id, batch);
         });
         this.modelManager.endStream(id);
         this.modelTreePanel.addModel(id, record.name, parsed.meshes.length, record.source.type);
       } catch {
         // skip files that fail to re-parse — drop any partial stream
         this.modelManager.removeModel(id);
+        this.sceneBounds.removeModel(id);
       }
     }
 
@@ -1496,9 +1509,6 @@ export class App {
   }
 
   private emitLoadSettled(event: LoadSettledEvent): void {
-    // Every load path ends here, so this is where a streamed model's full
-    // extent is known; the first-batch fit only saw part of it.
-    this.viewer.refreshSceneBounds();
     for (const cb of this.loadSettledListeners) cb(event);
   }
 

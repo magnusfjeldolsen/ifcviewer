@@ -131,24 +131,38 @@ function extractFlatMesh(
     const vertexCount = verts.length / 6;
     const positions = new Float32Array(vertexCount * 3);
     const normals = new Float32Array(vertexCount * 3);
+    // Local bounds ride along in the same pass: see `ParsedMesh.bounds`.
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let j = 0; j < vertexCount; j++) {
-      positions[j * 3] = verts[j * 6];
-      positions[j * 3 + 1] = verts[j * 6 + 1];
-      positions[j * 3 + 2] = verts[j * 6 + 2];
+      const x = verts[j * 6];
+      const y = verts[j * 6 + 1];
+      const z = verts[j * 6 + 2];
+      positions[j * 3] = x;
+      positions[j * 3 + 1] = y;
+      positions[j * 3 + 2] = z;
       normals[j * 3] = verts[j * 6 + 3];
       normals[j * 3 + 1] = verts[j * 6 + 4];
       normals[j * 3 + 2] = verts[j * 6 + 5];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
     }
 
     const color = placedGeom.color;
-    sink.push({
+    const mesh: ParsedMesh = {
       expressID: flatMesh.expressID,
       vertices: positions,
       normals,
       indices: new Uint32Array(idxs),
       transform: Array.from(placedGeom.flatTransformation),
       color: { r: color.x, g: color.y, b: color.z, a: color.w },
-    });
+    };
+    if (vertexCount > 0) mesh.bounds = { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+    sink.push(mesh);
 
     geom.delete();
   }

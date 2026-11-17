@@ -37,6 +37,8 @@ export interface CachedMesh {
   indices: ArrayBuffer;  // Uint32Array.buffer
   color: { r: number; g: number; b: number; a: number };
   transform: number[];   // length 16 (Matrix4 column-major)
+  /** `ParsedMesh.bounds`; absent on entries written before it existed. */
+  bounds?: ParsedMesh['bounds'];
 }
 
 export interface CachedGeometryRecord {
@@ -61,6 +63,7 @@ export function serializeMeshes(parsed: ParsedMesh[]): CachedMesh[] {
       color: { r: m.color.r, g: m.color.g, b: m.color.b, a: m.color.a },
       transform: m.transform.slice(),
     };
+    if (m.bounds) out[i].bounds = m.bounds;
   }
   return out;
 }
@@ -78,6 +81,7 @@ export function deserializeMeshes(cached: CachedMesh[]): ParsedMesh[] {
       color: { r: c.color.r, g: c.color.g, b: c.color.b, a: c.color.a },
       transform: c.transform.slice(),
     };
+    if (c.bounds) out[i].bounds = c.bounds;
   }
   return out;
 }

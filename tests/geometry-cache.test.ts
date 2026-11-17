@@ -48,6 +48,17 @@ describe('GeometryCache pure helpers', () => {
     }
   });
 
+  it('keeps the worker-computed local bounds, so a cache hit need not walk vertices', () => {
+    const withBounds: ParsedMesh = {
+      ...makeMesh(1),
+      bounds: { min: [1, 1.1, 1.2], max: [1.6, 1.7, 1.8] },
+    };
+    const restored = deserializeMeshes(serializeMeshes([withBounds, makeMesh(2)]));
+    expect(restored[0].bounds).toEqual(withBounds.bounds);
+    // Entries written before bounds existed come back without them.
+    expect(restored[1].bounds).toBeUndefined();
+  });
+
   it('serialize copies buffers so the cached form is independent of the source', () => {
     const parsed = [makeMesh(1)];
     const cached = serializeMeshes(parsed);
