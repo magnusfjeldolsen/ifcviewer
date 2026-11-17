@@ -7,7 +7,12 @@
  * numeric-web-ifc-id map. The main thread never sees a numeric model id.
  *
  * Responsibilities:
- *  - `parse`        — open a model and stream geometry back in batches.
+ *  - `parse`        — open a model and stream geometry back in batches; for
+ *                     a shared parse, only the chunks the coordinator hands
+ *                     out over the `chunkPort` (until `stopShare` or the end).
+ *  - `share`        — as a helper: open a copy of a model, stream chunks for
+ *                     it, close it. The same script runs as main worker and
+ *                     as helper; a helper never answers property queries.
  *  - `openForProps` — open a model for property queries only (cache-restore).
  *  - `getProps`     — fetch + normalize one element's properties.
  *  - `intersect`    — fold N elements' properties into one synthetic result.
@@ -47,8 +52,8 @@ import {
 } from '../inspector/intersection';
 import { elementMatches, type PropertySelector } from '../inspector/matchValue';
 import type { ElementProperties, PropertyValue } from '../inspector/types';
-import type { FromWorker, ToWorker } from './ifcMessages';
-import type { ParsedMesh, StreamProgress } from './types';
+import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
+import type { ParsedMesh } from './types';
 import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 import { WorkerTimeline } from '../core/LoadTimeline';
 import { geometryProductIds } from './geometryProducts';
@@ -126,6 +131,7 @@ function extractFlatMesh(
   modelID: number,
   sink: ParsedMesh[],
   timeline?: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
 ): void {
   for (let i = 0; i < flatMesh.geometries.size(); i++) {
     const placedGeom = flatMesh.geometries.get(i);
@@ -168,8 +174,8 @@ function extractFlatMesh(
     const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
     if (timeline) {
       const t2 = performance.now();
-      timeline.add('worker.extract', t1 - t0);
-      timeline.add('worker.weld', t2 - t1);
+      timeline.add(`${role}.extract`, t1 - t0);
+      timeline.add(`${role}.weld`, t2 - t1);
     }
 
     const color = placedGeom.color;
@@ -211,11 +217,16 @@ function batchTransferables(meshes: ParsedMesh[]): Transferable[] {
  * `StreamMeshes` pass over them, extracts geometry inside the callback, and
  * posts `batch` messages as products accumulate.
  */
-async function handleParse(id: string, buffer: ArrayBuffer, timeline: WorkerTimeline): Promise<void> {
+async function handleParse(
+  id: string,
+  buffer: ArrayBuffer,
+  shared: boolean,
+  timeline: WorkerTimeline,
+): Promise<void> {
   timeline.mark('worker.started');
   const ifc = await getApi();
   timeline.mark('worker.ready');
-  let t0 = performance.now();
+  const t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
   timeline.add('worker.open', performance.now() - t0);
   timeline.mark('worker.opened');
@@ -225,35 +236,189 @@ async function handleParse(id: string, buffer: ArrayBuffer, timeline: WorkerTime
   // is the progress total: an upper bound, since a product without a body
   // is listed but streams nothing. See `geometryProducts.ts`.
   const ids = geometryProductIds(ifc, modelID);
-  const total = ids.length;
+  post(shared ? { type: 'listed', id, total: ids.length, ids } : { type: 'listed', id, total: ids.length });
   timeline.mark('worker.listed');
 
-  // One pass: geometry is extracted inside the callback (it is only valid
+  // Geometry is extracted inside the stream callback (it is only valid
   // there) and posted in batches as the batcher decides.
   const batcher = new StreamBatcher<ParsedMesh>(
-    (meshes, loaded) => {
-      const progress: StreamProgress = { loaded, total };
-      const tp = performance.now();
-      post({ type: 'batch', id, meshes, progress }, batchTransferables(meshes));
-      timeline.add('worker.post', performance.now() - tp);
-      timeline.mark('worker.firstBatchPosted');
-    },
+    (meshes, products) => postBatch(id, meshes, products, timeline),
     { maxProducts: STREAM_BATCH_SIZE, maxIntervalMs: STREAM_BATCH_INTERVAL_MS },
   );
 
-  t0 = performance.now();
-  ifc.StreamMeshes(modelID, ids, (flatMesh: WebIFC.FlatMesh) => {
-    timeline.mark('worker.firstMesh');
-    extractFlatMesh(ifc, flatMesh, modelID, batcher.sink, timeline);
-    batcher.endProduct();
-  });
+  if (shared) {
+    timeline.mark('worker.waitPort');
+    const port = await chunkPortFor(id);
+    await streamChunks(ifc, modelID, id, port, batcher, timeline);
+  } else {
+    streamIds(ifc, modelID, ids, batcher, timeline);
+  }
   batcher.flush();
-  timeline.add('worker.stream', performance.now() - t0);
   timeline.mark('worker.streamed');
 
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
   post({ type: 'parsed', id, timings: timeline.toJSON() });
+}
+
+/**
+ * Help another worker parse a model: open it, stream the chunks the
+ * coordinator hands out over `port`, close it. A chunk's geometry goes out in
+ * one batch right before the chunk is reported done, so if this worker dies
+ * mid-chunk none of that chunk was delivered and another worker can stream it.
+ */
+async function handleShare(
+  id: string,
+  buffer: ArrayBuffer,
+  port: MessagePort,
+  timeline: WorkerTimeline,
+): Promise<void> {
+  timeline.mark('helper.started');
+  const ifc = await getApi();
+  const t0 = performance.now();
+  const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  timeline.add('helper.open', performance.now() - t0);
+  timeline.mark('helper.opened');
+  try {
+    const batcher = new StreamBatcher<ParsedMesh>(() => {}, {
+      maxProducts: Infinity,
+      maxIntervalMs: Infinity,
+    });
+    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'helper');
+  } finally {
+    ifc.CloseModel(modelID);
+  }
+  timeline.mark('helper.streamed');
+  post({ type: 'shareDone', id, timings: timeline.toJSON() });
+}
+
+/**
+ * Coordinator ports for shared parses, by model id. The `chunkPort` message
+ * and the parse that needs it race, so whichever comes first makes the entry.
+ */
+const chunkPorts = new Map<string, { promise: Promise<MessagePort>; resolve: (p: MessagePort) => void }>();
+
+function chunkPortEntry(id: string): { promise: Promise<MessagePort>; resolve: (p: MessagePort) => void } {
+  let entry = chunkPorts.get(id);
+  if (!entry) {
+    let resolve!: (p: MessagePort) => void;
+    const promise = new Promise<MessagePort>((r) => {
+      resolve = r;
+    });
+    entry = { promise, resolve };
+    chunkPorts.set(id, entry);
+  }
+  return entry;
+}
+
+function chunkPortFor(id: string): Promise<MessagePort> {
+  const promise = chunkPortEntry(id).promise;
+  void promise.then(() => chunkPorts.delete(id));
+  return promise;
+}
+
+/** The "no more chunks" message. */
+const NO_MORE: ToChunkPort = { type: 'chunk', index: -1, ids: null };
+
+/** Inboxes of the shared parses streaming now, by model id (for `stopShare`). */
+const activeInboxes = new Map<string, ChunkInbox>();
+
+/** `stopShare`s that arrived before their parse began streaming chunks. */
+const stoppedShares = new Set<string>();
+
+/** The chunks handed to this worker, in arrival order. */
+class ChunkInbox {
+  private items: ToChunkPort[] = [];
+  private waiter: ((c: ToChunkPort) => void) | null = null;
+
+  push(chunk: ToChunkPort): void {
+    const w = this.waiter;
+    if (w) {
+      this.waiter = null;
+      w(chunk);
+    } else {
+      this.items.push(chunk);
+    }
+  }
+
+  next(): Promise<ToChunkPort> {
+    const c = this.items.shift();
+    if (c) return Promise.resolve(c);
+    return new Promise((resolve) => {
+      this.waiter = resolve;
+    });
+  }
+}
+
+/**
+ * Stream the chunks the coordinator hands out over `port` until it says
+ * there are no more. After each chunk its geometry is posted to the main
+ * thread and the chunk reported done to the coordinator, which hands out
+ * another.
+ */
+async function streamChunks(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  id: string,
+  port: MessagePort,
+  batcher: StreamBatcher<ParsedMesh>,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+): Promise<void> {
+  const inbox = new ChunkInbox();
+  port.onmessage = (e: MessageEvent<ToChunkPort>): void => inbox.push(e.data);
+  activeInboxes.set(id, inbox);
+  if (stoppedShares.delete(id)) inbox.push(NO_MORE);
+  const tell = (msg: FromChunkPort): void => port.postMessage(msg);
+  tell({ type: 'ready' });
+  try {
+    for (;;) {
+      const tw = performance.now();
+      const chunk = await inbox.next();
+      timeline.add(`${role}.waitChunk`, performance.now() - tw);
+      if (chunk.ids === null) break;
+      streamIds(ifc, modelID, chunk.ids, batcher, timeline, role);
+      const { items, products } = batcher.take();
+      postBatch(id, items, products, timeline, role);
+      tell({ type: 'done', index: chunk.index });
+    }
+  } finally {
+    activeInboxes.delete(id);
+    port.onmessage = null;
+    port.close();
+  }
+}
+
+/** `StreamMeshes` over `ids`, extracting every piece into the batcher. */
+function streamIds(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  ids: number[],
+  batcher: StreamBatcher<ParsedMesh>,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+): void {
+  const t0 = performance.now();
+  ifc.StreamMeshes(modelID, ids, (flatMesh: WebIFC.FlatMesh) => {
+    timeline.mark(`${role}.firstMesh`);
+    extractFlatMesh(ifc, flatMesh, modelID, batcher.sink, timeline, role);
+    batcher.endProduct();
+  });
+  timeline.add(`${role}.stream`, performance.now() - t0);
+}
+
+function postBatch(
+  id: string,
+  meshes: ParsedMesh[],
+  products: number,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+): void {
+  if (meshes.length === 0 && products === 0) return;
+  const tp = performance.now();
+  post({ type: 'batch', id, meshes, products }, batchTransferables(meshes));
+  timeline.add(`${role}.post`, performance.now() - tp);
+  if (meshes.length > 0) timeline.mark(`${role}.firstBatchPosted`);
 }
 
 /**
@@ -662,17 +827,45 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
   const msg = event.data;
   switch (msg.type) {
     case 'parse': {
+      // A stop meant for an earlier parse of this id must not end this one.
+      stoppedShares.delete(msg.id);
       // Stamped on arrival, before the queue: the gap to `worker.started` is
       // time spent waiting behind other requests.
       const timeline = new WorkerTimeline();
       timeline.mark('worker.received');
       enqueue(async () => {
         try {
-          await handleParse(msg.id, msg.buffer, timeline);
+          await handleParse(msg.id, msg.buffer, msg.shared === true, timeline);
         } catch (err) {
           post({ type: 'error', id: msg.id, message: errorMessage(err) });
         }
       });
+      break;
+    }
+
+    case 'share': {
+      const timeline = new WorkerTimeline();
+      timeline.mark('helper.received');
+      enqueue(async () => {
+        try {
+          await handleShare(msg.id, msg.buffer, msg.port, timeline);
+        } catch (err) {
+          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+        }
+      });
+      break;
+    }
+
+    // NOT enqueued: the shared parse waiting for it holds the queue.
+    case 'chunkPort':
+      chunkPortEntry(msg.id).resolve(msg.port);
+      break;
+
+    // NOT enqueued either: it must reach the parse that holds the queue.
+    case 'stopShare': {
+      const inbox = activeInboxes.get(msg.id);
+      if (inbox) inbox.push(NO_MORE);
+      else stoppedShares.add(msg.id);
       break;
     }
 

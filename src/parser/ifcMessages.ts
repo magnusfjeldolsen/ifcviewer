@@ -19,7 +19,7 @@
 
 import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { PropertySelector } from '../inspector/matchValue';
-import type { ParsedMesh, StreamProgress } from './types';
+import type { ParsedMesh } from './types';
 import type { WorkerTimings } from '../core/LoadTimeline';
 
 // ---------------------------------------------------------------------------
@@ -27,8 +27,30 @@ import type { WorkerTimings } from '../core/LoadTimeline';
 // ---------------------------------------------------------------------------
 
 export type ToWorker =
-  /** Parse a model and stream geometry back as `batch` messages. `buffer` transferred. */
-  | { type: 'parse'; id: string; buffer: ArrayBuffer }
+  /**
+   * Parse a model and stream geometry back as `batch` messages. The worker
+   * keeps the model open for property queries. With `shared`, other workers
+   * stream part of the geometry: this worker lists the elements (`listed`
+   * with `ids`), waits for its `chunkPort`, and streams only the chunks the
+   * coordinator hands it there.
+   */
+  | { type: 'parse'; id: string; buffer: ArrayBuffer; shared?: boolean }
+  /**
+   * The port to the chunk coordinator for a shared parse (transferred).
+   * NOT enqueued: the parse that waits for it holds the queue.
+   */
+  | { type: 'chunkPort'; id: string; port: MessagePort }
+  /**
+   * Sharing a parse was called off: stop after the chunks already handed
+   * out. NOT enqueued, for the same reason as chunkPort.
+   */
+  | { type: 'stopShare'; id: string }
+  /**
+   * Help parse a model: open it, stream the chunks the coordinator hands out
+   * over `port` (transferred), then close it and say `shareDone`. Geometry
+   * only; no property queries.
+   */
+  | { type: 'share'; id: string; buffer: ArrayBuffer; port: MessagePort }
   /**
    * Open a model for property queries only — no geometry streamed. Used
    * by the geometry-cache fast-restore path: the scene is already up from
@@ -96,8 +118,20 @@ export type ToWorker =
 // ---------------------------------------------------------------------------
 
 export type FromWorker =
-  /** A batch of streamed geometry. Mesh buffers transferred. */
-  | { type: 'batch'; id: string; meshes: ParsedMesh[]; progress: StreamProgress }
+  /**
+   * The elements a `parse` will stream: `total` always, the `ids` themselves
+   * for a shared parse (they are what gets handed out in chunks).
+   */
+  | { type: 'listed'; id: string; total: number; ids?: number[] }
+  /**
+   * A batch of streamed geometry from `products` more elements. Mesh buffers
+   * transferred. A helper sends a chunk's geometry in one batch, right before
+   * telling the coordinator the chunk is done: a helper that fails mid-chunk
+   * has delivered none of it, and the chunk can be streamed again.
+   */
+  | { type: 'batch'; id: string; meshes: ParsedMesh[]; products: number }
+  /** A `share` worker has streamed everything it was handed and closed the model. */
+  | { type: 'shareDone'; id: string; timings?: WorkerTimings }
   /**
    * A `parse` / `openForProps` completed successfully. A `parse` reply
    * carries where the worker's time went (see `LoadTimeline`).
@@ -126,3 +160,21 @@ export type FromWorker =
    * model-scoped op, `reqId` for a property query.
    */
   | { type: 'error'; id?: string; reqId?: number; message: string };
+
+// ---------------------------------------------------------------------------
+// shared parse: chunk coordinator (chunkCoordinatorWorker.ts)
+// ---------------------------------------------------------------------------
+
+/** Coordinator → geometry worker, over the worker's chunk port. `ids: null`: no more. */
+export type ToChunkPort = { type: 'chunk'; index: number; ids: number[] | null };
+
+/** Geometry worker → coordinator: ready for chunks, or chunk `index` delivered. */
+export type FromChunkPort = { type: 'ready' } | { type: 'done'; index: number };
+
+/** Main thread → coordinator. Port `k` belongs to worker `k`; 0 is the main worker. */
+export type ToCoordinator =
+  | { type: 'plan'; ids: number[]; ports: MessagePort[] }
+  /** Worker `worker` is gone; its unfinished chunks go to the others. */
+  | { type: 'fail'; worker: number }
+  /** Stop: every worker still listening hears there is no more. */
+  | { type: 'end' };

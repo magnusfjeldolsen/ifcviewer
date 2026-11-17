@@ -17,6 +17,7 @@ import { WorkerIfcParser, type WorkerLike } from '../src/parser/WorkerIfcParser'
 import type { ToWorker, FromWorker } from '../src/parser/ifcMessages';
 import type { ParsedMesh } from '../src/parser/types';
 
+
 /** A controllable Worker stub. Records posts; lets the test push replies. */
 class MockWorker implements WorkerLike {
   posted: ToWorker[] = [];
@@ -82,8 +83,9 @@ describe('WorkerIfcParser — parseStreaming', () => {
 
     const promise = parser.parseStreaming(new ArrayBuffer(8), 'm', onBatch);
 
-    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(1), mesh(2)], progress: { loaded: 2, total: 3 } });
-    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(3)], progress: { loaded: 3, total: 3 } });
+    worker.reply({ type: 'listed', id: 'm', total: 3 });
+    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(1), mesh(2)], products: 2 });
+    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(3)], products: 1 });
     worker.reply({ type: 'parsed', id: 'm' });
 
     const model = await promise;
@@ -100,7 +102,7 @@ describe('WorkerIfcParser — parseStreaming', () => {
     const pa = parser.parseStreaming(new ArrayBuffer(4), 'A', () => {});
     const pb = parser.parseStreaming(new ArrayBuffer(4), 'B', () => {});
 
-    worker.reply({ type: 'batch', id: 'B', meshes: [mesh(9)], progress: { loaded: 1, total: 1 } });
+    worker.reply({ type: 'batch', id: 'B', meshes: [mesh(9)], products: 1 });
     worker.reply({ type: 'parsed', id: 'B' });
     worker.reply({ type: 'parsed', id: 'A' });
 
@@ -234,5 +236,199 @@ describe('WorkerIfcParser — message multiplexing', () => {
     const errMsg: FromWorker = { type: 'error', reqId: 9, message: 'props failed' };
     worker.reply(errMsg);
     expect(sink).toHaveBeenCalledWith(errMsg);
+  });
+});
+
+describe('WorkerIfcParser — progress', () => {
+  it('adds up elements across batches and never reports more total than loaded', () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const onBatch = vi.fn();
+    void parser.parseStreaming(new ArrayBuffer(8), 'm', onBatch);
+    worker.reply({ type: 'listed', id: 'm', total: 2 });
+    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(1)], products: 2 });
+    worker.reply({ type: 'batch', id: 'm', meshes: [mesh(2)], products: 1 });
+    expect(onBatch.mock.calls.map((c) => c[1])).toEqual([
+      { loaded: 2, total: 2 },
+      { loaded: 3, total: 3 },
+    ]);
+  });
+});
+
+/** A parser with `n` helper stubs and a coordinator stub, and the stubs. */
+function sharedSetup(n: number) {
+  const main = new MockWorker();
+  const helpers: MockWorker[] = [];
+  const coordinators: MockWorker[] = [];
+  const parser = new WorkerIfcParser(main, {
+    helpersFor: () => n,
+    createHelper: () => {
+      const h = new MockWorker();
+      helpers.push(h);
+      return h;
+    },
+    createCoordinator: () => {
+      const c = new MockWorker();
+      coordinators.push(c);
+      return c;
+    },
+  });
+  return { main, helpers, coordinators, parser };
+}
+
+const posted = (w: MockWorker) => w.posted as unknown as Array<Record<string, unknown>>;
+
+describe('WorkerIfcParser — shared parse', () => {
+  const ids = Array.from({ length: 100 }, (_, i) => i + 1);
+
+  it('lets the main worker open first, then starts the coordinator and the helpers', () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const buffer = new ArrayBuffer(8);
+    void parser.parseStreaming(buffer, 'm', () => {});
+    expect(main.posted[0]).toMatchObject({ type: 'parse', id: 'm', shared: true });
+    // Helpers wait until the main worker has opened the model: opens in
+    // parallel slow each other, and the first geometry with them.
+    expect(helpers).toHaveLength(0);
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+
+    expect(coordinators).toHaveLength(1);
+    const plan = posted(coordinators[0])[0];
+    expect(plan).toMatchObject({ type: 'plan', ids });
+    expect(plan.ports).toHaveLength(3);
+    expect(coordinators[0].transfers[0]).toEqual(plan.ports);
+
+    const chunkPort = posted(main).find((m) => m.type === 'chunkPort');
+    expect(chunkPort).toMatchObject({ id: 'm' });
+    expect(helpers).toHaveLength(2);
+    for (const h of helpers) {
+      expect(h.posted[0]).toMatchObject({ type: 'share', id: 'm', buffer });
+      // The port is transferred; the file is copied (the main thread keeps it).
+      expect(h.transfers[0]).toEqual([posted(h)[0].port]);
+    }
+    expect(buffer.byteLength).toBe(8);
+  });
+
+  it('counts batches from every worker into one progress', () => {
+    const { main, helpers, parser } = sharedSetup(1);
+    const onBatch = vi.fn();
+    void parser.parseStreaming(new ArrayBuffer(8), 'm', onBatch);
+    main.reply({ type: 'listed', id: 'm', total: 10, ids });
+    main.reply({ type: 'batch', id: 'm', meshes: [mesh(1)], products: 3 });
+    helpers[0].reply({ type: 'batch', id: 'm', meshes: [mesh(2), mesh(3)], products: 4 });
+    expect(onBatch.mock.calls.map((c) => c[1])).toEqual([
+      { loaded: 3, total: 10 },
+      { loaded: 7, total: 10 },
+    ]);
+  });
+
+  it('resolves once the main worker and every helper are done, and ends the helpers and the coordinator', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    main.reply({ type: 'batch', id: 'm', meshes: [mesh(1), mesh(2)], products: 2 });
+    let settled = false;
+    void done.then(() => (settled = true));
+    main.reply({ type: 'parsed', id: 'm' });
+    helpers[0].reply({ type: 'shareDone', id: 'm' });
+    await Promise.resolve();
+    expect(settled).toBe(false); // helper 2 is still streaming
+    helpers[1].reply({ type: 'batch', id: 'm', meshes: [mesh(3)], products: 1 });
+    helpers[1].reply({ type: 'shareDone', id: 'm' });
+    await expect(done).resolves.toMatchObject({ id: 'm', meshCount: 3 });
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+    expect(coordinators[0].terminated).toBe(true);
+    expect(main.terminated).toBe(false); // it keeps the model for properties
+  });
+
+  it('a helper that dies hands its chunks back through the coordinator; the parse goes on', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    helpers[0].crash();
+    helpers[1].reply({ type: 'error', id: 'm', message: 'out of memory' });
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+    expect(posted(coordinators[0]).filter((m) => m.type === 'fail')).toEqual([
+      { type: 'fail', worker: 1 },
+      { type: 'fail', worker: 2 },
+    ]);
+    main.reply({ type: 'parsed', id: 'm' });
+    await expect(done).resolves.toMatchObject({ id: 'm' });
+  });
+
+  it('a failing main worker rejects the parse and ends the helpers and the coordinator', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    main.reply({ type: 'error', id: 'm', message: 'broken file' });
+    await expect(done).rejects.toThrow('broken file');
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+    expect(coordinators[0].terminated).toBe(true);
+  });
+
+  it('a crashed coordinator fails the parse rather than leaving it waiting', async () => {
+    const { main, coordinators, parser } = sharedSetup(1);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    coordinators[0].crash();
+    await expect(done).rejects.toThrow(/coordinator/);
+    // The main worker is told to stop, so its queue does not hang.
+    expect(posted(main)).toContainEqual({ type: 'stopShare', id: 'm' });
+  });
+
+  it('removing the model mid-load ends the helpers and stops the main worker before the close', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    parser.disposeModel('m');
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+    expect(coordinators[0].terminated).toBe(true);
+    const types = posted(main).map((m) => m.type);
+    expect(types.indexOf('stopShare')).toBeLessThan(types.indexOf('disposeModel'));
+    main.reply({ type: 'parsed', id: 'm' });
+    await expect(done).resolves.toMatchObject({ id: 'm' });
+  });
+
+  it('removing the model before it is listed starts no helpers and still frees the main worker', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    parser.disposeModel('m');
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    expect(helpers).toHaveLength(0);
+    expect(coordinators).toHaveLength(0);
+    // It still gets a port, one that says "no more" at once.
+    expect(posted(main).some((m) => m.type === 'chunkPort')).toBe(true);
+    main.reply({ type: 'parsed', id: 'm' });
+    await expect(done).resolves.toMatchObject({ id: 'm' });
+  });
+
+  it('merges the workers’ timings and says how many helpers there were', async () => {
+    const { main, helpers, parser } = sharedSetup(1);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    main.reply({ type: 'listed', id: 'm', total: 0, ids: [] });
+    helpers[0].reply({ type: 'shareDone', id: 'm', timings: { marks: { 'helper.opened': 5 }, spans: { 'helper.open': 3 } } });
+    main.reply({ type: 'parsed', id: 'm', timings: { marks: { 'worker.opened': 2 }, spans: { 'worker.open': 4 } } });
+    const model = await done;
+    expect(model.timings).toEqual({
+      marks: { 'worker.opened': 2, 'helper.opened': 5 },
+      spans: { 'worker.open': 4, 'helper.open': 3, helpers: 1 },
+    });
+  });
+
+  it('dispose terminates helpers and the coordinator as well as the main worker', () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(2);
+    void parser.parseStreaming(new ArrayBuffer(8), 'm', () => {}).catch(() => {});
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    parser.dispose();
+    expect(main.terminated).toBe(true);
+    expect(coordinators[0].terminated).toBe(true);
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+  });
+
+  it('a parse without helpers needs no coordinator', () => {
+    const { main, coordinators, parser } = sharedSetup(0);
+    void parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    expect(main.posted[0]).toEqual({ type: 'parse', id: 'm', buffer: expect.any(ArrayBuffer) });
+    main.reply({ type: 'listed', id: 'm', total: 3 });
+    expect(coordinators).toHaveLength(0);
   });
 });

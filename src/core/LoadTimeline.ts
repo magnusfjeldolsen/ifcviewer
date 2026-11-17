@@ -38,6 +38,18 @@ export interface WorkerTimings {
   spans: Record<string, number>;
 }
 
+/**
+ * Two workers' reports as one: the earlier of each mark (the first helper to
+ * open is when helping started), and spans added up (CPU time across them).
+ */
+export function mergeWorkerTimings(a: WorkerTimings, b: WorkerTimings): WorkerTimings {
+  const marks = { ...a.marks };
+  for (const [name, at] of Object.entries(b.marks)) marks[name] = Math.min(marks[name] ?? Infinity, at);
+  const spans = { ...a.spans };
+  for (const [name, ms] of Object.entries(b.spans)) spans[name] = (spans[name] ?? 0) + ms;
+  return { marks, spans };
+}
+
 /** Wall-clock now, comparable across threads. */
 export function wallNow(): number {
   return performance.timeOrigin + performance.now();
