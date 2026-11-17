@@ -13,12 +13,22 @@ export interface ClippingPlanes {
 }
 
 /**
- * Fraction of the viewing distance used as the near plane.
+ * Fraction of the distance to the geometry under the cursor that the near
+ * plane may take.
  *
  * Small enough that the plane never eats what you are looking at, large enough
  * that far/near stays modest at normal viewing distances.
  */
 const NEAR_FRACTION = 0.002;
+
+/**
+ * Fraction of the camera's clearance from the scene (see `clippingPlanesForView`)
+ * that the near plane may take. Nothing loaded is closer than the clearance,
+ * and an on-screen point that far away is at least `clearance * cos(θ)` deep,
+ * θ being its angle off the view axis: 0.76 at the corner of a 45° 16:9 view,
+ * 0.69 on a 21:9 one. A half leaves room for both.
+ */
+const CLEARANCE_FRACTION = 0.5;
 
 /**
  * Absolute floor on the near plane, in metres (the scene is in metres). 2 mm,
@@ -35,9 +45,9 @@ const MIN_NEAR = 0.002;
 const FAR_SLACK = 0.02;
 
 /**
- * How far the camera may back away from what it is zooming at, in scene
- * radii. Fit View sits about 3.5 radii out, so this leaves the model a small
- * but recognisable shape on screen.
+ * How far the camera may back away from the scene, in scene radii. Fit View
+ * sits about 3.5 radii out, so this leaves the model a small but recognisable
+ * shape on screen.
  */
 const MAX_VIEW_RADII = 20;
 
@@ -53,85 +63,97 @@ const MAX_VIEW_RADII = 20;
 const MAX_DEPTH_RATIO = 200_000;
 
 /**
- * Near and far planes for a camera `distance` from what it is looking at, in a
- * scene of the given radius.
+ * Near and far planes from a wanted near distance and the far plane.
  *
- * Recomputed as the camera moves rather than fixed at the last fit. A fixed
- * near plane has to be chosen for the whole-model view and then blocks every
- * close-up: on the Snowdon fixture it sat at 1.13 m, and the dolly guard
- * (`near * MIN_FOCUS_NEAR_PLANES`) refused to bring the camera closer than
- * 2.26 m to any surface — measured, and 300 further wheel notches moved it
- * 0.000 m. At that range one millimetre is under a pixel, which is why a
- * millimetre reading could be displayed but never earned.
+ * The near plane is never below `MIN_NEAR`, and never so small that far/near
+ * passes the depth-precision cap. The cap is applied against THIS far, so the
+ * guarantee holds however far apart the two drift; one short of the cap, so
+ * rounding in the division can never land the ratio a hair above it.
+ */
+function boundedPlanes(wantedNear: number, far: number): ClippingPlanes {
+  const near = Math.max(wantedNear, MIN_NEAR, far / (MAX_DEPTH_RATIO - 1));
+  return { near, far };
+}
+
+/**
+ * Far plane for a camera `centreDistance` from the centre of a scene of radius
+ * `sceneRadius`: the farthest point the scene can reach, plus a sliver.
  *
- * Deriving it from the live distance instead means the near plane shrinks as
- * you approach, so the guard asymptotes towards the surface rather than
- * stopping short of it, while far/near stays bounded by construction.
- *
- * `focusDistance` is how far the nearest thing worth seeing is — normally the
- * geometry under the cursor — and sizes the near plane. `centreDistance` is
- * how far the centre of the scene's bounding sphere is, and sizes the far
- * plane: nothing in the scene can be farther than `centreDistance +
- * sceneRadius`, whatever the camera is looking at. It defaults to
- * `focusDistance` for callers looking at the centre.
- *
- * The far plane must come from the scene and never from the view anchor
+ * Far must come from the scene and never from the view anchor
  * (`controls.target`). The anchor is a point on the camera's forward axis that
  * dolly and orbit carry along with the camera, so its distance stays put while
  * the model recedes; sizing far from it cut the back off the model as soon as
  * you zoomed out (#87).
  */
-export function computeClippingPlanes(
-  focusDistance: number,
-  sceneRadius: number,
-  centreDistance: number = focusDistance,
-): ClippingPlanes {
-  const focus = Math.max(focusDistance, 0);
-  const safeRadius = Math.max(sceneRadius, MIN_NEAR);
-
-  // The farthest point of the scene, plus a sliver. Backing the camera up to
-  // a wall must not clip away the model behind it, and neither must zooming
-  // out with the view anchor left behind.
-  const far = (Math.max(centreDistance, 0) + safeRadius) * (1 + FAR_SLACK);
-
-  // The ratio cap is applied against THIS far, so the guarantee holds however
-  // far apart the two distances drift. One short of the cap, so rounding in
-  // the division can never land the ratio a hair above it.
-  const near = Math.max(focus * NEAR_FRACTION, MIN_NEAR, far / (MAX_DEPTH_RATIO - 1));
-
-  return { near, far };
+function farPlane(centreDistance: number, sceneRadius: number): number {
+  return (Math.max(centreDistance, 0) + Math.max(sceneRadius, MIN_NEAR)) * (1 + FAR_SLACK);
 }
 
 /** What the clipping planes are computed from, read off the live view. */
 export interface ClippingView {
   /** Camera position. */
   position: THREE.Vector3;
-  /** The view anchor (`controls.target`), a point on the forward axis. */
-  anchor: THREE.Vector3;
-  /** Distance to the geometry last found under the cursor; null if none. */
+  /**
+   * Distance to the geometry under the cursor, from the last raycast; null
+   * when it was over empty space.
+   */
   hitDistance: number | null;
-  /** Bounds of everything loaded, hidden or not. */
-  scene: THREE.Sphere;
+  /**
+   * Everything the planes must keep: all of the loaded model, hidden parts
+   * included, and anything drawn outside it that has to stay visible.
+   */
+  scene: THREE.Box3;
+  /**
+   * Further things the near plane must not cut, but which do not size the far
+   * plane: the ground grid, which can lie far from a georeferenced model.
+   */
+  clearOf?: readonly THREE.Box3[];
 }
 
 /**
  * Near and far planes for the live view.
  *
- * Near follows the nearer of the cursor hit and the anchor: whatever is under
- * the cursor is what the user is about to run into, and the anchor covers the
- * case where they are pointing at empty space. Erring small only spends depth
- * precision, and `computeClippingPlanes` caps how much it can spend. Far
- * follows the scene alone, so where the anchor happens to sit can never cut
- * the model.
+ * Far follows the scene alone: nothing in it is farther than the distance to
+ * the centre of its bounding sphere plus its radius, whatever the camera is
+ * looking at.
+ *
+ * Near follows the camera's *clearance*: its distance to the scene's bounding
+ * box, which nothing loaded can be closer than. Outside the model that keeps
+ * near well clear of everything, with plenty of depth precision for a view of
+ * the whole model. As the camera closes in, the clearance shrinks with it, and
+ * inside the box it is zero, so near drops to its floor there — the camera can
+ * be millimetres from anything without a cut.
+ *
+ * The geometry under the cursor can only make near *smaller*, never larger.
+ * Near used to follow the nearer of the cursor hit and the view anchor, and
+ * the anchor rides along ~178 m ahead of the camera after a Fit; so after
+ * close-up work, a click on empty sky put near back at 0.35 m and cut the slab
+ * 0.28 m in front of the camera. Nothing in view can be cut now merely because
+ * the cursor moved. The hit still matters outside the model: it lets the dolly
+ * guard (`near * 2`) approach the surface under the cursor rather than
+ * stalling at the clearance.
+ *
+ * Inside the box the floor is what bounds depth precision: far/near stays
+ * under `MAX_DEPTH_RATIO`.
  */
 export function clippingPlanesForView(view: ClippingView): ClippingPlanes {
-  const toAnchor = view.position.distanceTo(view.anchor);
-  const focus = Math.min(toAnchor, view.hitDistance ?? Infinity);
-  const toCentre = view.position.distanceTo(view.scene.center);
-  return computeClippingPlanes(focus, view.scene.radius, toCentre);
+  const { position, scene } = view;
+  const sphere = scene.isEmpty() ? null : scene.getBoundingSphere(scratchSphere);
+  const far = sphere ? farPlane(position.distanceTo(sphere.center), sphere.radius) : farPlane(0, 1);
+
+  let clearance = scene.isEmpty() ? Infinity : scene.distanceToPoint(position);
+  for (const box of view.clearOf ?? []) {
+    if (!box.isEmpty()) clearance = Math.min(clearance, box.distanceToPoint(position));
+  }
+  const fromClearance = Number.isFinite(clearance) ? clearance * CLEARANCE_FRACTION : 0;
+  const fromHit = view.hitDistance === null ? Infinity : Math.max(view.hitDistance, 0) * NEAR_FRACTION;
+
+  return boundedPlanes(Math.min(fromClearance, fromHit), far);
 }
 
-/** How far the camera may back away from what it zooms at, for a scene of this radius. */
+const scratchSphere = new THREE.Sphere();
+
+/** How far the camera may back away from the centre of a scene of this radius. */
 export function maxViewDistance(sceneRadius: number): number {
   return Math.max(sceneRadius, MIN_NEAR) * MAX_VIEW_RADII;
 }
@@ -154,11 +176,9 @@ export function computeFitPosition(box: THREE.Box3): FitResult | null {
     center.z + distance,
   );
 
-  // The camera sits further from the centre than `distance`: the offset is
-  // applied on all three axes. Use the real separation so the planes the fit
-  // installs match the ones the render loop recomputes a frame later.
-  const eyeDistance = position.distanceTo(center);
-  const { near, far } = computeClippingPlanes(eyeDistance, sceneRadius(box));
+  // The same planes the render loop recomputes a frame later, so the fit
+  // and the loop never disagree.
+  const { near, far } = clippingPlanesForView({ position, hitDistance: null, scene: box });
 
   return { position, center, near, far };
 }
@@ -167,10 +187,4 @@ export function computeFitPosition(box: THREE.Box3): FitResult | null {
 export function sceneRadius(box: THREE.Box3): number {
   if (box.isEmpty()) return 1;
   return box.getSize(new THREE.Vector3()).length() / 2;
-}
-
-/** The sphere enclosing `box`, centred on it; null for an empty box. */
-export function sceneSphere(box: THREE.Box3): THREE.Sphere | null {
-  if (box.isEmpty()) return null;
-  return new THREE.Sphere(box.getCenter(new THREE.Vector3()), sceneRadius(box));
 }

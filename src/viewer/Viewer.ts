@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { clippingPlanesForView, computeFitPosition, maxViewDistance, sceneSphere } from './cameraUtils';
+import { clippingPlanesForView, computeFitPosition, maxViewDistance } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -23,11 +23,14 @@ const ROTATE_SPEED = 1;
  */
 const WHEEL_ZOOM_STEP = 0.9;
 
+/** Side of the square ground grid, in metres, centred on the origin. */
+const GRID_SIZE = 50;
+
 /**
  * Keep the camera this many near-planes away from whatever it is zooming at.
  *
  * Only a sane stop now that the near plane tracks the viewing distance
- * (`computeClippingPlanes`): the limit shrinks as the camera approaches, so a
+ * (`clippingPlanesForView`): the limit shrinks as the camera approaches, so a
  * dolly asymptotes towards a surface instead of hitting the wall a fixed near
  * plane used to put 2.26 m in front of it.
  */
@@ -97,12 +100,18 @@ export class Viewer {
   /** Last-resort rotation centre: the centre of the last fit. */
   private defaultTarget = new THREE.Vector3();
 
+  /** The ground grid's extent. The near plane must not cut it either. */
+  private readonly gridBox = new THREE.Box3(
+    new THREE.Vector3(-GRID_SIZE / 2, 0, -GRID_SIZE / 2),
+    new THREE.Vector3(GRID_SIZE / 2, 0, GRID_SIZE / 2),
+  );
+
   /**
-   * Bounds of everything loaded, hidden or not. The far plane is sized from
-   * the camera's distance to this, so the whole model fits between the planes
-   * wherever the camera is. A unit sphere at the origin until something loads.
+   * Bounds of everything loaded, hidden or not. The clipping planes are sized
+   * from the camera's distance to this, so the whole model fits between them
+   * wherever the camera is. Until something loads the grid is all there is.
    */
-  private sceneBounds = new THREE.Sphere(new THREE.Vector3(), 1);
+  private sceneBox = this.gridBox.clone();
 
   /** Where `refreshSceneBounds` reads the loaded extent from. Wired by App. */
   private sceneBoundsProvider: (() => THREE.Box3) | null = null;
@@ -111,14 +120,11 @@ export class Viewer {
    * Distance to the geometry last found under the cursor, or null when the
    * cursor was over empty space.
    *
-   * The near plane follows this as well as the view anchor, because the two
-   * come apart exactly where it matters. `controls.target` is a free-floating
-   * anchor on the camera's forward axis: dollying toward a wall moves camera
-   * and anchor together, so the anchor can still be 176 m away while the wall
-   * is 0.7 m away. Sizing the near plane off the anchor alone put the dolly
-   * guard 0.7 m in front of the wall — better than the 2.26 m it used to be,
-   * and still nowhere near millimetre range. Recorded by `raycastAt`, which
-   * every navigation gesture already calls.
+   * It can only pull the near plane in, never push it out (see
+   * `clippingPlanesForView`): outside the model it lets the dolly guard reach
+   * the surface under the cursor instead of stalling at the camera's
+   * clearance, and a miss merely stops it helping. Recorded by `raycastAt`,
+   * which every navigation gesture already calls.
    */
   private lastHitDistance: number | null = null;
 
@@ -246,9 +252,8 @@ export class Viewer {
    */
   refreshSceneBounds(fallback?: THREE.Box3): void {
     const box = this.sceneBoundsProvider?.() ?? fallback;
-    const sphere = box ? sceneSphere(box) : null;
-    if (!sphere) return;
-    this.sceneBounds.copy(sphere);
+    if (!box || box.isEmpty()) return;
+    this.sceneBox.copy(box);
     this.needsRender = true;
   }
 
@@ -448,7 +453,7 @@ export class Viewer {
   }
 
   private setupGrid(): void {
-    const grid = new THREE.GridHelper(50, 50);
+    const grid = new THREE.GridHelper(GRID_SIZE, GRID_SIZE);
     this.scene.add(grid);
   }
 
@@ -668,7 +673,7 @@ export class Viewer {
         minDistance: this.camera.near * MIN_FOCUS_NEAR_PLANES,
         // From the scene centre, not the focus: how far out you can get should
         // not depend on what the cursor happens to be over.
-        limit: new THREE.Sphere(this.sceneBounds.center, maxViewDistance(this.sceneBounds.radius)),
+        limit: this.zoomOutLimit(),
       }),
     );
   }
@@ -706,19 +711,26 @@ export class Viewer {
     this.needsRender = true;
   }
 
+  /** The sphere a zoom-out may not leave: `maxViewDistance` about the scene centre. */
+  private zoomOutLimit(): THREE.Sphere {
+    const sphere = this.sceneBox.getBoundingSphere(new THREE.Sphere());
+    sphere.radius = maxViewDistance(sphere.radius);
+    return sphere;
+  }
+
   /**
    * Re-derive the clipping planes from where the camera actually is.
    *
    * The near plane used to be fixed at fit time, which is what made close-up
-   * work impossible — see `computeClippingPlanes`. Skips the projection-matrix
+   * work impossible — see `clippingPlanesForView`. Skips the projection-matrix
    * rebuild when nothing moved enough to matter.
    */
   private updateClipping(): void {
     const { near, far } = clippingPlanesForView({
       position: this.camera.position,
-      anchor: this.controls.target,
       hitDistance: this.lastHitDistance,
-      scene: this.sceneBounds,
+      scene: this.sceneBox,
+      clearOf: [this.gridBox],
     });
     if (near === this.camera.near && far === this.camera.far) return;
     this.camera.near = near;
