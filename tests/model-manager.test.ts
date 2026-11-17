@@ -716,6 +716,21 @@ describe('ModelBatch — per-element state upload', () => {
   });
 });
 
+describe('ModelBatch — see-through overlays', () => {
+  it('clearing the last see-through override frees only the overlay\'s own index, never the chunk\'s vertex buffers', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1, 2, 3])]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setOpacity('m', [2], 0.25);
+    const overlay = batch.group.children.find((o) => o.userData.isPieceOverlay) as THREE.Mesh;
+    const freed: string[][] = [];
+    overlay.geometry.addEventListener('dispose', (e) => freed.push(Object.keys((e.target as THREE.BufferGeometry).attributes)));
+    modelManager.setOpacity('m', [2], null);
+    expect(batch.stats().overlays).toBe(0);
+    // The renderer frees every attribute a disposed geometry lists.
+    expect(freed).toEqual([[]]);
+  });
+});
+
 describe('ModelBatch — freeing memory', () => {
   it('removeModel disposes every geometry and material', () => {
     const { modelManager } = makeModelManager([

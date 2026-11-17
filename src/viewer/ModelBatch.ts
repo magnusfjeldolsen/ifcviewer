@@ -1199,7 +1199,8 @@ export class ModelBatch {
     if (total === 0) {
       if (chunk.overlay) {
         this.group.remove(chunk.overlay);
-        chunk.overlay.geometry.dispose();
+        // Not `dispose()`: that would free the chunk's own vertex buffers.
+        disposeIndexOnly(chunk.overlay.geometry);
         chunk.overlay = null;
       }
       return;
