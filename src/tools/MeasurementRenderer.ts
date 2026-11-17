@@ -157,7 +157,7 @@ export class MeasurementRenderer {
 
   /**
    * Mark a placed first point while the second is being chosen. Keeps its
-   * glyph, because the first pick is the reference and what it caught
+   * glyph, because what it caught — a surface or not — is half of what
    * decides what the finished measurement will mean.
    */
   showPendingStart(position: THREE.Vector3, end?: MeasurementEnd, axis?: THREE.Vector3): void {
@@ -172,17 +172,28 @@ export class MeasurementRenderer {
     this.pendingStartMarker = null;
   }
 
-  /** The dashed line and live distance between a placed point and the cursor. */
-  showPreview(start: THREE.Vector3, end: THREE.Vector3, anchor?: THREE.Vector3): void {
+  /**
+   * The dashed line and live distance of the measurement the next click would
+   * make. `anchorAt` names the end the surface plate belongs to: the start
+   * when the surface was picked first, the end (under the cursor) when it is
+   * the one being hovered.
+   */
+  showPreview(
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    anchor?: THREE.Vector3,
+    anchorAt: 'start' | 'end' = 'start',
+  ): void {
     const distance = start.distanceTo(end);
 
     // The extension line has to follow the cursor too, or the plate appears
     // detached from the measurement right up to the moment of the click.
     if (anchor) {
+      const foot = anchorAt === 'end' ? end : start;
       if (this.previewExtension) {
-        this.setLinePoints(this.previewExtension, anchor, start);
+        this.setLinePoints(this.previewExtension, anchor, foot);
       } else {
-        this.previewExtension = this.createExtensionLine(anchor, start);
+        this.previewExtension = this.createExtensionLine(anchor, foot);
         this.deps.scene.add(this.previewExtension);
       }
     } else if (this.previewExtension) {
@@ -256,20 +267,25 @@ export class MeasurementRenderer {
     // so the square glyph can be oriented from it without storing a plane.
     const axis = view.end.clone().sub(view.start);
 
-    if (view.anchor) {
-      // The surface marker stays where it was put, like a plate held against
-      // a wall; the measurement strikes the plane square from the target,
-      // which lands at the foot instead. A thin dashed line joins the two so
-      // it is obvious they lie on the same plane — the extension line of an
-      // ordinary dimension.
-      group.add(this.createPointMarker(view.anchor, START_MARKER_COLOR, view.startSnap, axis));
-      group.add(this.createPointMarker(view.start, START_MARKER_COLOR, PLAIN_END, axis));
-      group.add(this.createExtensionLine(view.anchor, view.start));
-    } else {
-      group.add(this.createPointMarker(view.start, START_MARKER_COLOR, view.startSnap, axis));
+    // The surface marker stays where it was put, like a plate held against a
+    // wall; the measurement strikes the plane square from the target, which
+    // lands at the foot instead. A thin dashed line joins the two so it is
+    // obvious they lie on the same plane — the extension line of an ordinary
+    // dimension. The plate belongs to whichever end picked the surface.
+    const ends = [
+      { at: 'start', point: view.start, color: START_MARKER_COLOR, snap: view.startSnap },
+      { at: 'end', point: view.end, color: END_MARKER_COLOR, snap: view.endSnap },
+    ] as const;
+    const plateAt = view.anchor ? (view.anchorAt ?? 'start') : null;
+    for (const end of ends) {
+      if (view.anchor && plateAt === end.at) {
+        group.add(this.createPointMarker(view.anchor, end.color, end.snap, axis));
+        group.add(this.createPointMarker(end.point, end.color, PLAIN_END, axis));
+        group.add(this.createExtensionLine(view.anchor, end.point));
+      } else {
+        group.add(this.createPointMarker(end.point, end.color, end.snap, axis));
+      }
     }
-
-    group.add(this.createPointMarker(view.end, END_MARKER_COLOR, view.endSnap, axis));
 
     const line = this.createLine(view.start, view.end, LINE_COLOR, LINE_WIDTH_PX, false);
     group.add(line);

@@ -129,4 +129,24 @@ describe('the plate position survives a session', () => {
     const restored = new MeasurementStore();
     expect(restored.deserialize(wire, new Set(['m1']))[0].anchor).toBeUndefined();
   });
+
+  // Issue #93: a surface picked second puts its plate at the END.
+  it('round-trips which end the plate belongs to', () => {
+    const store = new MeasurementStore();
+    store.add(A, B, ['m1'], { mode: 'orthogonal', anchor: new THREE.Vector3(7, 8, 9), anchorAt: 'end' });
+    const wire = JSON.parse(JSON.stringify(store.serialize()));
+
+    const restored = new MeasurementStore();
+    expect(restored.deserialize(wire, new Set(['m1']))[0].anchorAt).toBe('end');
+  });
+
+  // Sessions saved before #93 only ever had a plate at the start.
+  it('reads a plate with no end recorded as the start’s', () => {
+    const wire = [
+      { id: 'x', start: [0, 0, 0], end: [1, 0, 0], modelIds: ['m1'], mode: 'orthogonal', anchor: [5, 0, 0] },
+    ];
+
+    const restored = new MeasurementStore();
+    expect(restored.deserialize(wire as never, new Set(['m1']))[0].anchorAt).toBe('start');
+  });
 });

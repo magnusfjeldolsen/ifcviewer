@@ -171,15 +171,16 @@ describe('resolveMeasurement', () => {
     }
   });
 
-  // Clicking in the other order asks a different question: a surface picked
-  // second is only a point that happens to lie on one.
-  it('stays direct when the surface is picked second', () => {
+  // Issue #93: the owner's rule is that a surface at either end makes the
+  // measurement perpendicular to it — the column first, then the wall, asks
+  // the same question as the wall first.
+  it('goes orthogonal when the second end is a surface', () => {
     const result = resolveMeasurement(point(2.5, 0, 9), onPlane(0, 0, 0, acrossX()));
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.mode).toBe('direct');
-      expect(result.distance).toBeCloseTo(Math.hypot(2.5, 9), 6);
+      expect(result.mode).toBe('orthogonal');
+      expect(result.distance).toBeCloseTo(2.5, 6);
     }
   });
 
@@ -214,11 +215,13 @@ describe('resolveMeasurement', () => {
   });
 });
 
-describe('the first pick is the reference', () => {
+describe('a surface at either end makes the measurement perpendicular to it', () => {
   const up = new THREE.Vector3(0, 1, 0);
+  /** Normal of a roof pitched 30° about z — neither horizontal nor vertical. */
+  const pitched = () => new THREE.Vector3(-Math.sin(Math.PI / 6), Math.cos(Math.PI / 6), 0);
+  const angleToDeg = (v: THREE.Vector3, n: THREE.Vector3) =>
+    (Math.acos(Math.min(1, Math.abs(v.clone().normalize().dot(n)))) * 180) / Math.PI;
 
-  // A surface picked FIRST sets the reference, and the measurement runs
-  // perpendicular to it.
   it('measures perpendicular when the surface came first', () => {
     const result = resolveMeasurement(
       { position: new THREE.Vector3(5, 0, 5), planeNormal: up },
@@ -236,8 +239,7 @@ describe('the first pick is the reference', () => {
     }
   });
 
-  // The same surface picked SECOND is just a point on a surface.
-  it('measures straight-line when the surface came second', () => {
+  it('measures perpendicular when the surface came second', () => {
     const result = resolveMeasurement(
       { position: new THREE.Vector3(0, 3, 0) },
       { position: new THREE.Vector3(4, 0, 0), planeNormal: up },
@@ -245,12 +247,17 @@ describe('the first pick is the reference', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.mode).toBe('direct');
-      expect(result.distance).toBeCloseTo(5, 6);
+      expect(result.mode).toBe('orthogonal');
+      expect(result.distance).toBeCloseTo(3, 6);
+      // The point stays put; the measurement lands on the plane beneath it.
+      expect(result.from.toArray()).toEqual([0, 3, 0]);
+      expect(result.to.x).toBeCloseTo(0, 6);
+      expect(result.to.y).toBeCloseTo(0, 6);
+      expect(result.to.z).toBeCloseTo(0, 6);
     }
   });
 
-  it('gives the two orders different answers, which is the whole point', () => {
+  it('gives a point and a surface the same answer in either order', () => {
     const surface = { position: new THREE.Vector3(0, 0, 0), planeNormal: up };
     const point = { position: new THREE.Vector3(4, 3, 0) };
 
@@ -258,7 +265,46 @@ describe('the first pick is the reference', () => {
     const pointFirst = resolveMeasurement(point, surface);
 
     expect(surfaceFirst.ok && surfaceFirst.distance).toBeCloseTo(3, 6);
-    expect(pointFirst.ok && pointFirst.distance).toBeCloseTo(5, 6);
+    expect(pointFirst.ok && pointFirst.distance).toBeCloseTo(3, 6);
+  });
+
+  it('runs along a pitched surface’s normal, not a world axis, whichever end it is', () => {
+    const roof = { position: new THREE.Vector3(1, 1, 1), planeNormal: pitched() };
+    const ridge = { position: new THREE.Vector3(3, 6, -2) };
+
+    for (const result of [resolveMeasurement(roof, ridge), resolveMeasurement(ridge, roof)]) {
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(angleToDeg(result.to.clone().sub(result.from), pitched())).toBeLessThan(1e-6);
+      }
+    }
+  });
+
+  it('measures two surfaces along the second one’s normal', () => {
+    // Inside the parallel tolerance but not exactly parallel, so which normal
+    // was used shows in the direction.
+    const slightly = new THREE.Vector3(Math.sin(0.01), Math.cos(0.01), 0).normalize();
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 0, 0), planeNormal: up },
+      { position: new THREE.Vector3(5, 3, 0), planeNormal: slightly },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(angleToDeg(result.to.clone().sub(result.from), slightly)).toBeLessThan(1e-6);
+      expect(angleToDeg(result.to.clone().sub(result.from), up)).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('keeps `from` with the first pick and `to` with the second, in every case', () => {
+    const surface = { position: new THREE.Vector3(9, 0, 9), planeNormal: up };
+    const point = { position: new THREE.Vector3(1, 2, 3) };
+
+    const pointFirst = resolveMeasurement(point, surface);
+    const surfaceFirst = resolveMeasurement(surface, point);
+
+    expect(pointFirst.ok && pointFirst.from.toArray()).toEqual([1, 2, 3]);
+    expect(surfaceFirst.ok && surfaceFirst.to.toArray()).toEqual([1, 2, 3]);
   });
 
   it('starts the drawn segment on the reference surface', () => {
@@ -293,6 +339,24 @@ describe('the plate stays where it was put', () => {
       // ...but the surface marker belongs where the user clicked.
       expect(result.anchor?.x).toBeCloseTo(5, 6);
       expect(result.anchor?.z).toBeCloseTo(5, 6);
+      expect(result.anchorAt).toBe('start');
+    }
+  });
+
+  // The surface picked second keeps its plate where it was clicked too; the
+  // plate is then the END of the measurement.
+  it('anchors the end when the surface was picked second', () => {
+    const result = resolveMeasurement(
+      { position: new THREE.Vector3(0, 3, 0) },
+      { position: new THREE.Vector3(5, 0, 5), planeNormal: up },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.to.x).toBeCloseTo(0, 6);
+      expect(result.to.z).toBeCloseTo(0, 6);
+      expect(result.anchor?.toArray()).toEqual([5, 0, 5]);
+      expect(result.anchorAt).toBe('end');
     }
   });
 

@@ -9,12 +9,13 @@ const MOUSE_CONTROLS = [
 
 /**
  * Keys the measurement and position-marker tools own — both place points
- * through the same `SnapCursor`, so the snap keys are the same in each. Snapping is the reason both exist: the
- * first pick of a measurement decides what it means, so being able to choose
- * what the cursor caught — and to stop it catching anything — is not a
- * nicety.
+ * through the same `SnapCursor`, so the snap keys are the same in each. Snapping is the reason both exist: a
+ * surface at either end of a measurement makes it perpendicular to that
+ * surface, so being able to choose what the cursor caught — and to stop it
+ * catching anything — is not a nicety.
  */
 const MEASUREMENT_KEYS = [
+  { input: 'Click a surface', action: 'Measure square to it, at either end (two surfaces: square to the second)' },
   { input: 'Tab', action: 'Cycle what the cursor snaps to (corner, edge, surface, point)' },
   { input: 'S', action: 'Snapping on / off' },
   { input: '1 / 2 / 3', action: 'Corners / edges / surfaces on or off' },
