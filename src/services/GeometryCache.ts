@@ -37,8 +37,14 @@ export const CACHE_QUOTA_SHARE = 0.25;
 /** Parts being read while the one before them is appended. */
 const READ_AHEAD = 3;
 
-/** Parts with no index record this much older than now are leftovers of a failed load. */
-export const ORPHAN_AGE_MS = 60 * 60 * 1000;
+/**
+ * Part files with no index record, from a load that started this long ago
+ * and is not running in this tab, are leftovers of a failed or abandoned
+ * load. A load still writing in another tab holds its files open, and the
+ * file system refuses to remove them; this margin covers the seconds between
+ * its writers closing their files and its index record being written.
+ */
+export const ORPHAN_AGE_MS = 2 * 60 * 1000;
 
 /** The index operations this module needs (SessionStore; tests pass a fake). */
 export type GeometryIndex = Pick<
@@ -92,9 +98,14 @@ export class GeometryCache {
     private now: () => number = Date.now,
   ) {}
 
-  /** A key for the parts of a new load. */
+  /** Keys of loads in this tab whose parts are not yet committed or discarded. */
+  private active = new Set<string>();
+
+  /** A key for the parts of a new load. Its files are never swept until `commit` or `discard`. */
   newKey(id: string): string {
-    return newCacheKey(id, this.now());
+    const key = newCacheKey(id, this.now());
+    this.active.add(key);
+    return key;
   }
 
   /**
@@ -103,6 +114,7 @@ export class GeometryCache {
    * instead. Never throws: a missed cache write is never user-visible.
    */
   async commit(hash: string, key: string, report: CacheWriteReport): Promise<void> {
+    this.active.delete(key);
     try {
       const cap = await this.capBytes();
       if (!report.ok || report.parts === 0 || report.bytes > cap) {
@@ -131,6 +143,7 @@ export class GeometryCache {
 
   /** Drop the parts of a load that will not become an entry. */
   async discard(key: string): Promise<void> {
+    this.active.delete(key);
     try {
       await this.files.remove(key);
     } catch (err) {
@@ -227,7 +240,7 @@ export class GeometryCache {
       const live = new Set((await this.index.getAllGeometryIndex()).map((e) => e.key));
       const now = this.now();
       for (const key of await this.files.keys()) {
-        if (live.has(key)) continue;
+        if (live.has(key) || this.active.has(key)) continue;
         const at = cacheKeyTime(key);
         if (Number.isFinite(at) && now - at < ORPHAN_AGE_MS) continue;
         await this.files.remove(key);

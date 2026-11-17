@@ -190,11 +190,23 @@ describe('GeometryCache', () => {
     expect(files.dirs.has(keys[0])).toBe(false);
   });
 
+  it('never sweeps the files of a load still running in this tab, however long it takes', async () => {
+    const { files, cache, advance } = setup();
+    const running = cache.newKey('running');
+    writeLoad(files, running, [[[mesh(1)]]]);
+    advance(ORPHAN_AGE_MS * 10);
+    await cache.sweep();
+    expect(files.dirs.has(running)).toBe(true);
+    await cache.discard(running); // the load failed
+    expect(files.dirs.has(running)).toBe(false);
+  });
+
   it('sweeps files no entry points at, once they are old enough not to be a load in progress', async () => {
     const { files, cache, advance } = setup();
     const live = cache.newKey('live');
     await cache.commit('h', live, writeLoad(files, live, [[[mesh(1)]]]));
-    const orphan = cache.newKey('failed');
+    // Written by a load in another tab (or a previous session): no key here.
+    const orphan = new GeometryCache(new FakeIndex(), files, async () => GB, () => 1_000_000).newKey('failed');
     writeLoad(files, orphan, [[[mesh(2)]]]);
     writeLoad(files, 'not-ours', [[[mesh(3)]]]);
 

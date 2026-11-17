@@ -1106,6 +1106,8 @@ export class App {
     // partially-built model if the parse fails. Null before the stream
     // starts and once it completes.
     let streamId: string | null = null;
+    // Set once the workers may be writing cache parts for this load.
+    let cacheKey: string | undefined;
     const timeline = new LoadTimeline(file.readStartedAt ?? performance.now());
     if (file.readEndedAt !== undefined) timeline.mark('main.read', file.readEndedAt);
     timeline.mark('main.handled');
@@ -1115,6 +1117,12 @@ export class App {
         if (existing.name === file.name) {
           this.setStatus(`${file.name} is already loaded`);
           setTimeout(() => this.setStatus(''), 3000);
+          // Settled, as a load that did not happen: whoever waits for this
+          // load (the `?stats` surface, the bench) hears about it.
+          this.emitLoadSettled({
+            name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false,
+            error: 'already loaded',
+          });
           return;
         }
       }
@@ -1137,7 +1145,7 @@ export class App {
       let framed = false;
       // The workers store the geometry in the cache as they stream it, when
       // it will be kept (memory on); see `commitCache`.
-      const cacheKey = this.cacheKeyFor(id);
+      cacheKey = this.cacheKeyFor(id);
       const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
         timeline.mark('main.firstBatch');
         timeline.time('main.append', () => this.modelManager.appendMeshes(id, batch));
@@ -1158,6 +1166,7 @@ export class App {
       timeline.time('main.finish', () => this.modelManager.endStream(id));
       streamId = null;
       this.commitCache(cacheKey, hashPromise, parsed.cache);
+      cacheKey = undefined; // commitCache owns it now
       const hash = await hashPromise;
       timeline.mark('main.hashed');
 
@@ -1203,6 +1212,8 @@ export class App {
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
+      // Whatever parts the workers wrote will never be an entry.
+      if (cacheKey) void this.geometryCache.discard(cacheKey);
       if (streamId) {
         this.modelManager.removeModel(streamId);
         this.sceneBounds.removeModel(streamId);
