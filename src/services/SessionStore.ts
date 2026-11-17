@@ -78,6 +78,11 @@ const TOGGLE_KEY = 'ifcviewer:memoryEnabled';
 const SESSION_KEY = 'ifcviewer:session';
 const DB_NAME = 'ifcviewer';
 const DB_VERSION = 4;
+
+/** How long to wait for the database before going on without it. */
+export const STORAGE_OPEN_TIMEOUT_MS = 4000;
+
+const BLOCKED_MESSAGE = 'storage is blocked by another tab of the viewer';
 const MODELS_STORE = 'models';
 /** v3's single-record geometry cache. Dropped by the v4 upgrade. */
 const LEGACY_GEOMETRY_CACHE_STORE = 'geometry-cache';
@@ -166,10 +171,66 @@ export class SessionStore {
 
   // ── IndexedDB file storage ───────────────────────────────
 
+  /**
+   * The database, or a rejection — never a wait without end. Opening can be
+   * **blocked**: a tab still running an older build holds the database at its
+   * version and has no reason to let go, so the upgrade this build needs never
+   * starts. Then every caller fails at once (models are not kept, the cache is
+   * not used, the session is not restored) and `onStorageBlocked` listeners
+   * are told, so the user can be asked to close the other tab. The open
+   * request stays pending; when the other tab goes, it completes and storage
+   * works again. A database that answers nothing at all is given up on after
+   * `STORAGE_OPEN_TIMEOUT_MS` for the same reason.
+   */
   private openDB(): Promise<IDBDatabase> {
+    if (this.db) return Promise.resolve(this.db);
+    if (this.blocked) return Promise.reject(new Error(BLOCKED_MESSAGE));
+    const opening = this.startOpen();
+    return new Promise<IDBDatabase>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('storage did not open in time')), STORAGE_OPEN_TIMEOUT_MS);
+      this.blockedWaiters.push(() => {
+        clearTimeout(timer);
+        reject(new Error(BLOCKED_MESSAGE));
+      });
+      opening.then(
+        (db) => {
+          clearTimeout(timer);
+          resolve(db);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  private db: IDBDatabase | null = null;
+  private blocked = false;
+  private blockedWaiters: Array<() => void> = [];
+  private blockedListeners: Array<() => void> = [];
+
+  /** Called when another tab blocks the database (see `openDB`). */
+  onStorageBlocked(listener: () => void): void {
+    this.blockedListeners.push(listener);
+  }
+
+  /** Whether another tab is blocking the database right now. */
+  isStorageBlocked(): boolean {
+    return this.blocked;
+  }
+
+  private startOpen(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
     this.dbPromise = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onblocked = () => {
+        this.blocked = true;
+        const waiters = this.blockedWaiters;
+        this.blockedWaiters = [];
+        for (const w of waiters) w();
+        for (const l of this.blockedListeners) l();
+      };
       req.onupgradeneeded = (event) => {
         const db = req.result;
         const oldVersion = event.oldVersion;
@@ -201,19 +262,29 @@ export class SessionStore {
       };
       req.onsuccess = () => {
         const db = req.result;
+        this.blocked = false;
+        this.blockedWaiters = [];
         // Another tab (a newer build) wants to upgrade: let it.
         db.onversionchange = () => {
           db.close();
+          this.db = null;
           this.dbPromise = null;
+        };
+        const ready = (): void => {
+          this.db = db;
+          resolve(db);
         };
         // Run v1 → v2 data migration if old files store still exists
         if (db.objectStoreNames.contains(FILES_STORE)) {
-          this.migrateV1ToV2(db).then(() => resolve(db)).catch(() => resolve(db));
+          this.migrateV1ToV2(db).then(ready).catch(ready);
         } else {
-          resolve(db);
+          ready();
         }
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => {
+        this.dbPromise = null;
+        reject(req.error);
+      };
     });
     return this.dbPromise;
   }

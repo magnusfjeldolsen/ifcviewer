@@ -80,6 +80,10 @@ export interface DebugHandles {
   onLoadSettled(cb: (event: LoadSettledEvent) => void): void;
 }
 
+/** Status while another tab blocks storage (see `SessionStore.openDB`). */
+export const STORAGE_BLOCKED_STATUS =
+  'The viewer is open in another tab with an older version, so models are not remembered here. Close the other tabs and reload.';
+
 /** How long a transient status message stays up before clearing. */
 const STATUS_CLEAR_MS = 4000;
 
@@ -436,6 +440,9 @@ export class App {
     // the background to refill the web-ifc state the property inspector
     // needs.
     this.geometryCache = new GeometryCache(this.sessionStore);
+    // A tab running an older build can hold the database at its version.
+    // The viewer then works without remembering anything; say so plainly.
+    this.sessionStore.onStorageBlocked(() => this.setStatus(STORAGE_BLOCKED_STATUS));
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
     this.memoryToggle.onChange(async (enabled) => {
       if (enabled) {
@@ -1020,7 +1027,12 @@ export class App {
             console.warn(`SessionStore: no buffer for local model "${record.name}" (id: ${record.id})`);
             this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
             this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
-            this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
+            this.modelTreePanel.setModelWarning(
+              record.id,
+              this.sessionStore.isStorageBlocked()
+                ? 'Close the viewer’s other tabs, then reload to restore'
+                : 'File missing — re-upload to restore',
+            );
           }
         } catch (err) {
           // skip models that fail to restore — drop any partial stream
@@ -1557,6 +1569,8 @@ export class App {
   }
 
   private setStatus(text: string): void {
+    // While storage is blocked, an otherwise empty status keeps saying so.
+    if (text === '' && this.sessionStore?.isStorageBlocked()) text = STORAGE_BLOCKED_STATUS;
     if (this.statusEl) this.statusEl.textContent = text;
   }
 
