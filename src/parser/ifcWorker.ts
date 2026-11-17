@@ -146,11 +146,15 @@ function extractFlatMesh(
     // Views of the wasm heap, not copies (`GetVertexArray` copies): read
     // straight away into reused scratch, and nothing is left for the
     // garbage collector but the welded result itself.
-    const heap = ifc.wasmModule as unknown as { HEAPF32: Float32Array; HEAPU32: Uint32Array };
+    // Every call into web-ifc comes first: a call may grow the heap, and a
+    // view made before that would be left pointing at the old, emptied one.
     const vPtr = geom.GetVertexData() / 4;
-    const verts = heap.HEAPF32.subarray(vPtr, vPtr + geom.GetVertexDataSize());
+    const vLen = geom.GetVertexDataSize();
     const iPtr = geom.GetIndexData() / 4;
-    const idxs = heap.HEAPU32.subarray(iPtr, iPtr + geom.GetIndexDataSize());
+    const iLen = geom.GetIndexDataSize();
+    const heap = ifc.wasmModule as unknown as { HEAPF32: Float32Array; HEAPU32: Uint32Array };
+    const verts = heap.HEAPF32.subarray(vPtr, vPtr + vLen);
+    const idxs = heap.HEAPU32.subarray(iPtr, iPtr + iLen);
 
     // Extract vertices (position only, stride of 6: x,y,z,nx,ny,nz).
     const vertexCount = verts.length / 6;
