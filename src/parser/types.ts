@@ -16,6 +16,13 @@ export interface ParsedMesh {
   normals: Float32Array;
   transform: number[];
   color: { r: number; g: number; b: number; a: number };
+  /**
+   * Bounding box of `vertices`, before `transform`. Computed by the worker in
+   * the loop that already visits every vertex, so the main thread can size
+   * the view without walking them again. Optional: geometry cached before it
+   * existed has none, and readers fall back to the vertices.
+   */
+  bounds?: { min: [number, number, number]; max: [number, number, number] };
 }
 
 export interface ParsedModel {

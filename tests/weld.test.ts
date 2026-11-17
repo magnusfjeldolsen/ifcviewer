@@ -34,6 +34,23 @@ describe('weldVertices', () => {
     expect(weldVertices(q.positions, q.normals, q.indices, WELD_NORMAL_STEPS).positions.length / 3).toBe(4);
   });
 
+  it('keeps every distinct position, so bounds taken before welding describe the vertices sent', () => {
+    // The worker computes `ParsedMesh.bounds` in the pass before welding.
+    const q = quad([0, 1, 0]);
+    q.positions.set([5, -2, 7], 3 * 3); // a far corner that only one triangle uses
+    const out = weldVertices(q.positions, q.normals, q.indices, WELD_NORMAL_STEPS);
+    const extent = (p: Float32Array) => {
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < p.length; i++) {
+        min[i % 3] = Math.min(min[i % 3], p[i]);
+        max[i % 3] = Math.max(max[i % 3], p[i]);
+      }
+      return { min, max };
+    };
+    expect(extent(out.positions)).toEqual(extent(q.positions));
+  });
+
   it('returns the inputs untouched when nothing merges', () => {
     const q = quad([0, 1, 0]);
     const out = weldVertices(q.positions, q.normals, q.indices);
