@@ -22,7 +22,10 @@ function makeHarness() {
     cameraState = s;
     camera.position.set(s.position.x, s.position.y, s.position.z);
   });
+  const readPixels = vi.fn();
+  const gl = { readPixels, RGBA: 0x1908, UNSIGNED_BYTE: 0x1401 };
   const renderer = {
+    getContext: () => gl,
     info: { render: { calls: 0, triangles: 0, points: 0, lines: 0 }, memory: { geometries: 0, textures: 0 }, programs: [] },
   };
   const viewer = {
@@ -38,8 +41,12 @@ function makeHarness() {
     getCameraState: () => cameraState,
     restoreCameraState,
   };
+  // Stands in for the batched ModelManager: a piece is a child of group.
   const modelManager = {
-    getAllModels: () => [{ group }],
+    pieceCount: () => group.children.length,
+    getAllModels: () => [
+      { group, batch: { stats: () => ({ pieces: group.children.length, chunks: 1, transparentChunks: 0, overlays: 0, vertices: 0, triangles: 0 }) } },
+    ],
     getBoundingBox: () => new THREE.Box3().setFromObject(group),
   };
   const handles = {
@@ -55,7 +62,7 @@ function makeHarness() {
     settled.forEach((cb) =>
       cb({ name: 'm.ifc', source: 'file', ok: true, meshCount: group.children.length, fromCache: false, ...e }),
     );
-  return { handles, addMesh, draw, settle, restoreCameraState, getState: () => cameraState };
+  return { handles, addMesh, draw, settle, restoreCameraState, readPixels, getState: () => cameraState };
 }
 
 describe('installPerfSurface', () => {
@@ -134,6 +141,10 @@ describe('installPerfSurface', () => {
       expect(result.frames).toBeGreaterThanOrEqual(7);
       expect(result.medianFrameMs).toBe(16);
       expect(result.renderCpuMedianMs).toBe(2);
+      // Without gpuSync nothing waits on the GPU and the synced figures are absent.
+      expect(h.readPixels).not.toHaveBeenCalled();
+      expect(result.gpuWaitMedianMs).toBeNaN();
+      expect(result.syncedFrameMedianMs).toBeNaN();
       // Every pose looks at the centre; the last call puts the old pose back.
       const calls = h.restoreCameraState.mock.calls.map((c) => c[0]);
       expect(calls.slice(0, -1).every((s) => s.target.x === 0 && s.target.y === 0 && s.target.z === 0)).toBe(true);
@@ -141,6 +152,47 @@ describe('installPerfSurface', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('with gpuSync, waits for the GPU after every frame and adds the wait to the frame cost', async () => {
+    const h = makeHarness();
+    h.addMesh();
+    const perf = installPerfSurface(h.handles);
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    // Each readPixels "blocks" for 5 ms.
+    h.readPixels.mockImplementation(() => {
+      clock += 5;
+    });
+    let t = 0;
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      setTimeout(() => {
+        t += 16;
+        h.draw(t, 2);
+        cb(t);
+      }, 0);
+      return 0;
+    });
+    try {
+      const result = await perf.orbit({ frames: 8, warmupFrames: 2, gpuSync: true });
+      expect(h.readPixels).toHaveBeenCalled();
+      expect(result.gpuWaitMedianMs).toBe(5);
+      expect(result.syncedFrameMedianMs).toBe(7);
+    } finally {
+      vi.unstubAllGlobals();
+      now.mockRestore();
+    }
+  });
+
+  it('reports pieces and per-model batch sizes from the model manager', () => {
+    const h = makeHarness();
+    h.addMesh();
+    h.addMesh();
+    const perf = installPerfSurface(h.handles);
+    const model = perf.model();
+    expect(model.meshes).toBe(2);
+    expect(model.batches).toEqual([expect.objectContaining({ pieces: 2, chunks: 1 })]);
+    expect(perf.info().meshes).toBe(2);
   });
 
   it('refuses to orbit with nothing loaded, and leaves the camera alone', async () => {

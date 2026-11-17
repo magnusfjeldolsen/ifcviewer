@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as THREE from 'three';
 import { MarqueeSelector } from '../src/inspector/MarqueeSelector';
 import type { Viewer } from '../src/viewer/Viewer';
-import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
+import { ModelManager } from '../src/viewer/ModelManager';
+import type { ParsedMesh } from '../src/parser/types';
+import { boxMesh } from './helpers/models';
 import type { ToolManager, Tool } from '../src/tools/Tool';
 import type { SelectionManager } from '../src/inspector/SelectionManager';
 import type { SelectionMode } from '../src/inspector/types';
@@ -39,40 +41,10 @@ Object.defineProperty(globalThis, 'localStorage', {
 
 // ─── Fixtures ──────────────────────────────────────────────
 
-function makeMeshAt(x: number, y: number, z: number, expressId: number, size = 0.1): THREE.Mesh {
-  const geom = new THREE.BoxGeometry(size, size, size);
-  geom.computeBoundingBox();
-  const mat = new THREE.MeshBasicMaterial();
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.position.set(x, y, z);
-  mesh.userData.expressID = expressId;
-  mesh.updateMatrixWorld(true);
-  return mesh;
+/** A 0.1 m box element at (x, y, z), as the IFC worker would deliver it. */
+function pieceAt(x: number, y: number, z: number, expressId: number, size = 0.1): ParsedMesh {
+  return boxMesh(expressId, { at: [x, y, z], size: [size, size, size] });
 }
-
-function makeModelEntry(
-  modelId: string,
-  meshes: THREE.Mesh[],
-  visible = true,
-): ModelEntry {
-  const group = new THREE.Group();
-  group.name = modelId;
-  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-  for (const m of meshes) {
-    group.add(m);
-    const exp = m.userData.expressID;
-    if (typeof exp === 'number') {
-      let bucket = meshesByExpressId.get(exp);
-      if (!bucket) {
-        bucket = [];
-        meshesByExpressId.set(exp, bucket);
-      }
-      bucket.push(m);
-    }
-  }
-  return { id: modelId, group, visible, meshesByExpressId };
-}
-
 interface Env {
   canvas: HTMLCanvasElement;
   marqueeRoot: HTMLElement;
@@ -80,7 +52,6 @@ interface Env {
   modelManager: ModelManager;
   toolManager: ToolManager;
   selectionManager: SelectionManager;
-  modelStore: Map<string, ModelEntry>;
   toolState: { active: Tool | null };
   pivotState: { picking: boolean };
   controlsState: { enabled: boolean };
@@ -126,11 +97,8 @@ function makeEnv(): Env {
     },
   } as unknown as Viewer;
 
-  const modelStore = new Map<string, ModelEntry>();
-  const modelManager = {
-    getAllModels: () => Array.from(modelStore.values()),
-    getModel: (id: string) => modelStore.get(id),
-  } as unknown as ModelManager;
+  // A real ModelManager on the same scene: the marquee walks its pieces.
+  const modelManager = new ModelManager(scene);
 
   const toolManager = {
     getActiveTool: () => toolState.active,
@@ -151,7 +119,6 @@ function makeEnv(): Env {
     modelManager,
     toolManager,
     selectionManager,
-    modelStore,
     toolState,
     pivotState,
     controlsState,
@@ -388,14 +355,14 @@ describe('MarqueeSelector — selection commit', () => {
   beforeEach(() => {
     env = makeEnv();
     // Two meshes near origin (will be inside the marquee) and one off-screen.
-    env.modelStore.set(
-      'A',
-      makeModelEntry('A', [
-        makeMeshAt(0, 0, 0, 1),
-        makeMeshAt(0.2, 0, 0, 2),
-        makeMeshAt(50, 50, 0, 3), // outside frustum
-      ]),
-    );
+    env.modelManager.addModel({
+      id: 'A',
+      meshes: [
+        pieceAt(0, 0, 0, 1),
+        pieceAt(0.2, 0, 0, 2),
+        pieceAt(50, 50, 0, 3), // outside frustum
+      ],
+    });
 
     selector = new MarqueeSelector({
       viewer: env.viewer,
@@ -469,15 +436,15 @@ describe('MarqueeSelector — selection commit', () => {
   });
 
   it('hidden model is excluded from results', () => {
-    env.modelStore.get('A')!.visible = false;
+    env.modelManager.setVisible('A', false);
     pointerDown(env.canvas, 10, 10, { altKey: true });
     pointerMove(env.canvas, 190, 190);
     pointerUp(env.canvas, 190, 190);
     expect(env.applyManyCalls[0].ids).toEqual([]);
   });
 
-  it('mesh with mesh.visible=false is excluded', () => {
-    env.modelStore.get('A')!.group.children[0].visible = false;
+  it('a hidden element is excluded', () => {
+    env.modelManager.setHidden('A', [1], true);
     pointerDown(env.canvas, 10, 10, { altKey: true });
     pointerMove(env.canvas, 190, 190);
     pointerUp(env.canvas, 190, 190);
@@ -486,35 +453,44 @@ describe('MarqueeSelector — selection commit', () => {
     expect(ids.map((i) => i.expressId)).toEqual([2]);
   });
 
-  it('T16: an element hidden via appearance (all its meshes visible=false) is excluded from the marquee commit', () => {
-    // Regression-lock for element-appearance: AppearanceManager.hide sets
-    // mesh.visible=false on every mesh of an element. classifyMesh / the
-    // commit loop must skip those so a marquee over a hidden element does not
-    // re-select it. expressId 1 has two meshes (one element, two geometries);
-    // hiding both must drop the whole element.
-    const entry = env.modelStore.get('A')!;
-    // Give expressId 1 a second mesh at the same spot (decomposed geometry).
-    const second = makeMeshAt(0, 0, 0, 1);
-    entry.group.add(second);
-    entry.meshesByExpressId.get(1)!.push(second);
-    // Hide the entire element (both meshes), as AppearanceManager.hide would.
-    for (const mesh of entry.meshesByExpressId.get(1)!) mesh.visible = false;
-
+  it('T16: an element hidden via appearance (every piece hidden) is excluded from the marquee commit', () => {
+    // Regression-lock for element-appearance: AppearanceManager.hide hides
+    // every piece of an element. The commit must skip those so a marquee over
+    // a hidden element does not re-select it. Element 10 has two pieces (one
+    // element, two geometries); hiding it must drop the whole element.
+    env.modelManager.addModel({ id: 'B', meshes: [pieceAt(0, 0.2, 0, 10), pieceAt(0, -0.2, 0, 10)] });
+    env.modelManager.setHidden('B', [10], true);
+    // Single-model lock lives in SelectionManager (stubbed here), so model A's
+    // elements come through alongside.
     pointerDown(env.canvas, 10, 10, { altKey: true });
     pointerMove(env.canvas, 190, 190);
     pointerUp(env.canvas, 190, 190);
 
     const ids = env.applyManyCalls[0].ids;
-    // Element 1 is hidden → excluded; element 2 (still visible) remains.
-    expect(ids.map((i) => i.expressId)).toEqual([2]);
+    expect(ids.map((i) => `${i.modelId}:${i.expressId}`).sort()).toEqual(['A:1', 'A:2']);
   });
 
-  it('mesh without expressID is excluded', () => {
-    // Add a helper mesh with no userData.expressID.
+  it('window mode needs every piece of an element inside; crossing needs one', () => {
+    // Element 20: one piece at the centre, one far off-screen.
+    env.modelManager.addModel({ id: 'C', meshes: [pieceAt(0, 0.3, 0, 20), pieceAt(50, 50, 0, 20)] });
+    pointerDown(env.canvas, 10, 10, { altKey: true });
+    pointerMove(env.canvas, 190, 190);
+    pointerUp(env.canvas, 190, 190);
+    expect(env.applyManyCalls[0].ids.some((i) => i.modelId === 'C')).toBe(false);
+
+    pointerDown(env.canvas, 190, 10, { altKey: true });
+    pointerMove(env.canvas, 10, 190);
+    pointerUp(env.canvas, 10, 190);
+    expect(env.applyManyCalls[1].ids.some((i) => i.modelId === 'C' && i.expressId === 20)).toBe(true);
+  });
+
+  it('a scene object that is not model geometry is never selected', () => {
+    // A helper mesh in the frustum, outside any model.
     const helper = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial());
     helper.position.set(0.4, 0, 0);
+    helper.userData.expressID = 99;
     helper.updateMatrixWorld(true);
-    env.modelStore.get('A')!.group.add(helper);
+    env.scene.add(helper);
 
     pointerDown(env.canvas, 10, 10, { altKey: true });
     pointerMove(env.canvas, 190, 190);
@@ -523,7 +499,6 @@ describe('MarqueeSelector — selection commit', () => {
     // expressIds 1 and 2 — helper not included despite being in frustum.
     expect(ids.map((i) => i.expressId).sort()).toEqual([1, 2]);
   });
-
   it('respects active clipping plane (fully-clipped element excluded)', () => {
     // Clip everything in front of z=5 — meshes at origin are cut-side.
     env.renderer.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), -5)];

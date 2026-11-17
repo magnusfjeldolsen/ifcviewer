@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import type { ModelManager } from './ModelManager';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
@@ -10,37 +9,20 @@ import type { Scope } from '../inspector/types';
  *
  * One manager, ONE state per element (decision A4): `'hidden' | 'transparent'`,
  * absent ⇒ `'normal'`. A new op OVERRIDES the current one — there is no
- * combined transparent+hidden. The manager normalize-then-applies: before
- * applying any new state it fully restores the element to base (pristine
- * material reference + `visible = true`), THEN applies the new state. That one
- * rule makes every transition robust (transparent→hidden→normal, etc.) with no
- * leaked transparency-variant materials.
+ * combined transparent+hidden.
  *
  *   priority:  hidden  >  transparent  >  (base)      and highlight composes on top
  *
- * - **hidden** → `mesh.visible = false`.
- * - **transparent** → swap to a transparent material clone {transparent:true,
- *   opacity:0.25}, derived from the PRISTINE original (never from "whatever is
- *   currently on the mesh", so an already-highlighted mesh doesn't capture its
- *   highlight variant as base — see the interplay note below).
- * - **normal** → restore the pristine original material + `visible = true`.
+ * The state is pushed to the renderer through ModelManager's element API:
+ * - **hidden** → `setHidden(…, true)`: not drawn, not picked, not framed.
+ * - **transparent** → `setOpacity(…, TRANSPARENCY_OPACITY)`.
+ * - **normal** → visible, own opacity.
  *
- * ## Shared-material safety (the highlight-variant trick)
- * Materials are shared by color within a model (ModelManager materialCache), so
- * we cannot set `material.opacity` directly — it would fade every same-colored
- * element. SelectionManager already solves this for highlighting via a per-mesh
- * material clone cached in a WeakMap keyed by the original; transparency mirrors
- * that as `transparencyVariants`. Two meshes that share a pristine material
- * share their transparent clone.
- *
- * ## Highlight ↔ appearance interplay (App-orchestrated)
- * App owns the precedence chain `hidden > transparent > highlighted > base`. To
- * keep this order-independent, AppearanceManager derives its base from the
- * PRISTINE original (via `pristineFor`, a write-once store shared with App /
- * SelectionManager). `getBaseForMesh(mesh, pristine)` returns the material the
- * highlight should compose on top of: the transparent clone if the element is
- * transparent, else the pristine original. After any appearance op touching
- * selected meshes, App calls `selectionManager.refreshHighlights()`.
+ * Highlight, colour, opacity and visibility are independent per-element
+ * attributes in the renderer, so the precedence above holds without any
+ * reconciliation between this manager and SelectionManager: a hidden element
+ * is not drawn whatever else is set, and the highlight composes on top of
+ * whatever opacity the element has.
  *
  * ## Undo (decision: each op is ONE undoable command)
  * Optional `history` dep mirrors SelectionManager / SelectionBasket: each USER
@@ -75,14 +57,6 @@ export interface AppearanceManagerDeps {
    * behaviour is identical minus the recording — preserving simple usage.
    */
   history?: HistoryManager;
-  /**
-   * Optional pristine-material provider. Returns the mesh's load-time material,
-   * captured write-once in a store SHARED with App / SelectionManager so the
-   * base is the true pristine regardless of which subsystem touched the mesh
-   * first. When omitted, the manager captures `mesh.material` once internally
-   * (correct for standalone use where nothing else mutates the mesh).
-   */
-  pristineFor?: (mesh: THREE.Mesh) => THREE.Material | THREE.Material[];
 }
 
 /** Internal key: "<modelId>:<expressId>" (same scheme as SelectionManager). */
@@ -94,20 +68,8 @@ export class AppearanceManager {
   /** Element → state. Absent ⇒ 'normal'. */
   private states = new Map<AppearanceKey, AppearanceState>();
 
-  /**
-   * Cache: pristine original material → shared transparent clone. Mirrors
-   * SelectionManager.highlightVariants. Two meshes that share a pristine
-   * material share the same transparent clone. NEVER dispose a variant on
-   * restore — it may still be in use by another transparent mesh, and a future
-   * re-transparent must reuse it. Releases when the original is GC'd.
-   */
-  private transparencyVariants = new WeakMap<THREE.Material, THREE.Material>();
-
-  /**
-   * Fallback pristine store used only when `deps.pristineFor` is absent.
-   * Write-once per mesh so the first capture is the true load-time material.
-   */
-  private ownPristine = new WeakMap<THREE.Mesh, THREE.Material | THREE.Material[]>();
+  /** Elements whose state changed since the renderer was last told. */
+  private dirty = new Set<AppearanceKey>();
 
   /** Listeners notified whenever appearance state changes. */
   private changeListeners: Array<() => void> = [];
@@ -142,33 +104,11 @@ export class AppearanceManager {
     return false;
   }
 
-  /**
-   * The material the highlight should compose on top of for this mesh: the
-   * transparent clone if the element is transparent, else the pristine
-   * original. Consumed by SelectionManager via the `appearanceBaseFor` provider
-   * so the highlight derives from the appearance base, not a stale material.
-   *
-   * `pristine` is passed in (App's shared write-once store) so this is purely a
-   * function of pristine + recorded state — order-independent.
-   */
-  getBaseForMesh(
-    mesh: THREE.Mesh,
-    pristine: THREE.Material | THREE.Material[],
-  ): THREE.Material | THREE.Material[] {
-    const expressId = mesh.userData.expressID;
-    const modelId = mesh.parent?.name;
-    if (typeof expressId === 'number' && modelId) {
-      const state = this.states.get(makeKey(modelId, expressId));
-      if (state === 'transparent') return this.getTransparencyVariant(pristine);
-    }
-    return pristine;
-  }
-
   // ── User ops (each = one undoable command) ──────────────────
 
   /** Hide every element in the scope. Overrides any prior state. */
   hide(scope: Scope): void {
-    this.runOp((key) => this.states.set(key, 'hidden'), scope, 'Hide elements');
+    this.runOp('hidden', scope, 'Hide elements');
   }
 
   /**
@@ -182,44 +122,35 @@ export class AppearanceManager {
     const keep = new Set(scope.map((id) => makeKey(id.modelId, id.expressId)));
     let mutated = false;
 
-    for (const entry of this.deps.modelManager.getAllModels()) {
-      for (const expressId of entry.meshesByExpressId.keys()) {
-        const key = makeKey(entry.id, expressId);
+    for (const modelId of this.deps.modelManager.getModelIds()) {
+      for (const expressId of this.deps.modelManager.elementIds(modelId)) {
+        const key = makeKey(modelId, expressId);
         if (keep.has(key)) {
           // Scope element → normal/visible.
           if (this.states.get(key) !== undefined) {
             this.clearState(key);
             mutated = true;
           }
-        } else {
+        } else if (this.states.get(key) !== 'hidden') {
           // Complement → hidden.
-          if (this.states.get(key) !== 'hidden') {
-            this.setState(key, 'hidden');
-            mutated = true;
-          }
+          this.setState(key, 'hidden');
+          mutated = true;
         }
       }
     }
 
+    this.flush();
     this.finishOp(mutated, before, 'Isolate elements');
   }
 
   /** Clear all hidden state (restore visibility). Leaves transparency intact. */
   showAll(): void {
-    const before = this.serialize();
-    let mutated = false;
-    for (const [key, state] of Array.from(this.states)) {
-      if (state === 'hidden') {
-        this.clearState(key);
-        mutated = true;
-      }
-    }
-    this.finishOp(mutated, before, 'Show all');
+    this.clearAll('hidden', 'Show all');
   }
 
   /** Make every element in the scope transparent. Overrides any prior state. */
   transparent(scope: Scope): void {
-    this.runOp((key) => this.states.set(key, 'transparent'), scope, 'Make transparent');
+    this.runOp('transparent', scope, 'Make transparent');
   }
 
   /** Make every element in the scope opaque (clear transparent state → normal). */
@@ -233,20 +164,13 @@ export class AppearanceManager {
         mutated = true;
       }
     }
+    this.flush();
     this.finishOp(mutated, before, 'Make opaque');
   }
 
   /** Clear all transparent state (the tray recovery action). */
   clearTransparency(): void {
-    const before = this.serialize();
-    let mutated = false;
-    for (const [key, state] of Array.from(this.states)) {
-      if (state === 'transparent') {
-        this.clearState(key);
-        mutated = true;
-      }
-    }
-    this.finishOp(mutated, before, 'Clear transparency');
+    this.clearAll('transparent', 'Clear transparency');
   }
 
   // ── Persistence ────────────────────────────────────────────
@@ -268,21 +192,21 @@ export class AppearanceManager {
   /**
    * Rehydrate the state map AND re-apply the visual effect for live models
    * (session restore). A SYSTEM change — pushes no undo command. Entries whose
-   * model isn't loaded still record state (harmless) but apply no mesh effect.
+   * model isn't loaded still record state (harmless) but apply no effect.
    */
   deserialize(entries: readonly AppearanceEntry[]): void {
     for (const { modelId, expressId, state } of entries) {
-      const key = makeKey(modelId, expressId);
-      this.setState(key, state);
+      this.setState(makeKey(modelId, expressId), state);
     }
+    this.flush();
     if (entries.length > 0) this.notifyChange();
   }
 
   /**
    * Drop every entry owned by the given model (model removal). Delimiter-aware
    * prefix check so "m1" doesn't also prune "m1-2". A SYSTEM change — fires
-   * onChange iff something was pruned, pushes no undo command. We do NOT touch
-   * meshes (ModelManager disposed them); just drop bookkeeping.
+   * onChange iff something was pruned, pushes no undo command. The model's
+   * geometry is gone (ModelManager disposed it); this only drops bookkeeping.
    */
   onModelRemoved(modelId: string): void {
     const prefix = `${modelId}:`;
@@ -290,6 +214,7 @@ export class AppearanceManager {
     for (const key of Array.from(this.states.keys())) {
       if (key.startsWith(prefix)) {
         this.states.delete(key);
+        this.dirty.delete(key);
         mutated = true;
       }
     }
@@ -308,104 +233,71 @@ export class AppearanceManager {
 
   // ── Internals ──────────────────────────────────────────────
 
-  /**
-   * Run a simple per-scope op: set/clear the state for each scope element via
-   * `mutate`, applying the visual effect, recording one command iff anything
-   * actually changed.
-   */
-  private runOp(
-    mutate: (key: AppearanceKey, id: { modelId: string; expressId: number }) => void,
-    scope: Scope,
-    label: string,
-  ): void {
+  /** Set `target` on each scope element, recording one command iff anything changed. */
+  private runOp(target: AppearanceState, scope: Scope, label: string): void {
     const before = this.serialize();
     let mutated = false;
     for (const id of scope) {
       const key = makeKey(id.modelId, id.expressId);
-      const target = label === 'Hide elements' ? 'hidden' : 'transparent';
       if (this.states.get(key) === target) continue; // no-op for this element
-      mutate(key, id);
-      this.applyToMeshes(id.modelId, id.expressId);
+      this.setState(key, target);
       mutated = true;
     }
+    this.flush();
     this.finishOp(mutated, before, label);
   }
 
-  /** Record state without applying the effect (used by deserialize too). */
-  private setState(key: AppearanceKey, state: AppearanceState): void {
-    this.states.set(key, state);
-    const idx = key.indexOf(':');
-    this.applyToMeshes(key.slice(0, idx), Number(key.slice(idx + 1)));
-  }
-
-  /** Clear state (→ normal) and restore the meshes to base. */
-  private clearState(key: AppearanceKey): void {
-    this.states.delete(key);
-    const idx = key.indexOf(':');
-    this.applyToMeshes(key.slice(0, idx), Number(key.slice(idx + 1)));
-  }
-
-  /**
-   * Apply the current recorded state to every mesh of an element, using the
-   * normalize-then-apply rule: first restore pristine material + visible=true,
-   * then apply hidden/transparent. One code path → robust transitions.
-   */
-  private applyToMeshes(modelId: string, expressId: number): void {
-    const model = this.deps.modelManager.getModel(modelId);
-    if (!model) return; // model not live (e.g. deserialize before load)
-    const meshes = model.meshesByExpressId.get(expressId);
-    if (!meshes) return;
-
-    const state = this.states.get(makeKey(modelId, expressId));
-    for (const mesh of meshes) {
-      const pristine = this.pristineOf(mesh);
-      // Normalize to base.
-      mesh.material = pristine;
-      mesh.visible = true;
-      // Apply the new state.
-      if (state === 'hidden') {
-        mesh.visible = false;
-      } else if (state === 'transparent') {
-        mesh.material = this.getTransparencyVariant(pristine);
+  /** Clear every element in `state` back to normal, as one command. */
+  private clearAll(state: AppearanceState, label: string): void {
+    const before = this.serialize();
+    let mutated = false;
+    for (const [key, s] of Array.from(this.states)) {
+      if (s === state) {
+        this.clearState(key);
+        mutated = true;
       }
     }
-    this.deps.requestRender?.();
+    this.flush();
+    this.finishOp(mutated, before, label);
   }
 
-  /** Pristine material for a mesh — injected store, else internal write-once. */
-  private pristineOf(mesh: THREE.Mesh): THREE.Material | THREE.Material[] {
-    if (this.deps.pristineFor) return this.deps.pristineFor(mesh);
-    let p = this.ownPristine.get(mesh);
-    if (!p) {
-      p = mesh.material;
-      this.ownPristine.set(mesh, p);
-    }
-    return p;
+  private setState(key: AppearanceKey, state: AppearanceState): void {
+    this.states.set(key, state);
+    this.dirty.add(key);
+  }
+
+  private clearState(key: AppearanceKey): void {
+    this.states.delete(key);
+    this.dirty.add(key);
   }
 
   /**
-   * Return a (possibly cached) transparent variant of the pristine material.
-   * Two meshes sharing a pristine material share the SAME variant reference.
+   * Tell the renderer about every element whose state changed, grouped so a
+   * model gets at most four calls however many elements moved.
    */
-  private getTransparencyVariant(
-    pristine: THREE.Material | THREE.Material[],
-  ): THREE.Material | THREE.Material[] {
-    if (Array.isArray(pristine)) {
-      return pristine.map((m) => this.getOrBuildVariant(m));
+  private flush(): void {
+    if (this.dirty.size === 0) return;
+    const byModel = new Map<string, { hide: number[]; show: number[]; fade: number[]; unfade: number[] }>();
+    for (const key of this.dirty) {
+      const idx = key.indexOf(':');
+      const modelId = key.slice(0, idx);
+      const expressId = Number(key.slice(idx + 1));
+      let lists = byModel.get(modelId);
+      if (!lists) byModel.set(modelId, (lists = { hide: [], show: [], fade: [], unfade: [] }));
+      const state = this.states.get(key);
+      (state === 'hidden' ? lists.hide : lists.show).push(expressId);
+      (state === 'transparent' ? lists.fade : lists.unfade).push(expressId);
     }
-    return this.getOrBuildVariant(pristine);
-  }
-
-  private getOrBuildVariant(original: THREE.Material): THREE.Material {
-    let variant = this.transparencyVariants.get(original);
-    if (!variant) {
-      variant = original.clone();
-      variant.transparent = true;
-      variant.opacity = TRANSPARENCY_OPACITY;
-      variant.depthWrite = false; // avoid see-through artifacts on overlapping faces
-      this.transparencyVariants.set(original, variant);
+    this.dirty.clear();
+    const mm = this.deps.modelManager;
+    for (const [modelId, l] of byModel) {
+      if (!mm.getModel(modelId)) continue; // model not live (e.g. deserialize before load)
+      if (l.hide.length) mm.setHidden(modelId, l.hide, true);
+      if (l.show.length) mm.setHidden(modelId, l.show, false);
+      if (l.fade.length) mm.setOpacity(modelId, l.fade, TRANSPARENCY_OPACITY);
+      if (l.unfade.length) mm.setOpacity(modelId, l.unfade, null);
     }
-    return variant;
+    this.deps.requestRender?.();
   }
 
   /** Finish an op: notify + record one command iff anything changed. */
@@ -430,28 +322,22 @@ export class AppearanceManager {
 
   /**
    * Restore the appearance to exactly the given serialized state (undo/redo
-   * apply). Clears all current state + meshes to base, then re-applies the
-   * snapshot. Notifies but does NOT record (HistoryManager has isApplying()
+   * apply). Elements not in the snapshot return to normal, then the snapshot
+   * is applied. Notifies but does NOT record (HistoryManager has isApplying()
    * true while this runs).
    */
   private restoreState(entries: readonly AppearanceEntry[]): void {
-    // First normalize every element currently in a non-normal state that is
-    // NOT in the target snapshot, so removed entries return to base.
     const target = new Map<AppearanceKey, AppearanceState>();
     for (const { modelId, expressId, state } of entries) {
       target.set(makeKey(modelId, expressId), state);
     }
     for (const key of Array.from(this.states.keys())) {
-      if (!target.has(key)) {
-        this.clearState(key); // → normal, restore meshes
-      }
+      if (!target.has(key)) this.clearState(key);
     }
-    // Now apply the target snapshot.
     for (const [key, state] of target) {
-      if (this.states.get(key) !== state) {
-        this.setState(key, state);
-      }
+      if (this.states.get(key) !== state) this.setState(key, state);
     }
+    this.flush();
     this.notifyChange();
   }
 

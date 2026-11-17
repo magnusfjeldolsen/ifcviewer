@@ -61,8 +61,12 @@ export interface SnapPayload {
 }
 
 export interface SnapQuery {
-  mesh: THREE.Mesh;
-  /** Index of the hit triangle, as three's raycaster reports it. */
+  /**
+   * The triangles under the cursor and where they sit in the world: the hit
+   * piece's geometry (`pieceGeometryOfHit`), or any THREE.Mesh.
+   */
+  mesh: { geometry: THREE.BufferGeometry; matrixWorld: THREE.Matrix4 };
+  /** Index of the hit triangle within `mesh.geometry`. */
   faceIndex: number;
   /** The raw world-space intersection point. */
   hitPoint: THREE.Vector3;

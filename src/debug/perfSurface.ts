@@ -50,6 +50,17 @@ export interface OrbitResult extends FrameSummary {
   distanceScale: number;
   renderCpuMedianMs: number;
   renderCpuP95Ms: number;
+  /**
+   * With `gpuSync`: how long each frame waited for the GPU to finish it
+   * (a 1-pixel `readPixels` right after the draw). NaN without `gpuSync`.
+   * Render CPU + this is what the frame really cost; without the sync, an
+   * unthrottled run (vsync off) can report frame rates the GPU never drew.
+   */
+  gpuWaitMedianMs: number;
+  gpuWaitP95Ms: number;
+  /** Median of render CPU + GPU wait per frame (NaN without `gpuSync`). */
+  syncedFrameMedianMs: number;
+  syncedFrameP95Ms: number;
   wallMs: number;
   info: RenderInfo;
   near: number;
@@ -77,7 +88,7 @@ export interface PerfSurface {
   info(): RenderInfo;
   /** Draw one frame now and report what it cost. */
   render(): Promise<{ renderCpuMs: number; info: RenderInfo }>;
-  orbit(options?: { frames?: number; distanceScale?: number; warmupFrames?: number }): Promise<OrbitResult>;
+  orbit(options?: { frames?: number; distanceScale?: number; warmupFrames?: number; gpuSync?: boolean }): Promise<OrbitResult>;
   /**
    * Time `raycastVisible` at screen points (CSS px). By default a 5×5 grid over
    * where the model's bounding box lands on screen; `area: 'screen'` spreads
@@ -91,7 +102,15 @@ export interface PerfSurface {
     area?: 'model' | 'screen';
   }): PickResult;
   camera(): { near: number; far: number; position: number[]; fov: number; aspect: number };
-  model(): { meshes: number; boundingSphere: { center: number[]; radius: number } | null; box: { min: number[]; max: number[] } | null };
+  /** Put the camera at `position` looking at `target` (world space), e.g. to compare builds from one pose. */
+  setCamera(position: number[], target: number[]): void;
+  model(): {
+    meshes: number;
+    /** Per model: pieces, chunk meshes, vertices and triangles drawn. */
+    batches: Array<ReturnType<import('../viewer/ModelBatch').ModelBatch['stats']>>;
+    boundingSphere: { center: number[]; radius: number } | null;
+    box: { min: number[]; max: number[] } | null;
+  };
   gpu(): { vendor: string; renderer: string; pixelRatio: number; drawingBuffer: [number, number] };
   heap(): { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } | null;
 }
@@ -109,11 +128,9 @@ export function installPerfSurface(handles: DebugHandles): PerfSurface {
   const renderer = viewer.getRenderer();
   const canvas = viewer.getCanvas();
 
-  const countMeshes = (): number => {
-    let n = 0;
-    for (const entry of modelManager.getAllModels()) n += entry.group.children.length;
-    return n;
-  };
+  // Geometry pieces, not scene meshes: pieces are batched into a few chunk
+  // meshes, and the count should still say how much of the model is in.
+  const countMeshes = (): number => modelManager.pieceCount();
 
   const info = (): RenderInfo => ({
     drawCalls: renderer.info.render.calls,
@@ -260,9 +277,21 @@ export function installPerfSurface(handles: DebugHandles): PerfSurface {
       const saved = viewer.getCameraState();
       const stamps: number[] = [];
       const cpu: number[] = [];
+      const gpuWait: number[] = [];
+      const synced: number[] = [];
+      const gl = renderer.getContext();
+      const pixel = new Uint8Array(4);
       const rec: Recorder = (t, ms) => {
         stamps.push(t);
         cpu.push(ms);
+        if (options.gpuSync) {
+          // readPixels cannot return before every queued draw has executed.
+          const t0 = performance.now();
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          const wait = performance.now() - t0;
+          gpuWait.push(wait);
+          synced.push(ms + wait);
+        }
       };
 
       let started: number;
@@ -295,6 +324,10 @@ export function installPerfSurface(handles: DebugHandles): PerfSurface {
         distanceScale,
         renderCpuMedianMs: median(cpu),
         renderCpuP95Ms: percentile(cpu, 95),
+        gpuWaitMedianMs: median(gpuWait),
+        gpuWaitP95Ms: percentile(gpuWait, 95),
+        syncedFrameMedianMs: median(synced),
+        syncedFrameP95Ms: percentile(synced, 95),
         wallMs,
         info: info(),
         near: camera.near,
@@ -355,12 +388,21 @@ export function installPerfSurface(handles: DebugHandles): PerfSurface {
       return { near: c.near, far: c.far, position: c.position.toArray(), fov: c.fov, aspect: c.aspect };
     },
 
+    setCamera(position, target) {
+      const [px, py, pz] = position;
+      const [tx, ty, tz] = target;
+      viewer.restoreCameraState({ position: { x: px, y: py, z: pz }, target: { x: tx, y: ty, z: tz } });
+      viewer.requestRender();
+    },
+
     model() {
       const box = modelManager.getBoundingBox();
-      if (box.isEmpty()) return { meshes: countMeshes(), boundingSphere: null, box: null };
+      const batches = modelManager.getAllModels().map((e) => e.batch.stats());
+      if (box.isEmpty()) return { meshes: countMeshes(), batches, boundingSphere: null, box: null };
       const sphere = box.getBoundingSphere(new THREE.Sphere());
       return {
         meshes: countMeshes(),
+        batches,
         boundingSphere: { center: sphere.center.toArray(), radius: sphere.radius },
         box: { min: box.min.toArray(), max: box.max.toArray() },
       };

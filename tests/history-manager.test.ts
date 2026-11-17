@@ -1,9 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import * as THREE from 'three';
 import { HistoryManager, MAX_HISTORY } from '../src/core/history/HistoryManager';
 import type { Command } from '../src/core/history/Command';
 import { AppearanceManager } from '../src/viewer/AppearanceManager';
-import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
+import { boxModel, makeModelManager } from './helpers/models';
 import type { ElementIdentity, Scope } from '../src/inspector/types';
 
 /**
@@ -233,21 +232,6 @@ describe('HistoryManager — push / undo / redo', () => {
 // pushes none. The memento is the serialized appearance state; undo restores
 // the prior PER-ELEMENT appearance in one step.
 describe('AppearanceManager — undo / redo (history-backed)', () => {
-  function makeMeshUnderGroup(group: THREE.Group, expressId: number): THREE.Mesh {
-    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshPhongMaterial());
-    mesh.userData.expressID = expressId;
-    group.add(mesh);
-    return mesh;
-  }
-  function makeModelEntry(modelId: string, expressIds: number[]): ModelEntry {
-    const group = new THREE.Group();
-    group.name = modelId;
-    const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-    for (const id of expressIds) {
-      meshesByExpressId.set(id, [makeMeshUnderGroup(group, id)]);
-    }
-    return { id: modelId, group, visible: true, meshesByExpressId };
-  }
   function identity(modelId: string, expressId: number): ElementIdentity {
     return { modelId, expressId, ifcClass: '', ifcTypeCode: 0 };
   }
@@ -255,19 +239,17 @@ describe('AppearanceManager — undo / redo (history-backed)', () => {
     return pairs.map(([m, e]) => identity(m, e));
   }
   function setup() {
-    const store = new Map<string, ModelEntry>();
-    store.set('A', makeModelEntry('A', [1, 2, 3, 4]));
-    const modelManager = {
-      getModel: (id: string) => store.get(id),
-      getAllModels: () => Array.from(store.values()),
-    } as unknown as ModelManager;
+    // A real ModelManager with four boxes, so undo/redo is asserted against
+    // what the renderer will draw.
+    const { modelManager } = makeModelManager([boxModel('A', [1, 2, 3, 4])]);
     const history = new HistoryManager();
     const manager = new AppearanceManager({ modelManager, history });
-    return { store, modelManager, history, manager };
+    const isHidden = (id: number): boolean => modelManager.getElementState('A', id)!.hidden;
+    return { modelManager, history, manager, isHidden };
   }
 
   it('T17: hide(scope of N) pushes exactly ONE command; undo restores all N in one step; redo re-hides', () => {
-    const { store, history, manager } = setup();
+    const { isHidden, history, manager } = setup();
     manager.hide(scope(['A', 1], ['A', 2], ['A', 3]));
     expect(history.canUndo()).toBe(true);
 
@@ -277,13 +259,13 @@ describe('AppearanceManager — undo / redo (history-backed)', () => {
     // All three restored to visible/normal in one step.
     for (const id of [1, 2, 3]) {
       expect(manager.getStateFor('A', id)).toBe('normal');
-      expect(store.get('A')!.meshesByExpressId.get(id)![0].visible).toBe(true);
+      expect(isHidden(id)).toBe(false);
     }
 
     history.redo();
     for (const id of [1, 2, 3]) {
       expect(manager.getStateFor('A', id)).toBe('hidden');
-      expect(store.get('A')!.meshesByExpressId.get(id)![0].visible).toBe(false);
+      expect(isHidden(id)).toBe(true);
     }
   });
 

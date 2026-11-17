@@ -1,77 +1,24 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import * as THREE from 'three';
-import { AppearanceManager } from '../src/viewer/AppearanceManager';
+import { AppearanceManager, TRANSPARENCY_OPACITY } from '../src/viewer/AppearanceManager';
 import type { AppearanceManagerDeps } from '../src/viewer/AppearanceManager';
-import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
+import type { ModelManager } from '../src/viewer/ModelManager';
 import type { ElementIdentity, Scope } from '../src/inspector/types';
+import { boxModel, makeModelManager } from './helpers/models';
 
 /**
  * AppearanceManager engine tests (D, the appearance system).
  *
- * The state model is pure-ish; visibility / material effects assert against
- * real THREE meshes built into stub ModelEntry fixtures. We never spin up a
- * real Viewer or web-ifc — just the per-model `meshesByExpressId` index the
- * manager iterates (same O(1) lookup SelectionManager uses).
+ * The manager runs on a REAL ModelManager loaded with small boxes, and the
+ * visual effect is asserted through `modelManager.getElementState` — what the
+ * renderer will actually draw — rather than through meshes or materials.
  *
- * CRITICAL invariant under test (the doc's flagged risk): AppearanceManager
- * treats the *pristine original material reference* on the mesh as its base.
- * Transparency swaps to a clone {transparent:true, opacity:0.25}; opaque
- * restores the EXACT original reference. Normalize-then-apply guarantees clean
- * transitions in every direction with no leaked variant.
+ * CRITICAL invariant under test: the states are mutually exclusive and every
+ * transition (normal ↔ transparent ↔ hidden) ends in exactly the draw state
+ * of the new state, with no residue of the previous one.
  */
 
 // ── Fixtures ────────────────────────────────────────────────
-
-function makeMeshUnderGroup(
-  group: THREE.Group,
-  expressId: number,
-  material?: THREE.Material,
-): THREE.Mesh {
-  const geom = new THREE.BufferGeometry();
-  const mat = material ?? new THREE.MeshPhongMaterial({ color: 0x808080 });
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.userData.expressID = expressId;
-  group.add(mesh);
-  return mesh;
-}
-
-function makeModelEntry(modelId: string, expressIds: number[]): ModelEntry {
-  const group = new THREE.Group();
-  group.name = modelId;
-  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-  for (const id of expressIds) {
-    const mesh = makeMeshUnderGroup(group, id);
-    let bucket = meshesByExpressId.get(id);
-    if (!bucket) {
-      bucket = [];
-      meshesByExpressId.set(id, bucket);
-    }
-    bucket.push(mesh);
-  }
-  return { id: modelId, group, visible: true, meshesByExpressId };
-}
-
-/**
- * A model whose meshes deliberately share a material reference, to prove the
- * per-mesh transparency variant trick doesn't cross-contaminate same-colored
- * elements elsewhere. `groups` lists which expressIDs share one material.
- */
-function makeSharedMaterialEntry(modelId: string, groups: number[][]): ModelEntry {
-  const group = new THREE.Group();
-  group.name = modelId;
-  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-  for (const ids of groups) {
-    const sharedMat = new THREE.MeshPhongMaterial({ color: 0x808080 });
-    for (const id of ids) {
-      const mesh = new THREE.Mesh(new THREE.BufferGeometry(), sharedMat);
-      mesh.userData.expressID = id;
-      group.add(mesh);
-      meshesByExpressId.set(id, [mesh]);
-    }
-  }
-  return { id: modelId, group, visible: true, meshesByExpressId };
-}
 
 function identity(modelId: string, expressId: number): ElementIdentity {
   return { modelId, expressId, ifcClass: '', ifcTypeCode: 0 };
@@ -79,25 +26,34 @@ function identity(modelId: string, expressId: number): ElementIdentity {
 
 function makeDeps(): {
   deps: AppearanceManagerDeps;
-  modelStore: Map<string, ModelEntry>;
+  modelManager: ModelManager;
+  /** Load a model whose elements are the given expressIDs. */
+  load: (modelId: string, expressIds: number[]) => void;
   renderCalls: { count: number };
 } {
-  const modelStore = new Map<string, ModelEntry>();
+  const { modelManager } = makeModelManager();
   const renderCalls = { count: 0 };
-  const modelManager = {
-    getModel: (id: string) => modelStore.get(id),
-    getAllModels: () => Array.from(modelStore.values()),
-  } as unknown as ModelManager;
   return {
     deps: { modelManager, requestRender: () => { renderCalls.count++; } },
-    modelStore,
+    modelManager,
+    load: (modelId, expressIds) => {
+      modelManager.addModel(boxModel(modelId, expressIds));
+    },
     renderCalls,
   };
 }
 
-/** Convenience: the single mesh for (modelId, expressId). */
-function meshFor(store: Map<string, ModelEntry>, modelId: string, expressId: number): THREE.Mesh {
-  return store.get(modelId)!.meshesByExpressId.get(expressId)![0];
+/** Draw state for (modelId, expressId); throws if the element isn't loaded. */
+function drawn(mm: ModelManager, modelId: string, expressId: number) {
+  const s = mm.getElementState(modelId, expressId);
+  if (!s) throw new Error(`element ${modelId}:${expressId} not loaded`);
+  return s;
+}
+
+/** True when the element is drawn exactly as loaded: visible, own opacity (1). */
+function isNormal(mm: ModelManager, modelId: string, expressId: number): boolean {
+  const s = drawn(mm, modelId, expressId);
+  return !s.hidden && !s.opacityOverridden && s.opacity === 1;
 }
 
 /** Build a Scope from (modelId, expressId) pairs. */
@@ -113,7 +69,7 @@ describe('AppearanceManager — hide / show-all (T1, T2)', () => {
 
   beforeEach(() => {
     env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+    env.load('A', [1, 2, 3]);
     manager = new AppearanceManager(env.deps);
   });
 
@@ -128,17 +84,14 @@ describe('AppearanceManager — hide / show-all (T1, T2)', () => {
     expect(manager.getStateFor('A', 3)).toBe('hidden');
   });
 
-  it('T2: hide sets mesh.visible=false for scope meshes; showAll restores visible=true and empties the hidden set', () => {
-    const m1 = meshFor(env.modelStore, 'A', 1);
-    const m2 = meshFor(env.modelStore, 'A', 2);
-
+  it('T2: hide stops the scope elements being drawn; showAll draws them again and empties the hidden set', () => {
     manager.hide(scope(['A', 1]));
-    expect(m1.visible).toBe(false);
-    expect(m2.visible).toBe(true);
+    expect(drawn(env.modelManager, 'A', 1).hidden).toBe(true);
+    expect(drawn(env.modelManager, 'A', 2).hidden).toBe(false);
     expect(manager.hasHidden()).toBe(true);
 
     manager.showAll();
-    expect(m1.visible).toBe(true);
+    expect(drawn(env.modelManager, 'A', 1).hidden).toBe(false);
     expect(manager.getStateFor('A', 1)).toBe('normal');
     expect(manager.hasHidden()).toBe(false);
   });
@@ -147,8 +100,8 @@ describe('AppearanceManager — hide / show-all (T1, T2)', () => {
 describe('AppearanceManager — isolate (T3)', () => {
   it('T3: isolate(scope) hides the COMPLEMENT only; scope stays normal/visible', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3, 4]));
-    env.modelStore.set('B', makeModelEntry('B', [10, 20]));
+    env.load('A', [1, 2, 3, 4]);
+    env.load('B', [10, 20]);
     const manager = new AppearanceManager(env.deps);
 
     manager.isolate(scope(['A', 2], ['B', 10]));
@@ -156,58 +109,68 @@ describe('AppearanceManager — isolate (T3)', () => {
     // Scope elements stay normal + visible.
     expect(manager.getStateFor('A', 2)).toBe('normal');
     expect(manager.getStateFor('B', 10)).toBe('normal');
-    expect(meshFor(env.modelStore, 'A', 2).visible).toBe(true);
-    expect(meshFor(env.modelStore, 'B', 10).visible).toBe(true);
+    expect(drawn(env.modelManager, 'A', 2).hidden).toBe(false);
+    expect(drawn(env.modelManager, 'B', 10).hidden).toBe(false);
 
     // Everything NOT in scope is hidden.
     expect(manager.getStateFor('A', 1)).toBe('hidden');
     expect(manager.getStateFor('A', 3)).toBe('hidden');
     expect(manager.getStateFor('A', 4)).toBe('hidden');
     expect(manager.getStateFor('B', 20)).toBe('hidden');
-    expect(meshFor(env.modelStore, 'A', 1).visible).toBe(false);
-    expect(meshFor(env.modelStore, 'B', 20).visible).toBe(false);
+    expect(drawn(env.modelManager, 'A', 1).hidden).toBe(true);
+    expect(drawn(env.modelManager, 'B', 20).hidden).toBe(true);
+  });
+
+  it('T3b: isolate over a 500-element model hides exactly the complement (grouped flush)', () => {
+    const env = makeDeps();
+    const ids = Array.from({ length: 500 }, (_, i) => i + 1);
+    env.load('A', ids);
+    env.load('B', [1000, 1001]);
+    const manager = new AppearanceManager(env.deps);
+    const keep = new Set([7, 250, 499]);
+
+    manager.isolate(scope(...[...keep].map((id): [string, number] => ['A', id])));
+
+    for (const id of ids) {
+      expect(drawn(env.modelManager, 'A', id).hidden).toBe(!keep.has(id));
+    }
+    expect(drawn(env.modelManager, 'B', 1000).hidden).toBe(true);
+    expect(drawn(env.modelManager, 'B', 1001).hidden).toBe(true);
+    expect(manager.hiddenCount()).toBe(500 - keep.size + 2);
+
+    manager.showAll();
+    for (const id of ids) expect(drawn(env.modelManager, 'A', id).hidden).toBe(false);
   });
 });
 
 describe('AppearanceManager — transparent / opaque (T4, T5)', () => {
-  it('T4: transparent swaps to a transparent clone {transparent:true, opacity:0.25}, preserves original ref; opaque restores exact original ref', () => {
+  it('T4: transparent draws the element at TRANSPARENCY_OPACITY; opaque restores its own opacity', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1]));
+    env.load('A', [1]);
     const manager = new AppearanceManager(env.deps);
-    const mesh = meshFor(env.modelStore, 'A', 1);
-    const original = mesh.material;
 
     manager.transparent(scope(['A', 1]));
     expect(manager.getStateFor('A', 1)).toBe('transparent');
-    const variant = mesh.material as THREE.MeshPhongMaterial;
-    expect(variant).not.toBe(original);
-    expect(variant.transparent).toBe(true);
-    expect(variant.opacity).toBeCloseTo(0.25);
+    const faded = drawn(env.modelManager, 'A', 1);
+    expect(faded.opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
+    expect(faded.opacityOverridden).toBe(true);
+    expect(faded.hidden).toBe(false);
 
     manager.opaque(scope(['A', 1]));
     expect(manager.getStateFor('A', 1)).toBe('normal');
-    expect(mesh.material).toBe(original); // exact original reference restored
+    expect(isNormal(env.modelManager, 'A', 1)).toBe(true);
   });
 
-  it('T5: shared-color meshes do not cross-contaminate (per-mesh variant, mirroring highlightVariants)', () => {
+  it('T5: same-coloured elements do not cross-contaminate — only the scope element fades', () => {
     const env = makeDeps();
-    // expressIDs 1,2,3 all share one material; 4,5 share another.
-    env.modelStore.set('A', makeSharedMaterialEntry('A', [[1, 2, 3], [4, 5]]));
+    // Every box in boxModel has the same colour.
+    env.load('A', [1, 2, 3, 4, 5]);
     const manager = new AppearanceManager(env.deps);
-
-    const m1 = meshFor(env.modelStore, 'A', 1);
-    const m2 = meshFor(env.modelStore, 'A', 2); // shares material with m1
-    const m4 = meshFor(env.modelStore, 'A', 4); // different material
-    const sharedOriginal = m2.material;
-    const otherOriginal = m4.material;
 
     manager.transparent(scope(['A', 1]));
 
-    // Only mesh 1 became transparent; its same-material siblings are untouched.
-    expect((m1.material as THREE.MeshPhongMaterial).opacity).toBeCloseTo(0.25);
-    expect(m2.material).toBe(sharedOriginal);
-    expect((m2.material as THREE.MeshPhongMaterial).opacity).toBe(1);
-    expect(m4.material).toBe(otherOriginal);
+    expect(drawn(env.modelManager, 'A', 1).opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
+    for (const id of [2, 3, 4, 5]) expect(isNormal(env.modelManager, 'A', id)).toBe(true);
   });
 });
 
@@ -217,7 +180,7 @@ describe('AppearanceManager — onChange (T6)', () => {
 
   beforeEach(() => {
     env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1, 2]));
+    env.load('A', [1, 2]);
     manager = new AppearanceManager(env.deps);
   });
 
@@ -245,7 +208,7 @@ describe('AppearanceManager — onChange (T6)', () => {
 describe('AppearanceManager — serialize / deserialize (T7)', () => {
   it('T7: serialize() → {modelId, expressId, state}[]; deserialize() rehydrates the map AND re-applies the visual effect for live models', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+    env.load('A', [1, 2, 3]);
     const manager = new AppearanceManager(env.deps);
 
     manager.hide(scope(['A', 1]));
@@ -260,24 +223,25 @@ describe('AppearanceManager — serialize / deserialize (T7)', () => {
     );
     expect(serialized).toHaveLength(2);
 
-    // Fresh manager + fresh model meshes; deserialize must re-apply effects.
+    // Fresh manager + freshly loaded model; deserialize must re-apply effects.
     const env2 = makeDeps();
-    env2.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
+    env2.load('A', [1, 2, 3]);
     const manager2 = new AppearanceManager(env2.deps);
     manager2.deserialize(serialized);
 
     expect(manager2.getStateFor('A', 1)).toBe('hidden');
     expect(manager2.getStateFor('A', 2)).toBe('transparent');
-    expect(meshFor(env2.modelStore, 'A', 1).visible).toBe(false);
-    expect((meshFor(env2.modelStore, 'A', 2).material as THREE.MeshPhongMaterial).opacity).toBeCloseTo(0.25);
+    expect(drawn(env2.modelManager, 'A', 1).hidden).toBe(true);
+    expect(drawn(env2.modelManager, 'A', 2).opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
+    expect(isNormal(env2.modelManager, 'A', 3)).toBe(true);
   });
 });
 
 describe('AppearanceManager — onModelRemoved (T8)', () => {
   it('T8: prunes only that model entries (delimiter-aware so "m1" != "m1-2"); fires onChange iff something was pruned', () => {
     const env = makeDeps();
-    env.modelStore.set('m1', makeModelEntry('m1', [1]));
-    env.modelStore.set('m1-2', makeModelEntry('m1-2', [1]));
+    env.load('m1', [1]);
+    env.load('m1-2', [1]);
     const manager = new AppearanceManager(env.deps);
 
     manager.hide(scope(['m1', 1], ['m1-2', 1]));
@@ -291,7 +255,7 @@ describe('AppearanceManager — onModelRemoved (T8)', () => {
 
     // Removing a model with no entries is a silent no-op.
     const env2 = makeDeps();
-    env2.modelStore.set('A', makeModelEntry('A', [1]));
+    env2.load('A', [1]);
     const manager2 = new AppearanceManager(env2.deps);
     manager2.hide(scope(['A', 1]));
     const listener2 = vi.fn();
@@ -302,61 +266,64 @@ describe('AppearanceManager — onModelRemoved (T8)', () => {
 });
 
 describe('AppearanceManager — mutually-exclusive transitions (T9, T10)', () => {
-  it('T9 (A4): hide an already-transparent element → hidden, clone removed (original ref) + visible=false; showAll → normal (NOT back to transparent)', () => {
+  it('T9 (A4): hide an already-transparent element → hidden and no longer faded; showAll → normal (NOT back to transparent)', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1]));
+    env.load('A', [1]);
     const manager = new AppearanceManager(env.deps);
-    const mesh = meshFor(env.modelStore, 'A', 1);
-    const original = mesh.material;
 
     manager.transparent(scope(['A', 1]));
-    expect(mesh.material).not.toBe(original);
+    expect(drawn(env.modelManager, 'A', 1).opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
 
-    // Hide overrides transparent: drop the clone, restore original ref, hide.
+    // Hide overrides transparent: the fade is dropped and the element hidden.
     manager.hide(scope(['A', 1]));
     expect(manager.getStateFor('A', 1)).toBe('hidden');
-    expect(mesh.material).toBe(original); // clone removed
-    expect(mesh.visible).toBe(false);
+    const hidden = drawn(env.modelManager, 'A', 1);
+    expect(hidden.hidden).toBe(true);
+    expect(hidden.opacityOverridden).toBe(false);
+    expect(hidden.opacity).toBe(1);
 
     // showAll returns to normal, NOT to transparent (mutually exclusive).
     manager.showAll();
     expect(manager.getStateFor('A', 1)).toBe('normal');
-    expect(mesh.visible).toBe(true);
-    expect(mesh.material).toBe(original);
+    expect(isNormal(env.modelManager, 'A', 1)).toBe(true);
   });
 
-  it('T10: transition matrix leaves the correct base and no leaked variant', () => {
+  it('T10: every transition ends in the draw state of the new state, with no residue', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1]));
+    env.load('A', [1]);
     const manager = new AppearanceManager(env.deps);
-    const mesh = meshFor(env.modelStore, 'A', 1);
-    const original = mesh.material;
 
     // transparent → opaque → normal
     manager.transparent(scope(['A', 1]));
     manager.opaque(scope(['A', 1]));
     expect(manager.getStateFor('A', 1)).toBe('normal');
-    expect(mesh.material).toBe(original);
-    expect(mesh.visible).toBe(true);
+    expect(isNormal(env.modelManager, 'A', 1)).toBe(true);
 
     // normal → transparent → hidden → showAll
     manager.transparent(scope(['A', 1]));
-    expect((mesh.material as THREE.MeshPhongMaterial).opacity).toBeCloseTo(0.25);
+    expect(drawn(env.modelManager, 'A', 1).opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
     manager.hide(scope(['A', 1]));
-    expect(mesh.visible).toBe(false);
-    expect(mesh.material).toBe(original); // hide normalized away the transparent clone
+    expect(drawn(env.modelManager, 'A', 1).hidden).toBe(true);
+    expect(drawn(env.modelManager, 'A', 1).opacityOverridden).toBe(false);
     manager.showAll();
     expect(manager.getStateFor('A', 1)).toBe('normal');
-    expect(mesh.visible).toBe(true);
-    expect(mesh.material).toBe(original);
-    expect((mesh.material as THREE.MeshPhongMaterial).opacity).toBe(1);
+    expect(isNormal(env.modelManager, 'A', 1)).toBe(true);
+
+    // hidden → transparent (overrides hide) → clearTransparency → normal
+    manager.hide(scope(['A', 1]));
+    manager.transparent(scope(['A', 1]));
+    const faded = drawn(env.modelManager, 'A', 1);
+    expect(faded.hidden).toBe(false);
+    expect(faded.opacity).toBeCloseTo(TRANSPARENCY_OPACITY);
+    manager.clearTransparency();
+    expect(isNormal(env.modelManager, 'A', 1)).toBe(true);
   });
 });
 
 describe('AppearanceManager — predicates (T11)', () => {
   it('T11: hasHidden()/hasTransparent() flip true on the matching state and false after showAll/opaque', () => {
     const env = makeDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1, 2]));
+    env.load('A', [1, 2]);
     const manager = new AppearanceManager(env.deps);
 
     expect(manager.hasHidden()).toBe(false);

@@ -35,7 +35,33 @@ describe('ModelManager — render-on-demand wiring', () => {
     const requestRender = vi.fn();
     const mm = new ModelManager(new THREE.Scene(), requestRender);
     mm.addModel(makeParsed('a'));
-    expect(requestRender).toHaveBeenCalledTimes(1);
+    // Once for the geometry arriving, once when the stream closes (closing
+    // trims the chunk buffers, which replaces what is on the GPU).
+    expect(requestRender).toHaveBeenCalled();
+  });
+
+  it('calls requestRender on every element-level appearance change', () => {
+    const requestRender = vi.fn();
+    const mm = new ModelManager(new THREE.Scene(), requestRender);
+    mm.addModel(makeParsed('a'));
+    const changes: Array<() => void> = [
+      () => mm.setHidden('a', [1], true),
+      () => mm.setHighlighted('a', [1], true),
+      () => mm.setOpacity('a', [1], 0.25),
+      () => mm.setColor('a', [1], { r: 1, g: 0, b: 0 }),
+    ];
+    for (const change of changes) {
+      requestRender.mockClear();
+      change();
+      expect(requestRender).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('does not call requestRender for an element change on a missing model', () => {
+    const requestRender = vi.fn();
+    const mm = new ModelManager(new THREE.Scene(), requestRender);
+    mm.setHidden('nope', [1], true);
+    expect(requestRender).not.toHaveBeenCalled();
   });
 
   it('calls requestRender on removeModel', () => {
