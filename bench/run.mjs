@@ -174,23 +174,28 @@ async function waitForLoads(page, count, timeoutMs, events) {
   }
 }
 
+// Geometry-cache entries, counted only once the model file itself is saved
+// too (both happen after the load settles; a reload before either would
+// measure a full parse, or a missing file).
 const geometryCacheCount = () =>
   new Promise((resolve) => {
     const req = indexedDB.open('ifcviewer');
     req.onerror = () => resolve(-1);
     req.onsuccess = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains('geometry-index')) {
+      if (!db.objectStoreNames.contains('geometry-index') || !db.objectStoreNames.contains('models')) {
         db.close();
         resolve(0);
         return;
       }
-      const c = db.transaction('geometry-index', 'readonly').objectStore('geometry-index').count();
-      c.onsuccess = () => {
+      const tx = db.transaction(['geometry-index', 'models'], 'readonly');
+      const entries = tx.objectStore('geometry-index').count();
+      const models = tx.objectStore('models').count();
+      tx.oncomplete = () => {
         db.close();
-        resolve(c.result);
+        resolve(models.result > 0 ? entries.result : 0);
       };
-      c.onerror = () => {
+      tx.onerror = () => {
         db.close();
         resolve(-1);
       };

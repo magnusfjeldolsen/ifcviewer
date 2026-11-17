@@ -47,8 +47,12 @@ interface SharedParse {
   buffer: ArrayBuffer;
   helperCount: number;
   cacheKey?: string;
-  /** Runs the `ChunkCoordinator`; set once the main worker has listed. */
+  /** Runs the `ChunkCoordinator`. */
   coordinator: WorkerLike | null;
+  /** The coordinator's ends of the workers' ports, until the plan carries them over. */
+  coordinatorPorts: MessagePort[] | null;
+  /** Helpers that could not be created. */
+  failedEarly: number[];
   /** Helpers not yet terminated, by key (1, 2, …; the main worker is 0). */
   helpers: Map<number, WorkerLike>;
   /** Helpers whose geometry is all delivered (or never will be: failed, never started). */
@@ -226,6 +230,8 @@ export class WorkerIfcParser {
           helperCount,
           cacheKey: options.cacheKey,
           coordinator: null,
+          coordinatorPorts: null,
+          failedEarly: [],
           helpers: new Map(),
           streamed: new Set(),
           cancelled: false,
@@ -246,6 +252,7 @@ export class WorkerIfcParser {
       if (helperCount > 0) msg.shared = true;
       if (options.cacheKey) msg.cacheKey = options.cacheKey;
       this.worker.postMessage(msg);
+      if (p.shared) this.startSharing(p, p.shared);
       // postMessage clones the buffer before it returns.
       timeline?.add('main.postParse', performance.now() - t0);
       timeline?.mark('main.posted');
@@ -301,7 +308,7 @@ export class WorkerIfcParser {
         const p = this.pending.get(msg.id);
         if (!p) return;
         p.total = msg.total;
-        if (p.shared && msg.ids) this.startSharing(p, p.shared, msg.ids);
+        if (p.shared && msg.ids) this.plan(p.shared, msg.ids);
         break;
       }
       case 'batch':
@@ -362,38 +369,26 @@ export class WorkerIfcParser {
   }
 
   /**
-   * The main worker has listed the elements: start the coordinator, give
-   * every worker its port to it, and start the helpers with a copy of the
-   * file. Helpers start only now, after the main worker's open, because
-   * opens in parallel slow each other down and the first geometry with them.
+   * Start the coordinator and the helpers, and give every worker its port to
+   * the coordinator. The helpers open their copy of the file while the main
+   * worker opens its own; the chunks come once the main worker has listed the
+   * elements (`plan`).
    */
-  private startSharing(p: PendingModel, shared: SharedParse, ids: number[]): void {
+  private startSharing(p: PendingModel, shared: SharedParse): void {
     const { id } = shared;
     const t0 = performance.now();
-    if (shared.cancelled) {
-      // Called off before the list arrived: the main worker still waits for
-      // a port. Give it one that says "no more" straight away.
-      const channel = new MessageChannel();
-      channel.port1.postMessage({ type: 'chunk', index: -1, ids: null });
-      this.worker.postMessage({ type: 'chunkPort', id, port: channel.port2 }, [channel.port2]);
-      return;
-    }
     const channels = Array.from({ length: shared.helperCount + 1 }, () => new MessageChannel());
+    shared.coordinatorPorts = channels.map((c) => c.port1);
     const coordinator = this.createCoordinator();
     shared.coordinator = coordinator;
     coordinator.onerror = (): void => this.failShare(shared, 'chunk coordinator crashed');
-    const ports = channels.map((c) => c.port1);
-    (coordinator as unknown as { postMessage(m: ToCoordinator, t: Transferable[]): void }).postMessage(
-      { type: 'plan', ids, ports },
-      ports,
-    );
     this.worker.postMessage({ type: 'chunkPort', id, port: channels[MAIN].port2 }, [channels[MAIN].port2]);
     for (let key = 1; key <= shared.helperCount; key++) {
       let helper: WorkerLike;
       try {
         helper = this.createHelper();
       } catch {
-        this.tellCoordinator(shared, { type: 'fail', worker: key });
+        shared.failedEarly.push(key);
         shared.streamed.add(key);
         continue;
       }
@@ -412,6 +407,19 @@ export class WorkerIfcParser {
     p.timeline?.add('main.postShare', performance.now() - t0);
   }
 
+  /** The main worker has listed the elements: the coordinator can hand them out. */
+  private plan(shared: SharedParse, ids: number[]): void {
+    const ports = shared.coordinatorPorts;
+    if (!shared.coordinator || !ports) return;
+    shared.coordinatorPorts = null;
+    (shared.coordinator as unknown as { postMessage(m: ToCoordinator, t: Transferable[]): void }).postMessage(
+      { type: 'plan', ids, ports },
+      ports,
+    );
+    // Helpers that could not even be created hand nothing back, but the
+    // coordinator must not wait for them.
+    for (const key of shared.failedEarly) this.tellCoordinator(shared, { type: 'fail', worker: key });
+  }
   private onHelperMessage(shared: SharedParse, key: number, msg: FromWorker): void {
     if (!shared.helpers.has(key)) return;
     switch (msg.type) {

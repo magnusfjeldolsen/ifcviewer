@@ -1170,16 +1170,6 @@ export class App {
         modelSource.type,
       );
 
-      // Persist to IndexedDB if memory is enabled
-      if (this.sessionStore.isMemoryEnabled()) {
-        const t0 = performance.now();
-        await this.sessionStore.saveModel(id, file.name, file.buffer);
-        timeline.add('main.saveModel', performance.now() - t0);
-        // Force an immediate session save (not debounced) so the record
-        // is in localStorage even if the user refreshes right away
-        this.sessionStore.saveSession(this.buildSessionState());
-      }
-
       this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
       timeline.mark('main.settled');
@@ -1187,6 +1177,17 @@ export class App {
         name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
         phases: timeline.toJSON(),
       });
+
+      // Persist to IndexedDB if memory is enabled. After the load has
+      // settled: the model is on screen and usable, and writing a large
+      // file (0.8 s for 357 MB) is no reason to keep saying "Loading". The
+      // next queued load still waits for it.
+      if (this.sessionStore.isMemoryEnabled()) {
+        await this.sessionStore.saveModel(id, file.name, file.buffer);
+        // Force an immediate session save (not debounced) so the record
+        // is in localStorage even if the user refreshes right away
+        this.sessionStore.saveSession(this.buildSessionState());
+      }
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
