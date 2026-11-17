@@ -192,6 +192,127 @@ describe('ModelPropertyCache — a small Revit-shaped model', () => {
   });
 });
 
+/**
+ * An IFC4 model with two types on one element, a relationship whose id is
+ * lower than one declared before it (ids out of order), and type materials.
+ */
+function ifc4Model(): Uint8Array {
+  const text = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('ifc4.ifc','2026-01-01T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0000000000000000000001',$,'Project',$,$,$,$,$,$);
+#10=IFCWALL('0000000000000000000010',$,'Wall 1',$,$,$,$,'101',.STANDARD.);
+#11=IFCWALL('0000000000000000000011',$,'Wall 2',$,$,$,$,'102',.STANDARD.);
+#12=IFCBEAM('0000000000000000000012',$,'Beam',$,$,$,$,'103',.BEAM.);
+#20=IFCPROPERTYSINGLEVALUE('FireRating',$,IFCLABEL('EI60'),$);
+#21=IFCPROPERTYSET('0000000000000000000021',$,'Pset_WallCommon',$,(#20));
+#22=IFCWALLTYPE('0000000000000000000022',$,'Type One',$,$,(#21),$,$,$,.STANDARD.);
+#24=IFCPROPERTYSINGLEVALUE('Load',$,IFCLABEL('Heavy'),$);
+#25=IFCPROPERTYSET('0000000000000000000025',$,'Pset_Second',$,(#24));
+#26=IFCWALLTYPE('0000000000000000000026',$,'Type Two',$,$,(#25),$,$,$,.SOLIDWALL.);
+#60=IFCRELDEFINESBYTYPE('0000000000000000000060',$,$,$,(#10,#11),#22);
+#50=IFCRELDEFINESBYTYPE('0000000000000000000050',$,$,$,(#10),#26);
+#30=IFCPROPERTYSINGLEVALUE('Mark',$,IFCLABEL('A-1'),$);
+#31=IFCPROPERTYSET('0000000000000000000031',$,'Identity Data',$,(#30));
+#32=IFCRELDEFINESBYPROPERTIES('0000000000000000000032',$,$,$,(#10,#12),#31);
+#40=IFCMATERIAL('Concrete',$,$);
+#41=IFCMATERIAL('Steel',$,$);
+#42=IFCRELASSOCIATESMATERIAL('0000000000000000000042',$,$,$,(#22),#40);
+#43=IFCRELASSOCIATESMATERIAL('0000000000000000000043',$,$,$,(#26),#41);
+ENDSEC;
+END-ISO-10303-21;
+`;
+  return new TextEncoder().encode(text);
+}
+
+/**
+ * A relationship may list the same object twice. web-ifc's inverse lookup
+ * returns that relationship twice; the cache must too.
+ */
+function duplicateRefModel(schema: 'IFC2X3' | 'IFC4'): Uint8Array {
+  const wall =
+    schema === 'IFC4'
+      ? (n: number, name: string): string =>
+          `#${n}=IFCWALL('00000000000000000000${n}',$,'${name}',$,$,$,$,'${n}',.STANDARD.);`
+      : (n: number, name: string): string =>
+          `#${n}=IFCWALLSTANDARDCASE('00000000000000000000${n}',$,'${name}',$,$,$,$,'${n}');`;
+  const text = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('dup.ifc','2026-01-01T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('${schema}'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0000000000000000000001',$,'Project',$,$,$,$,$,$);
+${wall(10, 'Wall 1')}
+${wall(11, 'Wall 2')}
+#20=IFCPROPERTYSINGLEVALUE('FireRating',$,IFCLABEL('EI60'),$);
+#21=IFCPROPERTYSET('0000000000000000000021',$,'Pset_WallCommon',$,(#20));
+#22=IFCWALLTYPE('0000000000000000000022',$,'Basic Wall',$,$,(#21),$,$,$,.STANDARD.);
+#23=IFCRELDEFINESBYTYPE('0000000000000000000023',$,$,$,(#10,#10,#11),#22);
+#30=IFCPROPERTYSINGLEVALUE('Mark',$,IFCLABEL('A-1'),$);
+#31=IFCPROPERTYSET('0000000000000000000031',$,'Identity Data',$,(#30));
+#70=IFCRELDEFINESBYPROPERTIES('0000000000000000000070',$,$,$,(#10,#10,#11),#31);
+#40=IFCMATERIAL('Concrete'${schema === 'IFC4' ? ",$,$" : ''});
+#41=IFCRELASSOCIATESMATERIAL('0000000000000000000041',$,$,$,(#22,#22),#40);
+ENDSEC;
+END-ISO-10303-21;
+`;
+  return new TextEncoder().encode(text);
+}
+
+/** Every product reads the same cached as uncached; returns the cached reads. */
+async function expectCachedEqualsUncached(
+  data: Uint8Array,
+  expectedProducts: number,
+): Promise<Map<number, ElementProperties>> {
+  const api = new IfcAPI();
+  await api.Init();
+  const modelID = api.OpenModel(data);
+  const out = new Map<number, ElementProperties>();
+  try {
+    const units = await unitsOf(api, modelID);
+    const cache = new ModelPropertyCache(api, modelID);
+    const elements = ids(api, modelID, IFCPRODUCT);
+    expect(elements).toHaveLength(expectedProducts);
+    for (const id of elements) {
+      const uncached = await fetchElementProperties(api as unknown as PropertyApi, modelID, 'm', id, units);
+      const cached = await fetchElementProperties(api as unknown as PropertyApi, modelID, 'm', id, units, cache);
+      expect(snapshot(cached)).toEqual(snapshot(uncached));
+      out.set(id, cached);
+    }
+  } finally {
+    api.CloseModel(modelID);
+  }
+  return out;
+}
+
+describe('ModelPropertyCache — IFC4, two types, out-of-order ids', () => {
+  it('reports exactly what the uncached read reports, for every element', async () => {
+    const reads = await expectCachedEqualsUncached(ifc4Model(), 3);
+    // Guard against comparing two empty results.
+    const wall1 = reads.get(10)!;
+    expect(wall1.psets.map((g) => g.name)).toContain('Pset_WallCommon');
+    expect(wall1.psets.map((g) => g.name)).toContain('Pset_Second');
+    expect(wall1.materials.length).toBeGreaterThan(0);
+  });
+});
+
+describe('ModelPropertyCache — a relationship listing an object twice', () => {
+  for (const schema of ['IFC2X3', 'IFC4'] as const) {
+    it(`reads like the uncached path, ${schema}`, async () => {
+      const reads = await expectCachedEqualsUncached(duplicateRefModel(schema), 2);
+      // The fixture really duplicates: the pset is reported more than once.
+      const identity = reads.get(10)!.psets.filter((g) => g.name === 'Identity Data');
+      expect(identity.length).toBeGreaterThan(1);
+    });
+  }
+});
+
 describe('ModelPropertyCaches — lifetime', () => {
   it('drops a model\'s cache when the model is closed, so the next model starts empty', async () => {
     const api = new IfcAPI();

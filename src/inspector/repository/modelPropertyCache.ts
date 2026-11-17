@@ -29,7 +29,10 @@
  *
  * The cache must reproduce exactly what web-ifc's own `properties.*` helpers
  * return — same lines, same order — so that a cached read is
- * indistinguishable from an uncached one. The index therefore scans the same
+ * indistinguishable from an uncached one on well-formed files. (On malformed
+ * files the cached path can return a result where the uncached path would
+ * throw, e.g. a dangling RelatingType, or a broken reference in a pset field
+ * the normalizer never reads such as OwnerHistory; that is accepted.) The index therefore scans the same
  * relationship supertypes, in the same order, that web-ifc's inverse lookup
  * scans (`InversePropertyDef` for `IsDefinedBy` / `IsTypedBy` /
  * `HasAssociations`).
@@ -324,9 +327,10 @@ export class ModelPropertyCache {
             const relating = refIds(rel[attr]);
             if (relating === null) continue;
             const map = index[into];
-            // A relationship listing the same object twice still counts once,
-            // as it does in web-ifc's inverse lookup.
-            for (const obj of new Set(related)) {
+            // No de-duplication: web-ifc's inverse lookup does not either, so
+            // a relationship listing the same object twice yields its
+            // relating object(s) twice there and must do so here.
+            for (const obj of related) {
               const list = map.get(obj);
               if (list) list.push(...relating);
               else map.set(obj, [...relating]);
