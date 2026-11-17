@@ -181,3 +181,58 @@ describe('ClippingTool — state-observer surface', () => {
     // is that dispose drops existing listeners.
   });
 });
+
+/**
+ * Grabbing the handle must own the drag outright. The viewer listens for
+ * `pointerdown` on the same canvas and was registered first, so stopping
+ * propagation was not enough: both listeners ran, and every handle drag also
+ * orbited the camera — while an orbit started near the handle also dragged the
+ * section plane. Measured in the running app (#87): a 200 px orbit drag begun
+ * 12 px from the handle moved the plane 24 m.
+ */
+describe('ClippingTool — the handle drag owns the gesture', () => {
+  let canvas: HTMLCanvasElement;
+  let tool: ClippingTool;
+  let navigation: ReturnType<typeof vi.fn<(e: Event) => void>>;
+
+  beforeEach(() => {
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    canvas = document.createElement('canvas');
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100, x: 0, y: 0 }) as DOMRect;
+    canvas.setPointerCapture = () => {};
+    canvas.releasePointerCapture = () => {};
+    document.body.appendChild(canvas);
+    // Stand-in for the viewer's orbit listener: added before the tool exists,
+    // exactly as in the app.
+    navigation = vi.fn<(e: Event) => void>();
+    canvas.addEventListener('pointerdown', navigation);
+    tool = new ClippingTool({ renderer: makeRenderer(), scene: new THREE.Scene(), camera, canvas });
+    tool.enterPlacingMode();
+    // The synthetic hit is at the origin, which the camera sees at the centre.
+    placeClipPlane(canvas);
+  });
+
+  afterEach(() => {
+    tool.dispose();
+    canvas.remove();
+  });
+
+  const pointerDown = (x: number, y: number) =>
+    canvas.dispatchEvent(
+      new PointerEvent('pointerdown', { button: 0, pointerId: 1, clientX: x, clientY: y, bubbles: true }),
+    );
+
+  it('a press on the handle never reaches navigation', () => {
+    pointerDown(50, 50);
+    expect(navigation).not.toHaveBeenCalled();
+  });
+
+  it('a press away from the handle is left to navigation', () => {
+    pointerDown(5, 5);
+    expect(navigation).toHaveBeenCalledTimes(1);
+  });
+});

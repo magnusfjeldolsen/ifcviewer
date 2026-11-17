@@ -331,13 +331,16 @@ export class ClippingTool implements Tool {
   // ── Drag to move plane ─────────────────────────────────────
 
   private addDragListeners(): void {
-    this.deps.canvas.addEventListener('pointerdown', this.boundOnPointerDown);
+    // Capture phase: at the target, capturing listeners run before the
+    // viewer's own (registered earlier, non-capturing), so a press on the
+    // handle can claim the gesture before navigation ever sees it.
+    this.deps.canvas.addEventListener('pointerdown', this.boundOnPointerDown, { capture: true });
     this.deps.canvas.addEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.addEventListener('pointerup', this.boundOnPointerUp);
   }
 
   private removeDragListeners(): void {
-    this.deps.canvas.removeEventListener('pointerdown', this.boundOnPointerDown);
+    this.deps.canvas.removeEventListener('pointerdown', this.boundOnPointerDown, { capture: true });
     this.deps.canvas.removeEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.removeEventListener('pointerup', this.boundOnPointerUp);
   }
@@ -363,8 +366,11 @@ export class ClippingTool implements Tool {
     this.deps.canvas.style.cursor = 'ns-resize';
     this.deps.canvas.setPointerCapture(e.pointerId);
 
+    // Immediate: the viewer's orbit and OrbitControls' pan listen on this same
+    // canvas, and plain stopPropagation does not stop listeners on the target.
+    // Without it the drag moved the plane and orbited the camera at once.
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
   }
 
   private onPointerMove(e: PointerEvent): void {
