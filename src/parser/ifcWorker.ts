@@ -36,6 +36,7 @@
 import * as WebIFC from 'web-ifc';
 
 import { fetchElementProperties } from '../inspector/repository/fetchElementProperties';
+import { ModelPropertyCaches, type ModelPropertyCache } from '../inspector/repository/modelPropertyCache';
 import { computeUnitTable } from '../inspector/repository/unitTable';
 import { buildUnitTable, DEFAULT_UNITS, type UnitTable } from '../inspector/format';
 import {
@@ -66,6 +67,12 @@ let initPromise: Promise<WebIFC.IfcAPI> | null = null;
 const modelIds = new Map<string, number>();
 /** App UUID → per-model unit table (lazily computed on first property query). */
 const unitTables = new Map<string, UnitTable>();
+/**
+ * App UUID → per-model property cache (relationship index + resolved type
+ * objects). Created by the first bulk read, used by every read after it, and
+ * dropped with the model. See `modelPropertyCache.ts`.
+ */
+const propertyCaches = new ModelPropertyCaches();
 
 /**
  * Serial request queue. Each message handler is appended to this chain so
@@ -256,6 +263,7 @@ async function getOne(
   id: string,
   expressId: number,
   unitTable: UnitTable,
+  cache: ModelPropertyCache | undefined,
 ): Promise<ElementProperties> {
   return fetchElementProperties(
     ifc as unknown as Parameters<typeof fetchElementProperties>[0],
@@ -263,10 +271,18 @@ async function getOne(
     id,
     expressId,
     unitTable,
+    cache,
   );
 }
 
-/** Fetch + normalize one element's properties and post them back. */
+/**
+ * Fetch + normalize one element's properties and post them back.
+ *
+ * Uses the model's property cache if a bulk read has already built it, but
+ * never builds it: on a large model the relationship index costs a few
+ * hundred milliseconds up front, which a single inspector click (a few
+ * milliseconds uncached) should not pay.
+ */
 async function handleGetProps(reqId: number, id: string, expressId: number): Promise<void> {
   const ifc = await getApi();
   const modelID = modelIds.get(id);
@@ -274,7 +290,7 @@ async function handleGetProps(reqId: number, id: string, expressId: number): Pro
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
   const unitTable = await ensureUnitTable(ifc, id, modelID);
-  const props = await getOne(ifc, modelID, id, expressId, unitTable);
+  const props = await getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.peek(id));
   post({ type: 'props', reqId, props });
 }
 
@@ -372,13 +388,14 @@ async function readProps(
   const total = expressIds.length;
   let done = 0;
   let lastProgressAt = 0;
+  const cache = propertyCaches.for(id, ifc, modelID);
 
   for (let start = 0; start < total; start += INTERSECT_CHUNK) {
     if (cancelled.has(reqId)) return false;
 
     const end = Math.min(start + INTERSECT_CHUNK, total);
     for (let i = start; i < end; i++) {
-      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable));
+      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable, cache));
       done++;
     }
 
@@ -572,6 +589,7 @@ function handleDisposeModel(id: string): void {
   const modelID = modelIds.get(id);
   modelIds.delete(id);
   unitTables.delete(id);
+  propertyCaches.drop(id);
   if (modelID !== undefined && api) {
     try {
       api.CloseModel(modelID);
@@ -594,6 +612,7 @@ function handleDispose(): void {
   initPromise = null;
   modelIds.clear();
   unitTables.clear();
+  propertyCaches.clear();
 }
 
 // --- message dispatch --------------------------------------------------------

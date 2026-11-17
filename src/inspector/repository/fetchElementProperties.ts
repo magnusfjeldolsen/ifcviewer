@@ -35,6 +35,7 @@ import {
   type RawPropertyGroup,
 } from './propertyNormalizer';
 import { buildFlatRows } from './flatRows';
+import { resolveTypePsets, typeObjectName, type ModelPropertyCache } from './modelPropertyCache';
 
 /**
  * Subset of `IfcAPI` the property fetch depends on. Pulled out as a type
@@ -109,12 +110,16 @@ export async function fetchElementProperties(
   modelId: string,
   expressId: number,
   unitTable: UnitTable,
+  cache?: ModelPropertyCache,
 ): Promise<ElementProperties> {
-  const [item, groups, materialsRaw] = await Promise.all([
-    api.properties.getItemProperties(webIfcId, expressId, false, false),
-    fetchPropertyGroups(api, webIfcId, expressId),
-    api.properties.getMaterialsProperties(webIfcId, expressId, true, true),
-  ]);
+  const [item, groups, materialsRaw] =
+    cache && cache.webIfcId === webIfcId && cache.usable()
+      ? readCached(api, cache, webIfcId, expressId)
+      : await Promise.all([
+          api.properties.getItemProperties(webIfcId, expressId, false, false),
+          fetchPropertyGroups(api, webIfcId, expressId),
+          api.properties.getMaterialsProperties(webIfcId, expressId, true, true),
+        ]);
   const { rawGroups, typeName } = groups;
 
   // The type object is resolved for its psets anyway; carrying its name onto
@@ -189,28 +194,34 @@ async function fetchPropertyGroups(
     if (!isObj(t)) continue;
     // First type object wins — an element has one type in practice, and a
     // deterministic pick beats an arbitrary merge.
-    if (typeName === undefined) {
-      const n = (t as { Name?: unknown }).Name;
-      const resolved = isObj(n) ? (n as { value?: unknown }).value : n;
-      if (typeof resolved === 'string' && resolved !== '') typeName = resolved;
-    }
-    const has = t.HasPropertySets;
-    if (!Array.isArray(has)) continue;
-    for (const ref of has) {
-      if (isObj(ref) && typeof ref.value === 'number') {
-        try {
-          const resolved = await api.GetLine(webIfcId, ref.value, true);
-          if (isObj(resolved)) typeRaw.push(resolved);
-        } catch {
-          /* skip — line not resolvable */
-        }
-      } else if (isObj(ref)) {
-        // Already-resolved pset (e.g. from a future recursive=true call path).
-        typeRaw.push(ref);
-      }
-    }
+    if (typeName === undefined) typeName = typeObjectName(t);
+    typeRaw.push(...resolveTypePsets(t, (id) => api.GetLine(webIfcId, id, true)));
   }
 
+  return { rawGroups: mergeRawGroups(instanceRaw, typeRaw), typeName };
+}
+
+/**
+ * The cached equivalent of the three uncached reads in
+ * `fetchElementProperties`: the element line, its merged instance + type
+ * psets, and its type materials. Same lines, same order — the per-model
+ * `ModelPropertyCache` answers the relationship lookups from an index and
+ * resolves each type object once.
+ */
+function readCached(
+  api: PropertyApi,
+  cache: ModelPropertyCache,
+  webIfcId: number,
+  expressId: number,
+): [unknown, { rawGroups: RawPropertyGroup[]; typeName: string | undefined }, unknown[]] {
+  const item = api.GetLine(webIfcId, expressId, false);
+  const instanceRaw = cache.instancePropertySets(expressId);
+  const { typeName, psetsRaw, materialsRaw } = cache.typeSide(expressId);
+  return [item, { rawGroups: mergeRawGroups(instanceRaw, psetsRaw), typeName }, materialsRaw];
+}
+
+/** Instance groups first, then type groups tagged `inheritedFromType`. */
+function mergeRawGroups(instanceRaw: unknown[], typeRaw: unknown[]): RawPropertyGroup[] {
   const out: RawPropertyGroup[] = [];
   for (const raw of instanceRaw) {
     if (isObj(raw)) out.push({ raw, inheritedFromType: false });
@@ -218,7 +229,7 @@ async function fetchPropertyGroups(
   for (const raw of typeRaw) {
     if (isObj(raw)) out.push({ raw, inheritedFromType: true });
   }
-  return { rawGroups: out, typeName };
+  return out;
 }
 
 /** Split a merged list of raw psets/qtos into our typed groups, tagging type-inherited ones. */
