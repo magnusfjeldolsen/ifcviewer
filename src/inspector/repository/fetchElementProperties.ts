@@ -19,7 +19,7 @@
  * change to the fetch itself.
  */
 
-import { IFCELEMENTQUANTITY, IFCPROPERTYSET } from 'web-ifc';
+import { IFCELEMENTQUANTITY, IFCPROPERTYSET } from '../ifcTypeCodes';
 
 import type { UnitTable } from '../format';
 import type { ElementProperties, PropertyGroup } from '../types';
