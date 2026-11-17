@@ -78,3 +78,40 @@ describe('CameraAnimator.cancel', () => {
     expect(() => new CameraAnimator().cancel()).not.toThrow();
   });
 });
+
+/**
+ * The animation's clock. It used to subtract `performance.now()` at the start
+ * from the rAF timestamp; in jsdom the two clocks have different origins (the
+ * rAF one starts ~1 s later), so elapsed time stayed negative for that long —
+ * and past the 5 s test timeout when the suite ran under load.
+ */
+describe('CameraAnimator clock', () => {
+  it('finishes on time whatever clock the rAF timestamp comes from', async () => {
+    const realRaf = globalThis.requestAnimationFrame;
+    // A frame clock 60 s behind performance.now().
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+      setTimeout(() => cb(performance.now() - 60_000), 16) as unknown as number) as typeof requestAnimationFrame;
+    try {
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+      const controls = { target: new THREE.Vector3(), update: () => {} } as unknown as FlyToParams['controls'];
+      const onComplete = vi.fn();
+      const started = performance.now();
+      await new CameraAnimator().flyTo({
+        camera,
+        controls,
+        canvas: document.createElement('canvas'),
+        targetPosition: new THREE.Vector3(5, 5, 5),
+        targetLookAt: new THREE.Vector3(),
+        near: 0.1,
+        far: 100,
+        durationMs: 30,
+        onComplete,
+      });
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(camera.position.distanceTo(new THREE.Vector3(5, 5, 5))).toBeLessThan(1e-9);
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+    }
+  }, 2000);
+});
