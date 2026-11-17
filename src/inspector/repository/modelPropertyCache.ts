@@ -47,7 +47,7 @@ import {
   IFCRELDEFINES,
   IFCRELDEFINESBYPROPERTIES,
   IFCRELDEFINESBYTYPE,
-} from 'web-ifc';
+} from '../ifcTypeCodes';
 
 import type { PropertyApi } from './fetchElementProperties';
 import { isObj } from './propertyNormalizer';

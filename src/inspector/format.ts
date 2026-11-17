@@ -34,7 +34,7 @@ import {
   IFCTEXT,
   IFCTIMEMEASURE,
   IFCVOLUMEMEASURE,
-} from 'web-ifc';
+} from './ifcTypeCodes';
 
 // ---------------------------------------------------------------------------
 // Measure classification
