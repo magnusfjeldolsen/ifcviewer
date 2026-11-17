@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import { ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
+import { ANCHOR_REACH, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
 import { boxMesh, boxModel, cameraLookingAt, makeModelManager } from './helpers/models';
 
 /** Every chunk mesh of every model in the scene. */
@@ -443,6 +443,81 @@ describe('ModelBatch — picking', () => {
     // A box is entered and left: two faces, both from the chunk mesh.
     expect(hits).toHaveLength(2);
     expect(hits.every((h) => h.object instanceof ChunkMesh)).toBe(true);
+  });
+});
+
+describe('ModelBatch — precision far from the origin', () => {
+  /** Largest gap between a piece's snapping corners, placed in the world, and where the box really has them. */
+  function worstCornerError(batch: ModelBatch, pieceId: number, at: [number, number, number], size: [number, number, number]): number {
+    const piece = batch.pieceGeometry(pieceId)!;
+    const pos = piece.geometry.getAttribute('position');
+    const t = new THREE.Vector3().setFromMatrixPosition(piece.matrixWorld);
+    let worst = 0;
+    for (let i = 0; i < pos.count; i++) {
+      for (let k = 0; k < 3; k++) {
+        const world = pos.getComponent(i, k) + t.getComponent(k);
+        // Every corner of the box is at the centre ± half the edge.
+        const local = world - at[k];
+        worst = Math.max(worst, Math.abs(Math.abs(local) - size[k] / 2));
+      }
+    }
+    return worst;
+  }
+
+  it('keeps sub-millimetre corners when the first piece is at the origin and the building 6,500 km away', () => {
+    const batch = new ModelBatch('m');
+    const site: [number, number, number] = [6500000.137, 1200000.071, 12.345];
+    const size: [number, number, number] = [0.2, 0.06, 0.2];
+    batch.append([boxMesh(1), boxMesh(2, { at: site, size })]);
+    batch.finish();
+
+    // Pieces are numbered from 0 in arrival order.
+    expect(worstCornerError(batch, 0, [0, 0, 0], [1, 1, 1])).toBeLessThan(1e-5);
+    expect(worstCornerError(batch, 1, site, size)).toBeLessThan(1e-5);
+    const box = batch.expandByElements([2], new THREE.Box3());
+    expect(box.getSize(new THREE.Vector3()).toArray().map((v) => +v.toFixed(6))).toEqual(size);
+    expect(box.getCenter(new THREE.Vector3()).distanceTo(new THREE.Vector3(...site))).toBeLessThan(1e-6);
+
+    // Picking lands on the far box, where it really is.
+    const scene = new THREE.Scene();
+    scene.add(batch.group);
+    const hit = pick(scene, new THREE.Vector3(site[0] + 0.05, site[1] + 0.01, site[2] + 10), new THREE.Vector3(0, 0, -1))!;
+    expect(elementOfHit(hit)!.expressId).toBe(2);
+    expect(Math.abs(hit.point.z - (site[2] + 0.1))).toBeLessThan(1e-5);
+    expect(Math.abs(hit.point.x - (site[0] + 0.05))).toBeLessThan(1e-5);
+  });
+
+  it('keeps sub-millimetre corners for a whole model far away, across chunk splits', () => {
+    const base = [6500000.37, 1200000.81, 3.3];
+    const size: [number, number, number] = [0.3, 0.3, 0.3];
+    const at = (i: number): [number, number, number] => [base[0] + (i % 20) * 7.13, base[1] + Math.floor(i / 20) * 9.07, base[2]];
+    const meshes = Array.from({ length: 400 }, (_, i) => boxMesh(i + 1, { at: at(i), size }));
+    const batch = new ModelBatch('m', { chunkVertexCap: 1200 });
+    for (let i = 0; i < meshes.length; i += 37) batch.append(meshes.slice(i, i + 37));
+    batch.finish();
+    expect(batch.chunkMeshes().length).toBeGreaterThan(4);
+
+    let worst = 0;
+    for (let i = 0; i < 400; i++) worst = Math.max(worst, worstCornerError(batch, i, at(i), size));
+    expect(worst).toBeLessThan(1e-5);
+    // Each chunk's own bounds (chunk space, placed by its mesh) cover its pieces in the world.
+    let covered = 0;
+    batch.forEachVisiblePiece((_id, box) => {
+      if (batch.chunkMeshes().some((m) => m.geometry.boundingBox!.clone().applyMatrix4(m.matrixWorld).expandByScalar(1e-6).containsBox(box))) covered++;
+    });
+    expect(covered).toBe(400);
+  });
+
+  it('gives a piece out of reach of every chunk its own chunk, without moving the others', () => {
+    const batch = new ModelBatch('m');
+    batch.append([boxMesh(1), boxMesh(2, { at: [3, 0, 0] })]);
+    const [first] = batch.chunkMeshes();
+    batch.append([boxMesh(3, { at: [ANCHOR_REACH * 3, 0, 0] }), boxMesh(4, { at: [6, 0, 0] })]);
+    expect(batch.chunkMeshes()).toHaveLength(2);
+    expect(batch.chunkMeshes()).toContain(first);
+    // A later piece near the first ones still joins their chunk.
+    expect(batch.stats().vertices).toBe(4 * 24);
+    expect(first.geometry.drawRange.count).toBe(3 * 36);
   });
 });
 

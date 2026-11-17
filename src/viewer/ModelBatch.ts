@@ -29,13 +29,27 @@ import type { ParsedMesh } from '../parser/types';
  * pass skips it and a per-chunk overlay mesh, sharing the chunk's vertex
  * buffers with its own short index list, draws it in the transparent pass.
  *
- * Positions are stored relative to a per-model origin (the first piece's
- * placement) and the model's group carries that origin, so georeferenced
- * coordinates in the millions keep their precision in Float32.
+ * ## Precision far from the origin
+ *
+ * Each chunk has an **anchor**, a world point near its pieces; the chunk's
+ * mesh is placed at the anchor and its Float32 positions are relative to it.
+ * A piece only joins a chunk whose anchor is within `ANCHOR_REACH` of the
+ * piece's centre (otherwise it gets a new leaf of its own), and a chunk made
+ * by a split keeps its parent's anchor, so positions are never re-based. A
+ * vertex is therefore stored as its offset from a point at most about a
+ * kilometre away, wherever the model sits: georeferenced coordinates in the
+ * millions keep sub-millimetre precision, whatever piece happened to arrive
+ * first. Piece bounds are kept in world space, in double precision.
  */
 
 /** Split a chunk once it holds more vertices than this. */
 export const DEFAULT_CHUNK_VERTEX_CAP = 1 << 18;
+
+/**
+ * How far (per axis, metres) a piece's centre may be from a chunk's anchor
+ * and still join it. Float32 spacing at 1 km is 0.12 mm.
+ */
+export const ANCHOR_REACH = 1024;
 
 /** Opacity below this counts as see-through. */
 const OPAQUE_ALPHA = 0.999;
@@ -72,14 +86,16 @@ export interface ElementDrawState {
 }
 
 export interface PieceGeometry {
-  /** The piece's triangles in model space (indexed, positions only). */
+  /** The piece's triangles relative to its chunk's anchor (indexed, positions only). */
   geometry: THREE.BufferGeometry;
-  /** Model space → world. */
+  /** Chunk space → world: a translation to the anchor. */
   matrixWorld: THREE.Matrix4;
 }
 
 interface Chunk {
   transparent: boolean;
+  /** World point the chunk's mesh sits at; `positions` are relative to it. */
+  anchor: THREE.Vector3;
   positions: Float32Array;
   normals: Int8Array;
   pieceIndex: Float32Array;
@@ -180,6 +196,12 @@ function growFloat32(a: Float32Array, min: number): Float32Array {
   out.set(a);
   return out;
 }
+function growFloat64(a: Float64Array, min: number): Float64Array {
+  if (a.length >= min) return a;
+  const out = new Float64Array(Math.max(min, a.length * 2));
+  out.set(a);
+  return out;
+}
 function growInt32(a: Int32Array, min: number): Int32Array {
   if (a.length >= min) return a;
   const out = new Int32Array(Math.max(min, a.length * 2));
@@ -270,11 +292,10 @@ function makePieceMaterial(pass: 'opaque' | 'transparent', uniforms: SharedUnifo
 
 export class ModelBatch {
   readonly modelId: string;
-  /** Add this to the scene. Carries the model origin; hide it to hide the model. */
+  /** Add this to the scene; hide it to hide the model. Its own transform is identity. */
   readonly group: THREE.Group;
 
   private readonly cap: number;
-  private origin: THREE.Vector3 | null = null;
 
   // Per-piece storage (struct of arrays, grown by doubling).
   private count = 0;
@@ -284,8 +305,8 @@ export class ModelBatch {
   private pieceVertexCount: Uint32Array = new Uint32Array(64);
   private pieceIndexStart: Uint32Array = new Uint32Array(64);
   private pieceIndexCount: Uint32Array = new Uint32Array(64);
-  /** Model-space AABB, six floats per piece (min xyz, max xyz). */
-  private pieceBox: Float32Array = new Float32Array(64 * 6);
+  /** World-space AABB, six doubles per piece (min xyz, max xyz). */
+  private pieceBox: Float64Array = new Float64Array(64 * 6);
   /** Load-time colour, four floats per piece. */
   private baseColor: Float32Array = new Float32Array(64 * 4);
   private overrideColor: Float32Array = new Float32Array(64 * 3);
@@ -509,37 +530,30 @@ export class ModelBatch {
 
   /** Expand `box` (world space) by every piece that is not hidden. */
   expandByVisible(box: THREE.Box3): THREE.Box3 {
-    if (!this.origin) return box;
-    _box.makeEmpty();
     for (let p = 0; p < this.count; p++) {
       if (this.flags[p] & FLAG_HIDDEN || this.pieceIndexCount[p] === 0) continue;
-      this.expandByPiece(_box, p);
+      this.expandByPiece(box, p);
     }
-    if (!_box.isEmpty()) box.union(_box.translate(this.origin));
     return box;
   }
 
   /** Expand `box` (world space) by every piece of the given elements, hidden or not. */
   expandByElements(expressIds: Iterable<number>, box: THREE.Box3): THREE.Box3 {
-    if (!this.origin) return box;
-    _box.makeEmpty();
     for (const id of expressIds) {
       const pieces = this.elements.get(id);
       if (!pieces) continue;
-      for (const p of pieces) if (this.pieceIndexCount[p] > 0) this.expandByPiece(_box, p);
+      for (const p of pieces) if (this.pieceIndexCount[p] > 0) this.expandByPiece(box, p);
     }
-    if (!_box.isEmpty()) box.union(_box.translate(this.origin));
     return box;
   }
 
   /** Visit every piece that is not hidden, with its world-space box. */
   forEachVisiblePiece(visit: (expressId: number, worldBox: THREE.Box3) => void): void {
-    if (!this.origin) return;
     const box = new THREE.Box3();
     for (let p = 0; p < this.count; p++) {
       if (this.flags[p] & FLAG_HIDDEN || this.pieceIndexCount[p] === 0) continue;
       box.makeEmpty();
-      this.expandByPiece(box, p).translate(this.origin);
+      this.expandByPiece(box, p);
       visit(this.pieceExpressId[p], box);
     }
   }
@@ -560,11 +574,14 @@ export class ModelBatch {
 
     const pos = chunk.positions;
     const idx = chunk.index;
+    const { x: ax, y: ay, z: az } = chunk.anchor;
+    const b = this.pieceBox;
     for (const p of chunk.pieces) {
       if (this.flags[p] & FLAG_HIDDEN) continue;
       const o = p * 6;
-      _box.min.set(this.pieceBox[o], this.pieceBox[o + 1], this.pieceBox[o + 2]);
-      _box.max.set(this.pieceBox[o + 3], this.pieceBox[o + 4], this.pieceBox[o + 5]);
+      // The piece's world box, moved into chunk space like the ray.
+      _box.min.set(b[o] - ax, b[o + 1] - ay, b[o + 2] - az);
+      _box.max.set(b[o + 3] - ax, b[o + 4] - ay, b[o + 5] - az);
       if (!_ray.intersectsBox(_box)) continue;
 
       const vStart = this.pieceVertexStart[p];
@@ -631,13 +648,6 @@ export class ModelBatch {
     this.ensurePieceCapacity(this.count);
 
     const m = mesh.transform;
-    if (!this.origin) {
-      this.origin = new THREE.Vector3(Math.round(m[12]), Math.round(m[13]), Math.round(m[14]));
-      this.group.position.copy(this.origin);
-      this.group.updateMatrix();
-      this.group.updateMatrixWorld(true);
-    }
-
     this.pieceExpressId[p] = mesh.expressID;
     let list = this.elements.get(mesh.expressID);
     if (!list) {
@@ -671,13 +681,13 @@ export class ModelBatch {
       return;
     }
 
-    // Bake the placement into model space (relative to the origin), in
-    // double precision, and record the bounds.
-    const scratch = this.transformPositions(mesh.vertices, m, p);
+    // Place the piece in the world, in double precision, and record its
+    // bounds; which chunk it joins depends on where it landed.
+    const world = this.transformPositions(mesh.vertices, m, p);
     const transparent = c.a < OPAQUE_ALPHA;
     const chunk = this.leafFor(p, transparent);
     this.ensureChunkCapacity(chunk, chunk.vertexCount + vertexCount, chunk.indexCount + indexCount);
-    this.writePiece(chunk, p, scratch, mesh.normals, mesh.indices, indexCount, m);
+    this.writePiece(chunk, p, world, mesh.normals, mesh.indices, indexCount, m);
     touched.add(chunk);
 
     if (chunk.vertexCount > this.cap && chunk.pieces.length > 1 && !chunk.unsplittable) {
@@ -687,19 +697,19 @@ export class ModelBatch {
     }
   }
 
-  private scratch = new Float32Array(3 * 4096);
+  private scratch = new Float64Array(3 * 4096);
 
-  private transformPositions(src: Float32Array, m: number[], p: number): Float32Array {
-    if (this.scratch.length < src.length) this.scratch = new Float32Array(src.length * 2);
+  /** World positions of a piece, in double precision, into a scratch buffer. */
+  private transformPositions(src: Float32Array, m: number[], p: number): Float64Array {
+    if (this.scratch.length < src.length) this.scratch = new Float64Array(src.length * 2);
     const out = this.scratch;
-    const o = this.origin!;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < src.length; i += 3) {
       const x = src[i], y = src[i + 1], z = src[i + 2];
-      const wx = m[0] * x + m[4] * y + m[8] * z + m[12] - o.x;
-      const wy = m[1] * x + m[5] * y + m[9] * z + m[13] - o.y;
-      const wz = m[2] * x + m[6] * y + m[10] * z + m[14] - o.z;
+      const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
+      const wy = m[1] * x + m[5] * y + m[9] * z + m[13];
+      const wz = m[2] * x + m[6] * y + m[10] * z + m[14];
       out[i] = wx;
       out[i + 1] = wy;
       out[i + 2] = wz;
@@ -714,11 +724,11 @@ export class ModelBatch {
     return out;
   }
 
-  /** Append a transformed piece to `chunk`. */
+  /** Append a piece, given its world positions, to `chunk`. */
   private writePiece(
     chunk: Chunk,
     p: number,
-    positions: Float32Array,
+    world: Float64Array,
     normals: Float32Array,
     indices: Uint32Array,
     indexCount: number,
@@ -727,7 +737,14 @@ export class ModelBatch {
     const vStart = chunk.vertexCount;
     const iStart = chunk.indexCount;
     const vCount = this.pieceVertexCount[p];
-    chunk.positions.set(positions.subarray(0, vCount * 3), vStart * 3);
+    // Offsets from the anchor, subtracted in double before rounding to Float32.
+    const { x: ax, y: ay, z: az } = chunk.anchor;
+    const outP = chunk.positions;
+    for (let i = 0, o = vStart * 3; i < vCount * 3; i += 3, o += 3) {
+      outP[o] = world[i] - ax;
+      outP[o + 1] = world[i + 1] - ay;
+      outP[o + 2] = world[i + 2] - az;
+    }
 
     _matrix.fromArray(m);
     _normalMatrix.getNormalMatrix(_matrix);
@@ -776,7 +793,7 @@ export class ModelBatch {
     this.pieceVertexCount = growUint32(this.pieceVertexCount, cap);
     this.pieceIndexStart = growUint32(this.pieceIndexStart, cap);
     this.pieceIndexCount = growUint32(this.pieceIndexCount, cap);
-    this.pieceBox = growFloat32(this.pieceBox, cap * 6);
+    this.pieceBox = growFloat64(this.pieceBox, cap * 6);
     this.baseColor = growFloat32(this.baseColor, cap * 4);
     this.overrideColor = growFloat32(this.overrideColor, cap * 3);
     this.overrideOpacity = growFloat32(this.overrideOpacity, cap);
@@ -860,11 +877,14 @@ export class ModelBatch {
     return (mesh.userData.chunk as Chunk | undefined) ?? null;
   }
 
-  private newChunk(transparent: boolean, vertexCapacity: number, indexCapacity: number): Chunk {
+  private newChunk(transparent: boolean, anchor: THREE.Vector3, vertexCapacity: number, indexCapacity: number): Chunk {
     const geometry = new THREE.BufferGeometry();
     const mesh = new ChunkMesh(this, geometry, transparent ? this.transparentMaterial : this.opaqueMaterial);
+    mesh.position.copy(anchor);
+    mesh.updateMatrix();
     const chunk: Chunk = {
       transparent,
+      anchor: anchor.clone(),
       positions: new Float32Array(vertexCapacity * 3),
       normals: new Int8Array(vertexCapacity * 4),
       pieceIndex: new Float32Array(vertexCapacity),
@@ -888,27 +908,66 @@ export class ModelBatch {
     return chunk;
   }
 
+  /** The chunk piece `p` joins: its k-d leaf, or a new leaf beside it if that is out of reach. */
   private leafFor(p: number, transparent: boolean): Chunk {
     let node = transparent ? this.transparentRoot : this.opaqueRoot;
     if (!node) {
-      const vc = this.pieceVertexCount[p];
-      const ic = this.pieceIndexCount[p];
-      node = {
-        chunk: this.newChunk(transparent, Math.max(vc, 16384), Math.max(ic, 32768)),
-        axis: 0,
-        split: 0,
-        left: null,
-        right: null,
-      };
+      node = this.newLeaf(p, transparent);
       if (transparent) this.transparentRoot = node;
       else this.opaqueRoot = node;
+      return node.chunk!;
     }
+    const centre = this.pieceCentre(p, _a);
+    while (!node.chunk) node = centre.getComponent(node.axis) < node.split ? node.left! : node.right!;
+
+    // Too far from the leaf's anchor to keep its precision: cut the leaf
+    // between what it holds and this piece. No data moves — the old chunk
+    // hangs on one side, a new one for this piece on the other.
+    const anchor = node.chunk.anchor;
+    let axis = 0;
+    let far = -1;
+    for (let k = 0; k < 3; k++) {
+      const d = Math.abs(centre.getComponent(k) - anchor.getComponent(k));
+      if (d > far) {
+        far = d;
+        axis = k;
+      }
+    }
+    if (far <= ANCHOR_REACH) return node.chunk;
+    // Every centre in the old chunk is within reach of its anchor, so the cut
+    // lies strictly between them and this piece's centre.
+    const c = centre.getComponent(axis);
+    const a = anchor.getComponent(axis);
+    const above = c > a;
+    const old: KdNode = { chunk: node.chunk, axis: 0, split: 0, left: null, right: null };
+    const fresh = this.newLeaf(p, transparent);
+    node.chunk = null;
+    node.axis = axis;
+    node.split = above ? (a + ANCHOR_REACH + c) / 2 : (c + a - ANCHOR_REACH) / 2;
+    node.left = above ? old : fresh;
+    node.right = above ? fresh : old;
+    return fresh.chunk!;
+  }
+
+  /** A leaf with an empty chunk anchored at piece `p`. */
+  private newLeaf(p: number, transparent: boolean): KdNode {
+    const c = this.pieceCentre(p, new THREE.Vector3());
+    const anchor = new THREE.Vector3(Math.round(c.x), Math.round(c.y), Math.round(c.z));
+    const vc = this.pieceVertexCount[p];
+    const ic = this.pieceIndexCount[p];
+    return {
+      chunk: this.newChunk(transparent, anchor, Math.max(vc, 16384), Math.max(ic, 32768)),
+      axis: 0,
+      split: 0,
+      left: null,
+      right: null,
+    };
+  }
+
+  private pieceCentre(p: number, out: THREE.Vector3): THREE.Vector3 {
+    const b = this.pieceBox;
     const o = p * 6;
-    while (!node.chunk) {
-      const centre: number = (this.pieceBox[o + node.axis] + this.pieceBox[o + 3 + node.axis]) / 2;
-      node = centre < node.split ? node.left! : node.right!;
-    }
-    return node.chunk;
+    return out.set((b[o] + b[o + 3]) / 2, (b[o + 1] + b[o + 4]) / 2, (b[o + 2] + b[o + 5]) / 2);
   }
 
   private ensureChunkCapacity(chunk: Chunk, vertices: number, indices: number): void {
@@ -987,8 +1046,9 @@ export class ModelBatch {
       vertices += this.pieceVertexCount[p];
       indices += this.pieceIndexCount[p];
     }
-    // Headroom: the stream usually keeps feeding this region.
-    const chunk = this.newChunk(from.transparent, Math.ceil(vertices * 1.5), Math.ceil(indices * 1.5));
+    // Headroom: the stream usually keeps feeding this region. The parent's
+    // anchor is kept, so positions copy across unchanged.
+    const chunk = this.newChunk(from.transparent, from.anchor, Math.ceil(vertices * 1.5), Math.ceil(indices * 1.5));
     for (const p of pieces) {
       const vStart = chunk.vertexCount;
       const iStart = chunk.indexCount;
@@ -1057,8 +1117,9 @@ export class ModelBatch {
   private finishChunkSync(chunk: Chunk): void {
     const g = chunk.geometry!;
     g.setDrawRange(0, chunk.indexCount);
-    g.boundingBox = chunk.box.clone();
-    g.boundingSphere = chunk.box.getBoundingSphere(new THREE.Sphere());
+    // The geometry's bounds are in chunk space; `chunk.box` is in the world.
+    g.boundingBox = chunk.box.clone().translate(_b.copy(chunk.anchor).negate());
+    g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
     if (chunk.overlayDirty) this.rebuildOverlay(chunk);
   }
 
@@ -1092,8 +1153,8 @@ export class ModelBatch {
     g.setAttribute('normal', src.getAttribute('normal'));
     g.setAttribute('pieceIndex', src.getAttribute('pieceIndex'));
     g.setIndex(new THREE.BufferAttribute(index, 1));
-    g.boundingBox = src.boundingBox?.clone() ?? chunk.box.clone();
-    g.boundingSphere = src.boundingSphere?.clone() ?? chunk.box.getBoundingSphere(new THREE.Sphere());
+    g.boundingBox = src.boundingBox!.clone();
+    g.boundingSphere = src.boundingSphere!.clone();
     if (chunk.overlay) {
       // Only the index is the overlay's own; the attributes belong to the chunk.
       disposeIndexOnly(chunk.overlay.geometry);
@@ -1101,6 +1162,8 @@ export class ModelBatch {
     } else {
       const overlay = new THREE.Mesh(g, this.transparentMaterial);
       overlay.matrixAutoUpdate = false;
+      overlay.position.copy(chunk.anchor);
+      overlay.updateMatrix();
       overlay.raycast = noRaycast;
       overlay.userData.isPieceOverlay = true;
       chunk.overlay = overlay;
