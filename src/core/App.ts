@@ -876,7 +876,7 @@ export class App {
               this.sceneBounds.addMeshes(id, batch);
             });
             this.modelManager.endStream(id);
-            this.modelTreePanel.addModel(id, stored.name, parsed.meshes.length);
+            this.modelTreePanel.addModel(id, stored.name, parsed.meshCount);
             this.bufferCache.set(id, stored.buffer);
             this.modelRecords.set(id, {
               id,
@@ -949,21 +949,24 @@ export class App {
               // so the *next* restore is fast. Backfills also rescue
               // sessions saved before the cache feature shipped (no hash).
               this.modelManager.beginStream(record.id);
+              const forCache = this.geometryCache.collector();
               const parsed = await this.parser.parseStreaming(
                 stored.buffer, record.id, (batch) => {
                   this.modelManager.appendMeshes(record.id, batch);
                   this.sceneBounds.addMeshes(record.id, batch);
+                  forCache.add(batch);
                 },
               );
               this.modelManager.endStream(record.id);
-              this.modelTreePanel.addModel(record.id, record.name, parsed.meshes.length);
+              this.modelTreePanel.addModel(record.id, record.name, parsed.meshCount);
               this.bufferCache.set(record.id, stored.buffer);
               const hash = record.hash ?? await sha256Hex(stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
-              void this.geometryCache.save(hash, parsed.meshes);
+              const meshes = forCache.meshes();
+              if (meshes) void this.geometryCache.save(hash, meshes);
               this.emitLoadSettled({
                 name: record.name, source: 'restore', ok: true,
-                meshCount: parsed.meshes.length, fromCache: false,
+                meshCount: parsed.meshCount, fromCache: false,
               });
             }
             // Fix the IndexedDB key to match the session UUID
@@ -1083,9 +1086,12 @@ export class App {
       streamId = id;
       let totalElements = 0;
       let framed = false;
+      // Only gather meshes for the geometry cache when it will be written.
+      const forCache = this.sessionStore.isMemoryEnabled() ? this.geometryCache.collector() : null;
       const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
         this.modelManager.appendMeshes(id, batch);
         this.sceneBounds.addMeshes(id, batch);
+        forCache?.add(batch);
         totalElements = progress.total;
         this.setStatus(
           `Loading ${file.name}… ` +
@@ -1121,7 +1127,7 @@ export class App {
       // a pre-existing selection-undo can't restore against the new geometry.
       this.history.clear();
       this.modelTreePanel.addModel(
-        id, file.name, parsed.meshes.length,
+        id, file.name, parsed.meshCount,
         modelSource.type,
       );
 
@@ -1134,13 +1140,14 @@ export class App {
         // Fire-and-forget geometry-cache write. Runs after the scene is
         // up so the user-perceived parse time is unaffected; a failed
         // write just means the next restore falls back to a full parse.
-        void this.geometryCache.save(hash, parsed.meshes);
+        const meshes = forCache?.meshes();
+        if (meshes) void this.geometryCache.save(hash, meshes);
       }
 
       this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
       this.emitLoadSettled({
-        name: file.name, source: 'file', ok: true, meshCount: parsed.meshes.length, fromCache: false,
+        name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
       });
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
@@ -1457,7 +1464,7 @@ export class App {
           this.sceneBounds.addMeshes(id, batch);
         });
         this.modelManager.endStream(id);
-        this.modelTreePanel.addModel(id, record.name, parsed.meshes.length, record.source.type);
+        this.modelTreePanel.addModel(id, record.name, parsed.meshCount, record.source.type);
       } catch {
         // skip files that fail to re-parse — drop any partial stream
         this.modelManager.removeModel(id);

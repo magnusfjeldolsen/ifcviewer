@@ -75,7 +75,7 @@ describe('WorkerIfcParser — parseStreaming', () => {
     expect(buffer.byteLength).toBe(8); // not neutered
   });
 
-  it('feeds onBatch per batch message and resolves with all meshes accumulated', async () => {
+  it('feeds onBatch per batch message and resolves with the count, not a second copy of the meshes', async () => {
     const worker = new MockWorker();
     const parser = new WorkerIfcParser(worker);
     const onBatch = vi.fn();
@@ -89,8 +89,8 @@ describe('WorkerIfcParser — parseStreaming', () => {
     const model = await promise;
     expect(onBatch).toHaveBeenCalledTimes(2);
     expect(onBatch.mock.calls[0][1]).toEqual({ loaded: 2, total: 3 });
-    expect(model.id).toBe('m');
-    expect(model.meshes.map((x) => x.expressID)).toEqual([1, 2, 3]);
+    expect(model).toEqual({ id: 'm', meshCount: 3 });
+    expect(onBatch.mock.calls.flatMap((c) => c[0].map((x: { expressID: number }) => x.expressID))).toEqual([1, 2, 3]);
   });
 
   it('correlates replies by id when multiple parses are in flight', async () => {
@@ -105,8 +105,8 @@ describe('WorkerIfcParser — parseStreaming', () => {
     worker.reply({ type: 'parsed', id: 'A' });
 
     const [a, b] = await Promise.all([pa, pb]);
-    expect(a.meshes).toHaveLength(0);
-    expect(b.meshes.map((x) => x.expressID)).toEqual([9]);
+    expect(a.meshCount).toBe(0);
+    expect(b.meshCount).toBe(1);
   });
 
   it('rejects the matching promise on an error reply', async () => {

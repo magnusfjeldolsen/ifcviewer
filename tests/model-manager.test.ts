@@ -591,11 +591,11 @@ describe('ModelBatch — what reaches the GPU', () => {
     const meshes = Array.from({ length: 300 }, (_, i) => boxMesh(i + 1, { at: [(i % 15) * 3, Math.floor(i / 15) * 3, 0] }));
     const batch = new ModelBatch('m', { chunkVertexCap: 2400 });
     const gpu = new GpuMirror();
-    const expectInSync = () => {
+    const expectInSync = (names: string[]) => {
       for (const mesh of batch.chunkMeshes()) {
         const g = mesh.geometry;
         const vertices = g.getAttribute('pieceIndex').count;
-        for (const name of ['position', 'normal', 'pieceIndex']) {
+        for (const name of names) {
           const a = g.getAttribute(name) as THREE.BufferAttribute;
           expect(gpu.stale(a, vertices * a.itemSize), name).toBe(0);
         }
@@ -608,10 +608,33 @@ describe('ModelBatch — what reaches the GPU', () => {
     }
     // Before `finish` too: it rebuilds trimmed chunks whole, which would hide
     // a partial upload that missed something.
-    expectInSync();
+    expectInSync(['position', 'normal', 'pieceIndex']);
     batch.finish();
     gpu.sync(batch);
-    expectInSync();
+    // Normals and piece indices live only on the GPU from here on.
+    expectInSync(['position']);
+  });
+
+  it('once finished and uploaded, keeps no CPU copy of what only the GPU reads', () => {
+    const meshes = Array.from({ length: 50 }, (_, i) => boxMesh(i + 1, { at: [i * 2, 0, 0] }));
+    const batch = new ModelBatch('m');
+    batch.append(meshes.slice(0, 25));
+    const gpu = new GpuMirror();
+    gpu.sync(batch);
+    batch.append(meshes.slice(25)); // queued, not yet uploaded
+    batch.finish();
+    const g = batch.chunkMeshes()[0].geometry;
+    // Not before the GPU has the data…
+    expect(g.getAttribute('normal').array.length).toBeGreaterThan(0);
+    gpu.sync(batch);
+    // …but right after.
+    expect(g.getAttribute('normal').array).toHaveLength(0);
+    expect(g.getAttribute('pieceIndex').array).toHaveLength(0);
+    expect(g.getAttribute('normal').count).toBeGreaterThanOrEqual(50 * 24);
+    // Picking and snapping still have what they read.
+    expect(g.getAttribute('position').array.length).toBeGreaterThanOrEqual(50 * 24 * 3);
+    expect(batch.pieceGeometry(30)!.geometry.getIndex()!.count).toBe(36);
+    expect(() => batch.append([boxMesh(99)])).toThrow();
   });
 });
 

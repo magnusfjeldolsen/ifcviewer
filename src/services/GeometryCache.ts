@@ -97,6 +97,42 @@ export function computeRecordSize(meshes: CachedMesh[]): number {
   return total;
 }
 
+/** Bytes a mesh will take in the cache (what `computeRecordSize` counts). */
+function meshBytes(m: ParsedMesh): number {
+  return m.vertices.byteLength + m.normals.byteLength + m.indices.byteLength + 168;
+}
+
+/**
+ * Gathers a streamed model's meshes for the cache, batch by batch, but only
+ * while they fit under the cache cap. A model too big for the cache would be
+ * evicted the moment it was written, so holding a second copy of its geometry
+ * for the length of the load — next to what the renderer already holds —
+ * buys nothing: past the cap the collector drops what it has and stops.
+ */
+export class CacheCollector {
+  private list: ParsedMesh[] | null = [];
+  private bytes = 0;
+
+  constructor(private capBytes: number) {}
+
+  add(meshes: readonly ParsedMesh[]): void {
+    if (!this.list) return;
+    for (const m of meshes) {
+      this.bytes += meshBytes(m);
+      if (this.bytes > this.capBytes) {
+        this.list = null;
+        return;
+      }
+      this.list.push(m);
+    }
+  }
+
+  /** Everything added, or null if it outgrew the cache. */
+  meshes(): ParsedMesh[] | null {
+    return this.list;
+  }
+}
+
 /** SHA-256 of an ArrayBuffer, returned as lowercase hex. */
 export async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', buffer);
@@ -118,6 +154,11 @@ export class GeometryCache {
     private capBytes: number = GEOMETRY_CACHE_CAP_BYTES,
   ) {}
 
+  /** A collector for one streamed load, bounded by this cache's cap. */
+  collector(): CacheCollector {
+    return new CacheCollector(this.capBytes);
+  }
+
   /**
    * Save parsed meshes under `hash`. Evicts oldest entries if the new
    * total would exceed the cap. Fire-and-forget: failures are logged and
@@ -125,6 +166,11 @@ export class GeometryCache {
    */
   async save(hash: string, parsed: ParsedMesh[]): Promise<void> {
     try {
+      // Bigger than the whole cache: it would only evict everything else and
+      // then itself. Skip the copy and the write.
+      let bytes = 0;
+      for (const m of parsed) bytes += meshBytes(m);
+      if (bytes > this.capBytes) return;
       const meshes = serializeMeshes(parsed);
       const record: CachedGeometryRecord = {
         hash,

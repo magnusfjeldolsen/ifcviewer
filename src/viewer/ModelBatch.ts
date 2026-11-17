@@ -346,8 +346,9 @@ export class ModelBatch {
 
   // ── Loading ──────────────────────────────────────────────────
 
-  /** Add a batch of pieces. Safe to call repeatedly while a stream is open. */
+  /** Add a batch of pieces. Safe to call repeatedly until `finish`. */
   append(meshes: readonly ParsedMesh[]): void {
+    if (this.finished) throw new Error(`ModelBatch ${this.modelId}: append after finish`);
     const touched = new Set<Chunk>();
     for (const mesh of meshes) this.addPiece(mesh, touched);
     // A split replaces chunks; only sync the ones still alive.
@@ -359,8 +360,15 @@ export class ModelBatch {
    * The stream is complete: shrink every chunk's buffers to what it holds.
    * Chunks grow by doubling while a stream is open, so up to half of a
    * chunk's allocation can be slack at this point.
+   *
+   * Then let go of the CPU copies only the GPU needs — normals and piece
+   * indices, two fifths of a chunk's vertex data — once they have been
+   * uploaded. Positions and the index stay: picking and snapping read them.
+   * Nothing can be appended afterwards.
    */
   finish(): void {
+    if (this.finished) return;
+    this.finished = true;
     for (const chunk of this.chunks) {
       const slackV = chunk.positions.length / 3 - chunk.vertexCount;
       const slackI = chunk.index.length - chunk.indexCount;
@@ -371,7 +379,16 @@ export class ModelBatch {
       chunk.index = chunk.index.slice(0, chunk.indexCount);
       this.rebuildChunkGeometry(chunk);
     }
+    for (const chunk of this.chunks) {
+      const g = chunk.geometry;
+      if (!g) continue;
+      for (const name of GPU_ONLY_ATTRIBUTES) dropOnceUploaded(g.getAttribute(name) as THREE.BufferAttribute);
+      chunk.normals = new Int8Array(0);
+      chunk.pieceIndex = new Float32Array(0);
+    }
   }
+
+  private finished = false;
 
   /** Free every GPU and CPU resource this model holds. */
   dispose(): void {
@@ -1199,8 +1216,37 @@ function uploadTail(attribute: THREE.BufferAttribute, from: number, to: number):
   attribute.needsUpdate = true;
 }
 
+/** Per-vertex attributes nothing on the CPU reads once they are drawn. */
+const GPU_ONLY_ATTRIBUTES = ['normal', 'pieceIndex'] as const;
+
+/** The version of each buffer the GPU last received. */
+const uploadedVersion = new WeakMap<THREE.BufferAttribute, number>();
+/** Buffers whose CPU array goes as soon as the GPU has their current version. */
+const dropAfterUpload = new WeakSet<THREE.BufferAttribute>();
+
 function clearRangesOnUpload(attribute: THREE.BufferAttribute): void {
-  attribute.onUpload(() => attribute.clearUpdateRanges());
+  attribute.onUpload(() => {
+    attribute.clearUpdateRanges();
+    uploadedVersion.set(attribute, attribute.version);
+    if (dropAfterUpload.has(attribute)) dropArray(attribute);
+  });
+}
+
+/**
+ * Free `attribute`'s CPU array once the GPU holds its current contents — now
+ * if it already does, else right after the next upload. The renderer never
+ * reads the array of an uploaded buffer that is not marked for update; its
+ * `count` is kept.
+ */
+function dropOnceUploaded(attribute: THREE.BufferAttribute): void {
+  if (uploadedVersion.get(attribute) === attribute.version) dropArray(attribute);
+  else dropAfterUpload.add(attribute);
+}
+
+function dropArray(attribute: THREE.BufferAttribute): void {
+  const empty = new (attribute.array.constructor as new (n: number) => THREE.TypedArray)(0);
+  (attribute as { array: THREE.TypedArray }).array = empty;
+  dropAfterUpload.delete(attribute);
 }
 
 function findLeaf(node: KdNode | null, chunk: Chunk): KdNode | null {

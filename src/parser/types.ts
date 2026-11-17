@@ -32,6 +32,16 @@ export interface ParsedModel {
 }
 
 /**
+ * A finished streamed parse. The meshes went to the batch callback as they
+ * arrived and are not gathered here: holding every one until the end doubled
+ * the memory of a large load, next to the copy the renderer already made.
+ */
+export interface StreamedModel {
+  id: string;
+  meshCount: number;
+}
+
+/**
  * Progress of a streamed parse, reported alongside each `batch` message.
  * Counted in products (≈ IFC elements with geometry), not meshes — one
  * product can yield several geometry meshes. `total` is known up front,
