@@ -22,12 +22,14 @@ could skip parsing. Two limits made that fail for large models:
   synchronous access handle. The main thread never holds a second copy.
 - **A small index in IndexedDB.** It is written only after every worker has
   flushed and closed its files. A crash before that leaves part files with no
-  index, which are swept after an hour and can never be read as a valid entry.
+  index. They can never be read as a valid entry, and are swept two minutes
+  later, never while the load that wrote them is still running.
 - **Keyed by content.** The key is the SHA-256 of the file, so the file name
   plays no part.
 - **Compact form.** Indices are 16-bit where a piece has at most 65,536
-  vertices. Normals are stored as signed bytes, which can shift a normal by
-  under one degree. Bounds, colour and opacity are stored exactly.
+  vertices and normals are signed bytes. This is the form the workers already
+  send to the main thread, so the cache stores it unchanged. Bounds, colour and
+  opacity are stored exactly.
 - **The cap follows the device.** A quarter of the storage quota, no less than
   500 MB and no more than 8 GB.
 - **Reads are checked.** Lengths are validated against the file, so a short or
@@ -53,12 +55,14 @@ could skip parsing. Two limits made that fail for large models:
 - The model with 2.4 GB of geometry now reopens in about 8 s instead of 43.
   Smaller models reopen slightly faster than before.
 - **This is a one-way door.** A build that asks for database version 3 cannot
-  open a version 4 database, which also breaks its session restore. Any revert
-  after this ships must keep version 4.
+  open a version 4 database. Checked in the app: such a build still loads
+  files, but shows remembered models as "File missing", saves nothing and
+  caches nothing. The version 4 data survives and works again when a version 4
+  build is served. Any revert after this ships must keep version 4.
+- A model remembered before the update is kept by the upgrade. Only the cache
+  is dropped.
 - The cache can now take several gigabytes of disk on a device that has the
   room. It is evicted by the cap and by the browser under storage pressure.
-- A model loaded from cache has normals that went through one more rounding
-  step than a fresh load. The difference is not visible but the two are not
-  bit-identical.
+- A model loaded from cache is the same as a fresh load, normals included.
 - Synchronous access handles are exclusive, so two tabs cannot write the same
   part file. Keys are unique per load to keep that from ever happening.

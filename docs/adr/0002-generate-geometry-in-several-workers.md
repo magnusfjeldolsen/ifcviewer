@@ -29,7 +29,7 @@ a local disk) were small by comparison.
 - **An approximate total.** The list includes elements that turn out to have no
   geometry, so progress reads "3,800 of about 7,500 elements". The final count
   is exact.
-- **Helper workers.** For files of 20 MB or more, up to three helper workers
+- **Helper workers.** For files of 20 MB or more, up to two helper workers
   each open their own copy of the file and generate geometry for chunks of
   elements. All of them feed the same `ModelBatch`.
 - **A coordinator worker hands out the chunks.** Doing it on the main thread
@@ -43,27 +43,36 @@ a local disk) were small by comparison.
 - **Every parse has a token.** Messages, ports and stop requests are keyed by
   it, not by model id, so a second load of the same model cannot receive the
   first one's replies.
-- **How many helpers.** None under 20 MB; at most three; at most half the cores
+- **How many helpers.** None under 20 MB; at most two; at most half the cores
   minus one; and within one 1.25 GB memory budget shared by all loads, counting
   three file sizes per helper.
+- **Geometry crosses to the main thread in compact form.** Normals as signed
+  bytes and indices as 16 bits where a piece allows, which is how the renderer
+  stores them anyway.
 
 ## Alternatives rejected
 
 - **web-ifc's multithreaded build.** It needs cross-origin isolation headers
   that GitHub Pages cannot send, and we have not measured that it speeds up
   geometry.
-- **More helpers.** Measured on the 357 MB model: one helper 8.8 s, two 8.6 s,
-  three 8.5 s, and about 0.7 GB more memory for each. On the 48 MB model three
-  helpers do pay: 26.8 s with none, 12.1 s with three.
+- **A third helper.** On the 357 MB model helpers barely matter: one 8.8 s,
+  two 8.6 s, three 8.5 s. On the 48 MB model they do: about 27 s with none,
+  16 s with one, 12 s with two, 11 s with three. But the page's peak memory on
+  that model was 3.0 GB with none, 3.9–4.0 GB with two and 4.4–4.7 GB with
+  three, against 3.8 GB before this change. The third helper bought one second
+  for half a gigabyte.
+- **Holding workers back until the main thread has their chunks.** Tried as a
+  memory fix. Peak memory did not fall, and workers idled 3 to 8 seconds.
 - **Handing out chunks from the main thread.** See above.
 
 ## Consequences
 
-- First geometry on the 357 MB model went from 6.8 to 2.9 s, and fully loaded
-  from 14.1 to 6.4 s. The 48 MB model went from 43 to 11 s.
-- Each helper costs a copy of the file plus web-ifc's working memory while the
-  load runs. The memory budget is what keeps this bounded, so changing it needs
-  a memory measurement, not only a timing.
+- First geometry on the 357 MB model went from 6.8 to 2.8 s, and fully loaded
+  from 14.1 to 5.8 s. The 48 MB model went from 43 to 10–12 s.
+- Each helper costs web-ifc's working memory while the load runs. Measured, that
+  is 2 times the file on the 357 MB model and 6 times on the 48 MB one, so the
+  budget's three file sizes per helper is an estimate, not a bound. Changing
+  the helper count or the budget needs a memory measurement, not only a timing.
 - Elements no longer arrive in file order. Nothing may depend on that order.
 - What remains before first geometry is web-ifc opening the model. Going lower
   means a different parser or a pre-converted format, not more workers.
