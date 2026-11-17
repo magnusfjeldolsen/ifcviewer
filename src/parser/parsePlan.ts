@@ -2,7 +2,8 @@
  * How many helper workers stream a model's geometry alongside the main one.
  *
  * Each helper opens its own copy of the file, so it costs that copy plus a
- * web-ifc heap (about twice the file) for as long as the load runs, and its
+ * web-ifc heap — twice the file on a 357 MB model, six times on a
+ * geometry-heavy 48 MB one (277 MB each) — for as long as the load runs, and its
  * open competes with the others: opening is not free in parallel. What it buys
  * is geometry time, which on a geometry-heavy file is most of the load.
  *
@@ -15,15 +16,18 @@
  * The budget is what keeps the peak in check. Measured on a 357 MB model:
  * one helper cut the load from 10.3 s to 8.8 s for +0.7 GB at peak; three
  * cut it to 8.5 s for +2 GB. On a 48 MB model whose geometry is the whole
- * load, three helpers cut 26.8 s to 12.1 s for little memory. So a big file
- * gets one helper and a geometry-heavy small one gets three.
+ * load (none → two → three helpers): 25.7 s → 12.6 s → 10.5–11.6 s, and the
+ * page's own process peaked at 2.9 → 3.9 → 4.4 GB (it was 3.8 GB before any
+ * of this work). The third helper bought about a second for half a gigabyte
+ * over the old peak, so there are at most two: a big file gets one, a
+ * geometry-heavy small one two.
  */
 
 /** Files below this parse alone. */
 export const MIN_HELPER_FILE_BYTES = 20 * 1024 * 1024;
 
 /** Most helpers for one model. */
-export const MAX_HELPERS = 3;
+export const MAX_HELPERS = 2;
 
 /** What one helper is assumed to hold, in multiples of the file size. */
 export const HELPER_MEMORY_FACTOR = 3;

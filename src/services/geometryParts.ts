@@ -25,7 +25,7 @@
  */
 
 import type { ParsedMesh } from '../parser/types';
-import { packMeshes, packedSize } from './geometryPack';
+import { packMeshesInto, packedSize } from './geometryPack';
 
 /** The OPFS directory holding one subdirectory per cached load. */
 export const CACHE_DIR = 'geometry-cache';
@@ -66,7 +66,7 @@ export interface CacheWriteReport {
 
 /** The synchronous access handle surface the writer uses (tests pass a fake). */
 export interface SyncFile {
-  write(data: ArrayBuffer, options: { at: number }): number;
+  write(data: ArrayBuffer | ArrayBufferView, options: { at: number }): number;
   flush(): void;
   close(): void;
 }
@@ -118,14 +118,14 @@ export class PartWriter {
       for (const m of meshes) {
         const size = packedSize([m]);
         if (group.length > 0 && groupBytes + size > this.partBytes) {
-          this.append(packMeshes(group));
+          this.append(this.pack(group));
           group = [];
           groupBytes = 0;
         }
         group.push(m);
         groupBytes += size;
       }
-      this.append(packMeshes(group));
+      this.append(this.pack(group));
     } catch (err) {
       // Disk full, quota, out of memory: this load goes uncached.
       this.fail(err);
@@ -154,7 +154,16 @@ export class PartWriter {
     return report;
   }
 
-  private append(data: ArrayBuffer): void {
+  /** One buffer reused for every part: written out at once, so free again by the next. */
+  private scratch: ArrayBuffer | null = null;
+
+  private pack(group: ParsedMesh[]): Uint8Array {
+    const size = packedSize(group);
+    if (!this.scratch || this.scratch.byteLength < size) this.scratch = new ArrayBuffer(size);
+    return packMeshesInto(group, this.scratch);
+  }
+
+  private append(data: Uint8Array): void {
     const written = this.file!.write(data, { at: this.offset });
     if (written !== data.byteLength) throw new Error(`short write (${written} of ${data.byteLength} bytes)`);
     this.offset += written;

@@ -781,8 +781,8 @@ export class ModelBatch {
     chunk: Chunk,
     p: number,
     world: Float64Array,
-    normals: Float32Array,
-    indices: Uint32Array,
+    normals: Float32Array | Int8Array,
+    indices: Uint32Array | Uint16Array,
     indexCount: number,
     m: number[],
   ): void {

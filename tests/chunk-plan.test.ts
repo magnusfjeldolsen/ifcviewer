@@ -82,14 +82,14 @@ describe('planHelpers', () => {
   });
 
   it('fits helpers in a quarter of a small device’s memory', () => {
-    // 0.5 GB budget on a 2 GB device: none for a 357 MB file, three for 48 MB.
+    // 0.5 GB budget on a 2 GB device: none for a 357 MB file, the most for 48 MB.
     expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 2 })).toBe(0);
-    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 2 })).toBe(3);
+    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 2 })).toBe(MAX_HELPERS);
     expect(planHelpers({ fileBytes: 100e6, cores: 20, deviceMemoryGB: 2 })).toBe(1);
   });
 
   it('counts helpers of other loads against the same budget', () => {
-    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32 })).toBe(3);
+    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32 })).toBe(MAX_HELPERS);
     // A 357 MB load's helper holds ~1.07 GB of the 1.25 GB budget: one more 48 MB load gets one.
     expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32, helperBytesInUse: 3 * 357e6 })).toBe(1);
     expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 32, helperBytesInUse: 3 * 357e6 })).toBe(0);

@@ -5,6 +5,39 @@
 export const WELD_NORMAL_STEPS = 127;
 
 /**
+ * Working memory for `weldVertices`, reused from one piece to the next.
+ *
+ * A worker welds hundreds of thousands of pieces. Allocating the hash table,
+ * the remap and the rest afresh for each one made gigabytes of short-lived
+ * buffers over a geometry-heavy load, and with four workers producing them
+ * the garbage collector let a gigabyte or more of it pile up at once.
+ */
+export class WeldScratch {
+  private buffers: Record<string, ArrayBuffer> = {};
+
+  private get(name: string, bytes: number): ArrayBuffer {
+    let b = this.buffers[name];
+    if (!b || b.byteLength < bytes) {
+      b = new ArrayBuffer(Math.max(bytes, (b?.byteLength ?? 0) * 2, 4096));
+      this.buffers[name] = b;
+    }
+    return b;
+  }
+
+  f32(name: string, length: number): Float32Array {
+    return new Float32Array(this.get(name, length * 4), 0, length);
+  }
+
+  i32(name: string, length: number): Int32Array {
+    return new Int32Array(this.get(name, length * 4), 0, length);
+  }
+
+  u32(name: string, length: number): Uint32Array {
+    return new Uint32Array(this.get(name, length * 4), 0, length);
+  }
+}
+
+/**
  * Merge vertices that share a position (bit for bit) and a normal, and
  * rewrite the index to share them.
  *
@@ -97,6 +130,80 @@ export function weldVertices(
     outN[k * 3 + 2] = normals[s + 2];
   }
   const outI = new Uint32Array(indices.length);
+  for (let k = 0; k < indices.length; k++) outI[k] = remap[indices[k]];
+  return { positions: outP, normals: outN, indices: outI };
+}
+
+/**
+ * `weldVertices` for the worker, producing what is sent to the main thread:
+ * positions as floats, normals as signed bytes (×127, clamped — the
+ * resolution the renderer draws and welds at), and 16-bit indices when every
+ * vertex fits. Inputs may be borrowed (a view of the wasm heap, scratch):
+ * the result is always newly allocated, and nothing else is.
+ */
+export function weldForTransfer(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+  scratch: WeldScratch,
+): { positions: Float32Array; normals: Int8Array; indices: Uint32Array | Uint16Array } {
+  const n = positions.length / 3;
+  const q = scratch.i32('q', normals.length);
+  for (let i = 0; i < normals.length; i++) {
+    const v = Math.round(normals[i] * WELD_NORMAL_STEPS);
+    q[i] = v > 127 ? 127 : v < -127 ? -127 : v;
+  }
+  const p = new Uint32Array(positions.buffer, positions.byteOffset, positions.length);
+
+  let size = 1;
+  while (size < n * 2) size <<= 1;
+  const mask = size - 1;
+  const table = scratch.i32('table', size).fill(-1);
+  const remap = scratch.u32('remap', n);
+  const kept = scratch.u32('kept', n);
+  let unique = 0;
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    let h = Math.imul(p[o] ^ 0x9e3779b9, 0x85ebca6b);
+    h = Math.imul(h ^ p[o + 1], 0xc2b2ae35);
+    h = Math.imul(h ^ p[o + 2], 0x27d4eb2f);
+    h = Math.imul(h ^ q[o], 0x165667b1);
+    h = Math.imul(h ^ q[o + 1], 0x9e3779b1);
+    h = Math.imul(h ^ q[o + 2], 0x85ebca77);
+    h ^= h >>> 15;
+    let slot = h & mask;
+    for (;;) {
+      const entry = table[slot];
+      if (entry < 0) {
+        table[slot] = unique;
+        kept[unique] = i;
+        remap[i] = unique++;
+        break;
+      }
+      const j = kept[entry] * 3;
+      if (
+        p[j] === p[o] && p[j + 1] === p[o + 1] && p[j + 2] === p[o + 2] &&
+        q[j] === q[o] && q[j + 1] === q[o + 1] && q[j + 2] === q[o + 2]
+      ) {
+        remap[i] = entry;
+        break;
+      }
+      slot = (slot + 1) & mask;
+    }
+  }
+
+  const outP = new Float32Array(unique * 3);
+  const outN = new Int8Array(unique * 3);
+  for (let k = 0; k < unique; k++) {
+    const s = kept[k] * 3;
+    outP[k * 3] = positions[s];
+    outP[k * 3 + 1] = positions[s + 1];
+    outP[k * 3 + 2] = positions[s + 2];
+    outN[k * 3] = q[s];
+    outN[k * 3 + 1] = q[s + 1];
+    outN[k * 3 + 2] = q[s + 2];
+  }
+  const outI = unique <= 0x10000 ? new Uint16Array(indices.length) : new Uint32Array(indices.length);
   for (let k = 0; k < indices.length; k++) outI[k] = remap[indices[k]];
   return { positions: outP, normals: outN, indices: outI };
 }

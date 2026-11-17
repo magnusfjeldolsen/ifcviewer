@@ -15,8 +15,18 @@ import type { CacheWriteReport } from '../services/geometryParts';
 export interface ParsedMesh {
   expressID: number;
   vertices: Float32Array;
-  indices: Uint32Array;
-  normals: Float32Array;
+  /**
+   * 16-bit when every vertex of the piece fits, as the worker sends them: a
+   * piece's indices are half the size, and so is the garbage they become on
+   * the main thread once appended.
+   */
+  indices: Uint32Array | Uint16Array;
+  /**
+   * Unit normals, or as signed bytes (×127) as the worker sends them — the
+   * resolution they are drawn at — a quarter the size of floats. Readers
+   * normalise either.
+   */
+  normals: Float32Array | Int8Array;
   transform: number[];
   color: { r: number; g: number; b: number; a: number };
   /**

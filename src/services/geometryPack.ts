@@ -48,6 +48,18 @@ export function packedSize(meshes: readonly ParsedMesh[]): number {
 
 export function packMeshes(meshes: readonly ParsedMesh[]): ArrayBuffer {
   const out = new ArrayBuffer(packedSize(meshes));
+  packMeshesInto(meshes, out);
+  return out;
+}
+
+/**
+ * Pack into the start of `out` (at least `packedSize` bytes) and return a
+ * view of exactly the packed bytes. Lets a writer reuse one buffer for every
+ * part instead of leaving one behind per part for the garbage collector.
+ */
+export function packMeshesInto(meshes: readonly ParsedMesh[], out: ArrayBuffer): Uint8Array {
+  const size = packedSize(meshes);
+  if (out.byteLength < size) throw new Error('packMeshesInto: buffer too small');
   const head = new Uint32Array(out, 0, 2);
   head[0] = MAGIC;
   head[1] = meshes.length;
@@ -75,16 +87,21 @@ export function packMeshes(meshes: readonly ParsedMesh[]): ArrayBuffer {
     else new Uint32Array(out, offset, m.indices.length).set(m.indices);
     offset += indexBytes(vertexCount, m.indices.length);
     const normals = new Int8Array(out, offset, m.normals.length);
-    // Clamped: a component a hair over 1 (float noise) must not wrap to -128.
-    for (let k = 0; k < m.normals.length; k++) normals[k] = Math.max(-127, Math.min(127, Math.round(m.normals[k] * 127)));
+    if (m.normals instanceof Int8Array) {
+      normals.set(m.normals); // already bytes, as the worker sends them
+    } else {
+      // Clamped: a component a hair over 1 (float noise) must not wrap to -128.
+      for (let k = 0; k < m.normals.length; k++) normals[k] = Math.max(-127, Math.min(127, Math.round(m.normals[k] * 127)));
+    }
     offset += align4(m.normals.length);
   });
-  return out;
+  return new Uint8Array(out, 0, size);
 }
 
 /**
- * The meshes in a packed part. Positions are views into `buf` (no copy);
- * 16-bit indices and byte normals are expanded back. Throws on a buffer that is
+ * The meshes in a packed part, as views into `buf` — nothing is copied:
+ * byte normals and 16-bit indices come back as such (`ParsedMesh` allows
+ * both). Throws on a buffer that is
  * not a packed part, so a corrupt entry is a cache miss, never wrong geometry.
  */
 export function unpackMeshes(buf: ArrayBuffer): ParsedMesh[] {
@@ -106,13 +123,11 @@ export function unpackMeshes(buf: ArrayBuffer): ParsedMesh[] {
     const vertices = new Float32Array(buf, offset, vertexCount * 3);
     offset += vertexCount * 12;
     const indices = shortIndices(vertexCount)
-      ? Uint32Array.from(new Uint16Array(buf, offset, indexCount))
+      ? new Uint16Array(buf, offset, indexCount)
       : new Uint32Array(buf, offset, indexCount);
     offset += indexBytes(vertexCount, indexCount);
-    const packed = new Int8Array(buf, offset, vertexCount * 3);
+    const normals = new Int8Array(buf, offset, vertexCount * 3);
     offset += align4(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-    for (let k = 0; k < normals.length; k++) normals[k] = packed[k] / 127;
     const mesh: ParsedMesh = {
       expressID: meta[o],
       vertices,

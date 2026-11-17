@@ -54,7 +54,10 @@ import { elementMatches, type PropertySelector } from '../inspector/matchValue';
 import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
 import type { ParsedMesh } from './types';
-import { weldVertices, WELD_NORMAL_STEPS } from './weld';
+import { weldForTransfer, WeldScratch } from './weld';
+
+/** Reused by every piece this worker welds (see WeldScratch). */
+const weldScratch = new WeldScratch();
 import { WorkerTimeline } from '../core/LoadTimeline';
 import { geometryProductIds } from './geometryProducts';
 import { StreamBatcher } from './streamBatcher';
@@ -140,13 +143,19 @@ function extractFlatMesh(
     const t0 = performance.now();
     const geom = ifc.GetGeometry(modelID, placedGeom.geometryExpressID);
 
-    const verts = ifc.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
-    const idxs = ifc.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
+    // Views of the wasm heap, not copies (`GetVertexArray` copies): read
+    // straight away into reused scratch, and nothing is left for the
+    // garbage collector but the welded result itself.
+    const heap = ifc.wasmModule as unknown as { HEAPF32: Float32Array; HEAPU32: Uint32Array };
+    const vPtr = geom.GetVertexData() / 4;
+    const verts = heap.HEAPF32.subarray(vPtr, vPtr + geom.GetVertexDataSize());
+    const iPtr = geom.GetIndexData() / 4;
+    const idxs = heap.HEAPU32.subarray(iPtr, iPtr + geom.GetIndexDataSize());
 
     // Extract vertices (position only, stride of 6: x,y,z,nx,ny,nz).
     const vertexCount = verts.length / 6;
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
+    const positions = weldScratch.f32('positions', vertexCount * 3);
+    const normals = weldScratch.f32('normals', vertexCount * 3);
     // Local bounds ride along in the same pass: see `ParsedMesh.bounds`. They
     // stay true after welding below, which keeps every distinct position.
     let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -173,7 +182,7 @@ function extractFlatMesh(
     // ones that are the same point with the same (8-bit, as drawn) normal cuts
     // the vertex work and memory of a large model by about a fifth.
     const t1 = performance.now();
-    const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
+    const welded = weldForTransfer(positions, normals, idxs, weldScratch);
     if (timeline) {
       const t2 = performance.now();
       timeline.add(`${role}.extract`, t1 - t0);
@@ -287,12 +296,18 @@ async function parseInto(
   }
   batcher.flush();
   timeline.mark('worker.streamed');
+  timeline.add('worker.wasmHeapMB', wasmHeapMB(ifc));
 
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
   post({ type: 'parsed', token, timings: timeline.toJSON() });
 
   if (writer) post({ type: 'cacheWritten', token, report: writer.finish() });
+}
+
+/** Size of web-ifc's heap in this worker, MB (it only ever grows). */
+function wasmHeapMB(ifc: WebIFC.IfcAPI): number {
+  return Math.round((ifc.wasmModule as unknown as { HEAPU8: Uint8Array }).HEAPU8.length / 1048576);
 }
 
 /** Close a model this worker opened, unless a later request has replaced it. */
@@ -369,6 +384,8 @@ async function shareInto(
     ifc.CloseModel(modelID);
   }
   timeline.mark('helper.streamed');
+  // Memory, not time: what this helper's web-ifc heap grew to (summed over helpers).
+  timeline.add('helper.wasmHeapMB', wasmHeapMB(ifc));
   post({ type: 'shareStreamed', token, timings: timeline.toJSON() });
   // Flushed and closed before saying done: terminating the worker would
   // otherwise lose what the file system has not written yet.

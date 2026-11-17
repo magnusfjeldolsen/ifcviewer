@@ -38,7 +38,8 @@ describe('packMeshes / unpackMeshes', () => {
   it('keeps normals to within the 8-bit resolution they are drawn at', () => {
     const m = mesh(1, 50);
     const [b] = unpackMeshes(packMeshes([m]));
-    for (let i = 0; i < m.normals.length; i++) expect(Math.abs(b.normals[i] - m.normals[i])).toBeLessThanOrEqual(0.5 / 127 + 1e-7);
+    expect(b.normals).toBeInstanceOf(Int8Array); // as drawn, no float copy on reopen
+    for (let i = 0; i < m.normals.length; i++) expect(Math.abs(b.normals[i] / 127 - m.normals[i])).toBeLessThanOrEqual(0.5 / 127 + 1e-7);
   });
 
   it('a normal component a hair over 1 stays +1, not wrapped to -1', () => {
@@ -46,7 +47,7 @@ describe('packMeshes / unpackMeshes', () => {
     m.normals = new Float32Array([1.004, -1.004, 1.5, 0.99, -2, 0]);
     const [b] = unpackMeshes(packMeshes([m]));
     const want = [1, -1, 1, Math.round(0.99 * 127) / 127, -1, 0];
-    want.forEach((w, i) => expect(b.normals[i]).toBeCloseTo(w, 6));
+    want.forEach((w, i) => expect(b.normals[i] / 127).toBeCloseTo(w, 6));
   });
 
   it('keeps 32-bit indices for a piece with more vertices than 16 bits can address', () => {
@@ -60,6 +61,19 @@ describe('packMeshes / unpackMeshes', () => {
     const m = mesh(1, 100);
     const raw = 8 + 30 * 8 + m.vertices.byteLength + m.indices.byteLength + 300;
     expect(packedSize([m])).toBe(raw - m.indices.byteLength / 2);
+  });
+
+  it('keeps byte normals and 16-bit indices as they are, and hands them back as views', () => {
+    const m = mesh(1, 3);
+    m.normals = new Int8Array([127, 0, -127, 5, 6, 7, -1, -2, -3]);
+    m.indices = new Uint16Array([0, 1, 2]);
+    const buf = packMeshes([m]);
+    const [b] = unpackMeshes(buf);
+    expect(Array.from(b.normals)).toEqual([127, 0, -127, 5, 6, 7, -1, -2, -3]);
+    expect(b.indices).toBeInstanceOf(Uint16Array);
+    expect(Array.from(b.indices)).toEqual([0, 1, 2]);
+    expect(b.vertices.buffer).toBe(buf);
+    expect(b.normals.buffer).toBe(buf);
   });
 
   it('packs to exactly the size it announces', () => {
