@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { computeClippingPlanes, computeFitPosition, sceneRadius } from './cameraUtils';
+import { clippingPlanesForView, computeFitPosition, maxViewDistance, sceneSphere } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -98,11 +98,14 @@ export class Viewer {
   private defaultTarget = new THREE.Vector3();
 
   /**
-   * Radius of the loaded scene, from the last fit. Sets the far plane's scale,
-   * so it follows the model rather than a multiple of one historical camera
-   * distance. 1 until something is loaded.
+   * Bounds of everything loaded, hidden or not. The far plane is sized from
+   * the camera's distance to this, so the whole model fits between the planes
+   * wherever the camera is. A unit sphere at the origin until something loads.
    */
-  private sceneRadius = 1;
+  private sceneBounds = new THREE.Sphere(new THREE.Vector3(), 1);
+
+  /** Where `refreshSceneBounds` reads the loaded extent from. Wired by App. */
+  private sceneBoundsProvider: (() => THREE.Box3) | null = null;
 
   /**
    * Distance to the geometry last found under the cursor, or null when the
@@ -228,6 +231,28 @@ export class Viewer {
   }
 
   /**
+   * Tell the viewer how to measure everything loaded (hidden included), which
+   * sizes the far plane. Read on `refreshSceneBounds` and on every fit, never
+   * per frame.
+   */
+  setSceneBoundsProvider(provider: () => THREE.Box3): void {
+    this.sceneBoundsProvider = provider;
+    this.refreshSceneBounds();
+  }
+
+  /**
+   * Re-measure the loaded scene. Call when models are added or removed; the
+   * fits call it themselves. `fallback` is used when there is no provider.
+   */
+  refreshSceneBounds(fallback?: THREE.Box3): void {
+    const box = this.sceneBoundsProvider?.() ?? fallback;
+    const sphere = box ? sceneSphere(box) : null;
+    if (!sphere) return;
+    this.sceneBounds.copy(sphere);
+    this.needsRender = true;
+  }
+
+  /**
    * Queue a render for the next animate tick. Cheap and idempotent —
    * setting the flag multiple times in one frame still costs one render.
    *
@@ -324,7 +349,7 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return;
 
-    this.sceneRadius = sceneRadius(box);
+    this.refreshSceneBounds(box);
     this.camera.position.copy(fit.position);
     this.camera.near = fit.near;
     this.camera.far = fit.far;
@@ -340,7 +365,7 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return Promise.resolve();
 
-    this.sceneRadius = sceneRadius(box);
+    this.refreshSceneBounds(box);
 
     return this.animator.flyTo({
       camera: this.camera,
@@ -641,7 +666,7 @@ export class Viewer {
         focus,
         scale,
         minDistance: this.camera.near * MIN_FOCUS_NEAR_PLANES,
-        maxDistance: this.camera.far,
+        maxDistance: maxViewDistance(this.sceneBounds.radius),
       }),
     );
   }
@@ -687,13 +712,12 @@ export class Viewer {
    * rebuild when nothing moved enough to matter.
    */
   private updateClipping(): void {
-    const toAnchor = this.camera.position.distanceTo(this.controls.target);
-    // The nearer of the two references wins: whatever is under the cursor is
-    // what the user is about to run into, and the anchor covers the case where
-    // they are pointing at empty space. Erring small only spends depth
-    // precision, and `computeClippingPlanes` caps how much it can spend.
-    const reference = Math.min(toAnchor, this.lastHitDistance ?? Infinity);
-    const { near, far } = computeClippingPlanes(reference, this.sceneRadius, toAnchor);
+    const { near, far } = clippingPlanesForView({
+      position: this.camera.position,
+      anchor: this.controls.target,
+      hitDistance: this.lastHitDistance,
+      scene: this.sceneBounds,
+    });
     if (near === this.camera.near && far === this.camera.far) return;
     this.camera.near = near;
     this.camera.far = far;

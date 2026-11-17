@@ -332,6 +332,13 @@ export class App {
     // Orbiting over empty space with something selected almost always means
     // "turn around that", so give the viewer a way to ask where it is.
     this.viewer.setSelectionCenterProvider(() => this.selectionManager.getSelectionCenter());
+    // Everything loaded, hidden included: Box3.expandByObject does not skip
+    // invisible children. Sizes the far plane, so unhiding never reveals a cut.
+    this.viewer.setSceneBoundsProvider(() => {
+      const box = new THREE.Box3();
+      for (const entry of this.modelManager.getAllModels()) box.expandByObject(entry.group);
+      return box;
+    });
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency
     // graph as SelectionManager; coexists via capture-phase pointerdown
@@ -415,6 +422,7 @@ export class App {
           this.parser.disposeModel(id);
         }
         this.modelManager.removeModel(id);
+        this.viewer.refreshSceneBounds();
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
         this.modelRecords.delete(id);
@@ -1488,6 +1496,9 @@ export class App {
   }
 
   private emitLoadSettled(event: LoadSettledEvent): void {
+    // Every load path ends here, so this is where a streamed model's full
+    // extent is known; the first-batch fit only saw part of it.
+    this.viewer.refreshSceneBounds();
     for (const cb of this.loadSettledListeners) cb(event);
   }
 
