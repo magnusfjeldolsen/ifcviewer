@@ -154,8 +154,12 @@ export interface DollyTowardPointParams {
   scale: number;
   /** Never end up nearer than this to `focus` — the near-plane guard. */
   minDistance: number;
-  /** Optional ceiling so zooming out cannot run away to infinity. */
-  maxDistance?: number;
+  /**
+   * Optional reach, so zooming out cannot run away to infinity: a zoom-out
+   * stops where the camera would leave this sphere. Measured from the scene,
+   * not from `focus`, so the limit is the same whatever the cursor is over.
+   */
+  limit?: THREE.Sphere;
 }
 
 /**
@@ -173,9 +177,15 @@ export interface DollyTowardPointParams {
  * unchanged, so the point stays under the same pixel: zoom-to-cursor falls out
  * of the geometry. The anchor is translated by the same delta, which leaves
  * the view direction untouched.
+ *
+ * The limits only ever stop a step, never reverse it: a zoom-out never brings
+ * the camera closer and a zoom-in never pushes it back. Clamping the distance
+ * outright did both whenever the camera was already past a limit — panning at
+ * the zoom-out limit, removing a large model or restoring a session can all
+ * leave it there — and one zoom-out notch pulled it from 1576 m to 1032 m.
  */
 export function dollyTowardPoint(params: DollyTowardPointParams): CameraPose {
-  const { position, target, focus, scale, minDistance, maxDistance } = params;
+  const { position, target, focus, scale, minDistance, limit } = params;
 
   const offset = position.clone().sub(focus);
   const distance = offset.length();
@@ -184,8 +194,13 @@ export function dollyTowardPoint(params: DollyTowardPointParams): CameraPose {
     return { position: position.clone(), target: target.clone() };
   }
 
-  const ceiling = maxDistance ?? Number.POSITIVE_INFINITY;
-  const next = clamp(distance * scale, minDistance, ceiling);
+  let next = distance;
+  if (scale < 1) {
+    next = Math.min(distance, Math.max(distance * scale, minDistance));
+  } else if (scale > 1) {
+    const reach = limit ? reachAlong(focus, offset.clone().divideScalar(distance), limit) : Infinity;
+    next = Math.max(distance, Math.min(distance * scale, reach));
+  }
   const delta = offset.multiplyScalar(next / distance - 1);
 
   return {
@@ -211,6 +226,19 @@ export function anchorInFront(
   const forward = target.clone().sub(position);
   if (forward.lengthSq() < 1e-12) return target.clone();
   return position.clone().addScaledVector(forward.normalize(), Math.max(distance, 1e-6));
+}
+
+/**
+ * How far from `origin`, along the unit vector `dir`, a point can go and still
+ * be inside `sphere`. 0 when the ray never enters it.
+ */
+function reachAlong(origin: THREE.Vector3, dir: THREE.Vector3, sphere: THREE.Sphere): number {
+  // |origin + s·dir − centre|² = r², solved for the larger root.
+  const w = origin.clone().sub(sphere.center);
+  const b = dir.dot(w);
+  const disc = b * b - w.lengthSq() + sphere.radius * sphere.radius;
+  if (disc < 0) return 0;
+  return Math.max(-b + Math.sqrt(disc), 0);
 }
 
 function rotateAround(

@@ -12,7 +12,7 @@
  */
 
 import type { FromWorker, ToWorker } from './ifcMessages';
-import type { ParsedMesh, ParsedModel, StreamProgress } from './types';
+import type { ParsedMesh, StreamedModel, StreamProgress } from './types';
 
 /**
  * Minimal `Worker` surface this proxy depends on. Lets unit tests inject
@@ -27,10 +27,10 @@ export interface WorkerLike {
 
 /** Per-model in-flight parse / openForProps state. */
 interface PendingModel {
-  resolve: (model: ParsedModel) => void;
+  resolve: (model: StreamedModel) => void;
   reject: (err: Error) => void;
-  /** Geometry accumulated from `batch` messages (for the resolved ParsedModel). */
-  meshes: ParsedMesh[];
+  /** Meshes delivered so far. They are not kept: `onBatch` owns them. */
+  meshCount: number;
   /** Per-batch callback — undefined for `openForProperties` (no geometry). */
   onBatch?: (meshes: ParsedMesh[], progress: StreamProgress) => void;
 }
@@ -99,20 +99,20 @@ export class WorkerIfcParser {
 
   /**
    * Parse a model with progressive geometry delivery. `onBatch` fires once
-   * per worker `batch` message; the returned promise resolves with the
-   * full `ParsedModel` (all batches accumulated) so callers that need the
-   * complete mesh list — e.g. the geometry cache — work unchanged.
+   * per worker `batch` message, and is the only holder of those meshes: the
+   * returned promise resolves with how many there were, not the meshes
+   * themselves. A caller that needs them all (the geometry cache) gathers
+   * them in `onBatch`.
    *
-   * The `.ifc` buffer is transferred (not copied) to the worker; the
-   * caller must not touch it after this call.
+   * The `.ifc` buffer is copied, not transferred, to the worker (see below).
    */
   parseStreaming(
     buffer: ArrayBuffer,
     id: string,
     onBatch: (meshes: ParsedMesh[], progress: StreamProgress) => void,
-  ): Promise<ParsedModel> {
-    return new Promise<ParsedModel>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, meshes: [], onBatch });
+  ): Promise<StreamedModel> {
+    return new Promise<StreamedModel>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, meshCount: 0, onBatch });
       // We intentionally do NOT transfer the buffer. The main thread still
       // needs the original alive after this call — for `sessionStore.saveModel`
       // (IDB persistence) and `App.bufferCache` (used by `resetView`).
@@ -135,7 +135,7 @@ export class WorkerIfcParser {
       this.pending.set(id, {
         resolve: () => resolve(),
         reject,
-        meshes: [],
+        meshCount: 0,
       });
       this.worker.postMessage({ type: 'openForProps', id, buffer });
     });
@@ -159,7 +159,7 @@ export class WorkerIfcParser {
       case 'batch': {
         const p = this.pending.get(msg.id);
         if (!p) return;
-        for (const m of msg.meshes) p.meshes.push(m);
+        p.meshCount += msg.meshes.length;
         p.onBatch?.(msg.meshes, msg.progress);
         break;
       }
@@ -167,7 +167,7 @@ export class WorkerIfcParser {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
-        p.resolve({ id: msg.id, meshes: p.meshes });
+        p.resolve({ id: msg.id, meshCount: p.meshCount });
         break;
       }
       case 'error': {

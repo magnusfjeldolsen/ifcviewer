@@ -33,16 +33,16 @@ import type { ElementIdentity, SelectionMode } from './types';
  * active clipping plane is excluded. Partially-clipped elements remain
  * selectable — same convention as single-click `raycastVisible`.
  *
- * Visibility: hidden model groups (`entry.visible === false`) and
- * `mesh.visible === false` skip classification entirely.
+ * Visibility: hidden models and hidden elements skip classification
+ * entirely (`ModelManager.forEachVisiblePiece` only visits drawn pieces).
  *
- * Identity dedup: a single IFC element can have multiple meshes sharing
- * one `expressID` (different render geometries). We bucket per
- * `(modelId, expressId)` and emit one identity per bucket.
+ * Identity dedup: a single IFC element can have several geometry pieces
+ * sharing one `expressID`. We bucket per `(modelId, expressId)` and emit one
+ * identity per bucket.
  *
- * Performance: ~10 ms for 50k meshes at this complexity level. The mesh
- * iteration walks `modelManager.getAllModels()` directly so we don't
- * traverse pivot/clip/measurement helpers parented to the scene root.
+ * Performance: ~10 ms for 50k pieces at this complexity level. The walk goes
+ * through ModelManager's per-piece bounds, never the scene graph, so
+ * pivot/clip/measurement helpers are never considered.
  *
  * See `dev/plans/phase-marquee-selection.md` for the full design.
  */
@@ -264,43 +264,29 @@ export class MarqueeSelector {
     // Active clipping planes (renderer-level).
     const clipPlanes = this.deps.viewer.getRenderer().clippingPlanes ?? [];
 
-    // Walk visible meshes under loaded models, classify, bucket per element.
-    // Single pass: every visible mesh of an element bumps `all`; only
-    // touching meshes bump `touches`; only fully-inside meshes bump `window`.
+    // Walk every drawn piece of every visible model, classify, bucket per
+    // element. Single pass: every visible piece of an element bumps `all`;
+    // only touching pieces bump `touches`; only fully-inside ones bump `window`.
     const buckets = new Map<string, ElementBucket>();
-    const tmpBox = new THREE.Box3();
-    for (const entry of this.deps.modelManager.getAllModels()) {
-      if (!entry.visible) continue;
-      for (const child of entry.group.children) {
-        if (!(child instanceof THREE.Mesh)) continue;
-        if (typeof child.userData.expressID !== 'number') continue;
-        if (!child.visible) continue;
-
-        const expressId = child.userData.expressID as number;
-        const key = `${entry.id}:${expressId}`;
-        let bucket = buckets.get(key);
-        if (!bucket) {
-          bucket = {
-            all: 0,
-            window: 0,
-            touches: 0,
-            sample: {
-              modelId: entry.id,
-              expressId,
-              ifcClass: '',
-              ifcTypeCode: 0,
-            },
-          };
-          buckets.set(key, bucket);
-        }
-        bucket.all += 1;
-
-        const classification = classifyMesh(child, frustum, clipPlanes, tmpBox);
-        if (classification === 'outside') continue;
-        bucket.touches += 1;
-        if (classification === 'window') bucket.window += 1;
+    this.deps.modelManager.forEachVisiblePiece((modelId, expressId, worldBox) => {
+      const key = `${modelId}:${expressId}`;
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = {
+          all: 0,
+          window: 0,
+          touches: 0,
+          sample: { modelId, expressId, ifcClass: '', ifcTypeCode: 0 },
+        };
+        buckets.set(key, bucket);
       }
-    }
+      bucket.all += 1;
+
+      const classification = classifyBox(worldBox, frustum, clipPlanes);
+      if (classification === 'outside') return;
+      bucket.touches += 1;
+      if (classification === 'window') bucket.window += 1;
+    });
 
     const identities = bucketResults(buckets, state.direction);
     const mode = modeFromModifiers(state.modifiers);
@@ -469,46 +455,38 @@ export function computeDeep(camera: THREE.PerspectiveCamera, sceneBox: THREE.Box
 }
 
 /**
- * Classify a single mesh against a frustum and a set of active clip planes.
+ * Classify one piece's world-space AABB against a frustum and a set of
+ * active clip planes.
  *
  * Returns:
  *  - `'outside'` when the AABB lies entirely on the cut-side of any active
  *    clip plane, or when the AABB doesn't touch the frustum at all.
- *  - `'window'` when all 8 corners of the world-space AABB are inside the
- *    frustum (conservative for rotated meshes; their AABB overstates the
- *    real footprint, so window mode may slightly under-select rotated
- *    elements — accepted for v1).
+ *  - `'window'` when all 8 corners of the AABB are inside the frustum.
+ *    The AABB is the exact bounds of the piece's vertices in world space,
+ *    so a rotated piece's box overstates its footprint and window mode may
+ *    slightly under-select it — accepted for v1.
  *  - `'crossing'` when the AABB intersects the frustum but at least one
  *    corner is outside.
- *
- * `tmpBox` is reused across calls to avoid allocating a Box3 per mesh.
  */
-export function classifyMesh(
-  mesh: THREE.Mesh,
+export function classifyBox(
+  worldBox: THREE.Box3,
   frustum: THREE.Frustum,
   clipPlanes: readonly THREE.Plane[],
-  tmpBox: THREE.Box3,
 ): 'outside' | 'crossing' | 'window' {
-  if (mesh.geometry.boundingBox === null) {
-    mesh.geometry.computeBoundingBox();
-  }
-  const local = mesh.geometry.boundingBox;
-  if (!local) return 'outside'; // Empty geometry.
-
-  tmpBox.copy(local).applyMatrix4(mesh.matrixWorld);
+  if (worldBox.isEmpty()) return 'outside';
 
   // Clipping respect: a plane fully clips this AABB when every corner has
   // distanceToPoint < 0 (i.e. on the cut-side, matching `raycastVisible`'s
   // convention of plane.distanceToPoint(point) >= 0 for visible points).
   for (const plane of clipPlanes) {
-    if (boxFullyClippedByPlane(tmpBox, plane)) return 'outside';
+    if (boxFullyClippedByPlane(worldBox, plane)) return 'outside';
   }
 
   // Frustum tests.
-  if (!frustum.intersectsBox(tmpBox)) return 'outside';
+  if (!frustum.intersectsBox(worldBox)) return 'outside';
 
   // Window: all 8 corners inside every frustum plane.
-  if (boxFullyInsideFrustum(tmpBox, frustum)) return 'window';
+  if (boxFullyInsideFrustum(worldBox, frustum)) return 'window';
   return 'crossing';
 }
 

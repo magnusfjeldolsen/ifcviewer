@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { computeClippingPlanes, computeFitPosition, sceneRadius } from './cameraUtils';
+import { clippingPlanesForView, computeFitPosition, maxViewDistance } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -23,11 +23,14 @@ const ROTATE_SPEED = 1;
  */
 const WHEEL_ZOOM_STEP = 0.9;
 
+/** Side of the square ground grid, in metres, centred on the origin. */
+const GRID_SIZE = 50;
+
 /**
  * Keep the camera this many near-planes away from whatever it is zooming at.
  *
  * Only a sane stop now that the near plane tracks the viewing distance
- * (`computeClippingPlanes`): the limit shrinks as the camera approaches, so a
+ * (`clippingPlanesForView`): the limit shrinks as the camera approaches, so a
  * dolly asymptotes towards a surface instead of hitting the wall a fixed near
  * plane used to put 2.26 m in front of it.
  */
@@ -62,6 +65,7 @@ export class Viewer {
   private canvas: HTMLCanvasElement;
   private animationId: number | null = null;
   private updateCallbacks: Array<() => void> = [];
+  private renderedCallbacks: Array<(timestamp: number, renderCpuMs: number) => void> = [];
 
   /**
    * Render-on-demand gate. The animate loop still runs at requestAnimationFrame
@@ -96,25 +100,40 @@ export class Viewer {
   /** Last-resort rotation centre: the centre of the last fit. */
   private defaultTarget = new THREE.Vector3();
 
+  /** The ground grid's extent. The near plane must not cut it either. */
+  private readonly gridBox = new THREE.Box3(
+    new THREE.Vector3(-GRID_SIZE / 2, 0, -GRID_SIZE / 2),
+    new THREE.Vector3(GRID_SIZE / 2, 0, GRID_SIZE / 2),
+  );
+
   /**
-   * Radius of the loaded scene, from the last fit. Sets the far plane's scale,
-   * so it follows the model rather than a multiple of one historical camera
-   * distance. 1 until something is loaded.
+   * Bounds of everything loaded, hidden or not. The clipping planes are sized
+   * from the camera's distance to this, so the whole model fits between them
+   * wherever the camera is. Until something loads the grid is all there is.
    */
-  private sceneRadius = 1;
+  private sceneBox = this.gridBox.clone();
+
+  /** Where `refreshSceneBounds` reads the loaded extent from. Wired by App. */
+  private sceneBoundsProvider: (() => THREE.Box3) | null = null;
+
+  /**
+   * Things drawn outside the model that must stay between the planes, such as
+   * the section handle. Asked on every frame the planes are recomputed.
+   */
+  private viewBoundsSources: Array<(box: THREE.Box3) => void> = [];
+
+  /** `sceneBox` grown by `viewBoundsSources`, as of the last plane update. */
+  private viewBox = new THREE.Box3();
 
   /**
    * Distance to the geometry last found under the cursor, or null when the
    * cursor was over empty space.
    *
-   * The near plane follows this as well as the view anchor, because the two
-   * come apart exactly where it matters. `controls.target` is a free-floating
-   * anchor on the camera's forward axis: dollying toward a wall moves camera
-   * and anchor together, so the anchor can still be 176 m away while the wall
-   * is 0.7 m away. Sizing the near plane off the anchor alone put the dolly
-   * guard 0.7 m in front of the wall — better than the 2.26 m it used to be,
-   * and still nowhere near millimetre range. Recorded by `raycastAt`, which
-   * every navigation gesture already calls.
+   * It can only pull the near plane in, never push it out (see
+   * `clippingPlanesForView`): outside the model it lets the dolly guard reach
+   * the surface under the cursor instead of stalling at the camera's
+   * clearance, and a miss merely stops it helping. Recorded by `raycastAt`,
+   * which every navigation gesture already calls.
    */
   private lastHitDistance: number | null = null;
 
@@ -227,6 +246,48 @@ export class Viewer {
   }
 
   /**
+   * Tell the viewer how to measure everything loaded (hidden included), which
+   * sizes the far plane. Read on `refreshSceneBounds` and on every fit, never
+   * per frame.
+   */
+  setSceneBoundsProvider(provider: () => THREE.Box3): void {
+    this.sceneBoundsProvider = provider;
+    this.refreshSceneBounds();
+  }
+
+  /**
+   * Re-measure the loaded scene. Call when models are added or removed; the
+   * fits call it themselves. `fallback` is used when there is no provider.
+   */
+  refreshSceneBounds(fallback?: THREE.Box3): void {
+    const box = this.sceneBoundsProvider?.() ?? fallback;
+    if (!box || box.isEmpty()) return;
+    this.sceneBox.copy(box);
+    this.needsRender = true;
+  }
+
+  /**
+   * Keep something drawn outside the model between the clipping planes: the
+   * source grows the box it is handed to cover it. Returns an unsubscribe.
+   */
+  addViewBoundsSource(source: (box: THREE.Box3) => void): () => void {
+    this.viewBoundsSources.push(source);
+    return () => {
+      this.viewBoundsSources = this.viewBoundsSources.filter((s) => s !== source);
+    };
+  }
+
+  /**
+   * Stop a fly-to in progress, leaving the camera where it is and in the
+   * user's hands. For gestures that claim the pointer before the animation's
+   * own interrupt listener can see it, like grabbing the section handle.
+   */
+  cancelCameraAnimation(): void {
+    this.animator.cancel();
+    this._controlsMode = 'user';
+  }
+
+  /**
    * Queue a render for the next animate tick. Cheap and idempotent —
    * setting the flag multiple times in one frame still costs one render.
    *
@@ -297,14 +358,33 @@ export class Viewer {
     // flyTo tween and a session restore all end up here before the draw.
     this.updateClipping();
     this.updateMarkerScales();
+    if (this.renderedCallbacks.length === 0) {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    const start = performance.now();
     this.renderer.render(this.scene, this.camera);
+    const end = performance.now();
+    for (const cb of this.renderedCallbacks) cb(end, end - start);
   };
+
+  /**
+   * Hear about every frame actually drawn, with the CPU time spent inside
+   * `renderer.render`. Only the `?stats` debug surface subscribes; with no
+   * subscriber the render loop does not even read the clock.
+   */
+  onRendered(callback: (timestamp: number, renderCpuMs: number) => void): () => void {
+    this.renderedCallbacks.push(callback);
+    return () => {
+      this.renderedCallbacks = this.renderedCallbacks.filter((cb) => cb !== callback);
+    };
+  }
 
   fitToBox(box: THREE.Box3): void {
     const fit = computeFitPosition(box);
     if (!fit) return;
 
-    this.sceneRadius = sceneRadius(box);
+    this.refreshSceneBounds(box);
     this.camera.position.copy(fit.position);
     this.camera.near = fit.near;
     this.camera.far = fit.far;
@@ -320,7 +400,7 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return Promise.resolve();
 
-    this.sceneRadius = sceneRadius(box);
+    this.refreshSceneBounds(box);
 
     return this.animator.flyTo({
       camera: this.camera,
@@ -403,7 +483,7 @@ export class Viewer {
   }
 
   private setupGrid(): void {
-    const grid = new THREE.GridHelper(50, 50);
+    const grid = new THREE.GridHelper(GRID_SIZE, GRID_SIZE);
     this.scene.add(grid);
   }
 
@@ -621,7 +701,9 @@ export class Viewer {
         focus,
         scale,
         minDistance: this.camera.near * MIN_FOCUS_NEAR_PLANES,
-        maxDistance: this.camera.far,
+        // From the scene centre, not the focus: how far out you can get should
+        // not depend on what the cursor happens to be over.
+        limit: this.zoomOutLimit(),
       }),
     );
   }
@@ -659,21 +741,30 @@ export class Viewer {
     this.needsRender = true;
   }
 
+  /** The sphere a zoom-out may not leave: `maxViewDistance` about the scene centre. */
+  private zoomOutLimit(): THREE.Sphere {
+    // `dollyTo` refreshes the planes, and with them `viewBox`, first.
+    const sphere = this.viewBox.getBoundingSphere(new THREE.Sphere());
+    sphere.radius = maxViewDistance(sphere.radius);
+    return sphere;
+  }
+
   /**
    * Re-derive the clipping planes from where the camera actually is.
    *
    * The near plane used to be fixed at fit time, which is what made close-up
-   * work impossible — see `computeClippingPlanes`. Skips the projection-matrix
+   * work impossible — see `clippingPlanesForView`. Skips the projection-matrix
    * rebuild when nothing moved enough to matter.
    */
   private updateClipping(): void {
-    const toAnchor = this.camera.position.distanceTo(this.controls.target);
-    // The nearer of the two references wins: whatever is under the cursor is
-    // what the user is about to run into, and the anchor covers the case where
-    // they are pointing at empty space. Erring small only spends depth
-    // precision, and `computeClippingPlanes` caps how much it can spend.
-    const reference = Math.min(toAnchor, this.lastHitDistance ?? Infinity);
-    const { near, far } = computeClippingPlanes(reference, this.sceneRadius, toAnchor);
+    this.viewBox.copy(this.sceneBox);
+    for (const source of this.viewBoundsSources) source(this.viewBox);
+    const { near, far } = clippingPlanesForView({
+      position: this.camera.position,
+      hitDistance: this.lastHitDistance,
+      scene: this.viewBox,
+      clearOf: [this.gridBox],
+    });
     if (near === this.camera.near && far === this.camera.far) return;
     this.camera.near = near;
     this.camera.far = far;

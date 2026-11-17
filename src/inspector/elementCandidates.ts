@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { raycastVisible } from '../utils/raycast';
+import { elementOfHit } from '../viewer/ModelBatch';
 import type { Candidate, ScreenPoint } from './candidateMath';
 
 /**
@@ -46,13 +47,18 @@ export function elementCandidatesAt(deps: ElementCandidateDeps, cursor: ScreenPo
   const hit = raycastVisible(ndc, deps.camera, deps.scene, deps.renderer);
   if (!hit) return [];
 
+  // Many elements share one chunk mesh, so the element — not the object —
+  // is what makes the candidate the same one from one pointer move to the next.
+  const element = elementOfHit(hit);
+  const id = element ? `element:${element.modelId}:${element.expressId}` : `element:${hit.object.uuid}`;
+
   return [
     {
       kind: 'element',
       priority: ELEMENT_PRIORITY,
       distance: 0,
       depth: hit.distance,
-      id: `element:${hit.object.uuid}`,
+      id,
       payload: hit,
     },
   ];

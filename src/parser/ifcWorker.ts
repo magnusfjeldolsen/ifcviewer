@@ -36,6 +36,7 @@
 import * as WebIFC from 'web-ifc';
 
 import { fetchElementProperties } from '../inspector/repository/fetchElementProperties';
+import { ModelPropertyCaches, type ModelPropertyCache } from '../inspector/repository/modelPropertyCache';
 import { computeUnitTable } from '../inspector/repository/unitTable';
 import { buildUnitTable, DEFAULT_UNITS, type UnitTable } from '../inspector/format';
 import {
@@ -48,6 +49,7 @@ import { elementMatches, type PropertySelector } from '../inspector/matchValue';
 import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
+import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 
 /**
  * Product-ID batch size for `parse`. Each batch is one `batch` message.
@@ -66,6 +68,12 @@ let initPromise: Promise<WebIFC.IfcAPI> | null = null;
 const modelIds = new Map<string, number>();
 /** App UUID → per-model unit table (lazily computed on first property query). */
 const unitTables = new Map<string, UnitTable>();
+/**
+ * App UUID → per-model property cache (relationship index + resolved type
+ * objects). Created by the first bulk read, used by every read after it, and
+ * dropped with the model. See `modelPropertyCache.ts`.
+ */
+const propertyCaches = new ModelPropertyCaches();
 
 /**
  * Serial request queue. Each message handler is appended to this chain so
@@ -124,24 +132,44 @@ function extractFlatMesh(
     const vertexCount = verts.length / 6;
     const positions = new Float32Array(vertexCount * 3);
     const normals = new Float32Array(vertexCount * 3);
+    // Local bounds ride along in the same pass: see `ParsedMesh.bounds`. They
+    // stay true after welding below, which keeps every distinct position.
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let j = 0; j < vertexCount; j++) {
-      positions[j * 3] = verts[j * 6];
-      positions[j * 3 + 1] = verts[j * 6 + 1];
-      positions[j * 3 + 2] = verts[j * 6 + 2];
+      const x = verts[j * 6];
+      const y = verts[j * 6 + 1];
+      const z = verts[j * 6 + 2];
+      positions[j * 3] = x;
+      positions[j * 3 + 1] = y;
+      positions[j * 3 + 2] = z;
       normals[j * 3] = verts[j * 6 + 3];
       normals[j * 3 + 1] = verts[j * 6 + 4];
       normals[j * 3 + 2] = verts[j * 6 + 5];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
     }
 
+    // web-ifc gives nearly every triangle its own three vertices. Sharing the
+    // ones that are the same point with the same (8-bit, as drawn) normal cuts
+    // the vertex work and memory of a large model by about a fifth.
+    const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
+
     const color = placedGeom.color;
-    sink.push({
+    const mesh: ParsedMesh = {
       expressID: flatMesh.expressID,
-      vertices: positions,
-      normals,
-      indices: new Uint32Array(idxs),
+      vertices: welded.positions,
+      normals: welded.normals,
+      indices: welded.indices,
       transform: Array.from(placedGeom.flatTransformation),
       color: { r: color.x, g: color.y, b: color.z, a: color.w },
-    });
+    };
+    if (vertexCount > 0) mesh.bounds = { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+    sink.push(mesh);
 
     geom.delete();
   }
@@ -256,6 +284,7 @@ async function getOne(
   id: string,
   expressId: number,
   unitTable: UnitTable,
+  cache: ModelPropertyCache | undefined,
 ): Promise<ElementProperties> {
   return fetchElementProperties(
     ifc as unknown as Parameters<typeof fetchElementProperties>[0],
@@ -263,10 +292,18 @@ async function getOne(
     id,
     expressId,
     unitTable,
+    cache,
   );
 }
 
-/** Fetch + normalize one element's properties and post them back. */
+/**
+ * Fetch + normalize one element's properties and post them back.
+ *
+ * Uses the model's property cache if a bulk read has already built it, but
+ * never builds it: on a large model the relationship index costs a few
+ * hundred milliseconds up front, which a single inspector click (a few
+ * milliseconds uncached) should not pay.
+ */
 async function handleGetProps(reqId: number, id: string, expressId: number): Promise<void> {
   const ifc = await getApi();
   const modelID = modelIds.get(id);
@@ -274,7 +311,7 @@ async function handleGetProps(reqId: number, id: string, expressId: number): Pro
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
   const unitTable = await ensureUnitTable(ifc, id, modelID);
-  const props = await getOne(ifc, modelID, id, expressId, unitTable);
+  const props = await getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.peek(id));
   post({ type: 'props', reqId, props });
 }
 
@@ -372,13 +409,14 @@ async function readProps(
   const total = expressIds.length;
   let done = 0;
   let lastProgressAt = 0;
+  const cache = propertyCaches.for(id, ifc, modelID);
 
   for (let start = 0; start < total; start += INTERSECT_CHUNK) {
     if (cancelled.has(reqId)) return false;
 
     const end = Math.min(start + INTERSECT_CHUNK, total);
     for (let i = start; i < end; i++) {
-      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable));
+      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable, cache));
       done++;
     }
 
@@ -572,6 +610,7 @@ function handleDisposeModel(id: string): void {
   const modelID = modelIds.get(id);
   modelIds.delete(id);
   unitTables.delete(id);
+  propertyCaches.drop(id);
   if (modelID !== undefined && api) {
     try {
       api.CloseModel(modelID);
@@ -594,6 +633,7 @@ function handleDispose(): void {
   initPromise = null;
   modelIds.clear();
   unitTables.clear();
+  propertyCaches.clear();
 }
 
 // --- message dispatch --------------------------------------------------------

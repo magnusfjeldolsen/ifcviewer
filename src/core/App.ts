@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import { Viewer } from '../viewer/Viewer';
 import { ModelManager } from '../viewer/ModelManager';
 import { AppearanceManager } from '../viewer/AppearanceManager';
@@ -52,6 +51,29 @@ import { SIMILAR_MENU_ENRICH_MAX } from '../inspector/limits';
 import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
+import { SceneBounds } from '../viewer/SceneBounds';
+
+/**
+ * A model load has finished, one way or the other. `source` says whether it
+ * was a file the user opened or a model brought back by session restore;
+ * `fromCache` is true when restore hydrated it from the geometry cache instead
+ * of parsing the IFC again.
+ */
+export interface LoadSettledEvent {
+  name: string;
+  source: 'file' | 'restore';
+  ok: boolean;
+  meshCount: number;
+  fromCache: boolean;
+  error?: string;
+}
+
+/** What the `?stats` debug surface needs to reach. Nothing else uses it. */
+export interface DebugHandles {
+  viewer: Viewer;
+  modelManager: ModelManager;
+  onLoadSettled(cb: (event: LoadSettledEvent) => void): void;
+}
 
 /** How long a transient status message stays up before clearing. */
 const STATUS_CLEAR_MS = 4000;
@@ -73,6 +95,8 @@ export class App {
   private memoryToggle: MemoryToggle;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private clippingTool: ClippingTool;
+  /** World extent of everything loaded, fed batch by batch from parsed data. */
+  private sceneBounds = new SceneBounds();
   private measurementTool: MeasurementTool;
   private positionTool: PositionMarkerTool;
   private footer: Footer;
@@ -123,14 +147,8 @@ export class App {
   // Element appearance (hide / isolate / show-all + transparent / opaque).
   // Per-element overrides driven from the context menu + the contextual tray,
   // made reversible by the shared HistoryManager. Constructed in the App
-  // constructor alongside SelectionManager so both share the pristine store.
+  // constructor alongside SelectionManager.
   private appearanceManager!: AppearanceManager;
-  // Write-once-per-mesh pristine-material store, SHARED by AppearanceManager
-  // and SelectionManager. Whichever subsystem touches a mesh first records its
-  // true load-time material here; both then derive their effects from this
-  // pristine base, which makes the highlight ↔ appearance reconciliation
-  // order-independent (precedence: hidden > transparent > highlighted > base).
-  private pristineMaterials = new WeakMap<THREE.Mesh, THREE.Material | THREE.Material[]>();
   // Generic right-click menu (selection-scoped; no raycast). Constructed in
   // start(); items built from the current selection + appearance flags.
   private contextMenu!: ContextMenu;
@@ -145,6 +163,9 @@ export class App {
   // bridge the basket to the SelectionManager. Persisted in the session.
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
+  // Told when a model load finishes or fails. Only the `?stats` debug
+  // surface listens; see `onLoadSettled`.
+  private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
@@ -167,8 +188,11 @@ export class App {
       camera: this.viewer.getCamera(),
       canvas: this.viewer.getCanvas(),
       requestRender,
+      cancelCameraAnimation: () => this.viewer.cancelCameraAnimation(),
     });
     this.toolManager.register(this.clippingTool);
+    // The handle can be dragged outside the model; keep it between the planes.
+    this.viewer.addViewBoundsSource((box) => this.clippingTool.expandViewBounds(box));
 
     // One set of snap settings, shared by every tool that places a point.
     const snapSettings = {
@@ -252,41 +276,24 @@ export class App {
     // per user gesture. Constructed before those consumers.
     this.history = new HistoryManager();
 
-    // Shared pristine-material accessor: write-once per mesh so the first
-    // subsystem to touch a mesh records its load-time material. Both the
-    // appearance and selection systems derive their effects from this base.
-    const pristineFor = (mesh: THREE.Mesh): THREE.Material | THREE.Material[] => {
-      let p = this.pristineMaterials.get(mesh);
-      if (!p) {
-        p = mesh.material;
-        this.pristineMaterials.set(mesh, p);
-      }
-      return p;
-    };
-
-    // Element appearance. Constructed before SelectionManager so the latter's
-    // appearanceBaseFor provider can reach it. Shares the HistoryManager (each
-    // hide/isolate/show-all/transparent/opaque = one undoable command) and the
-    // shared pristine store.
+    // Element appearance. Shares the HistoryManager (each
+    // hide/isolate/show-all/transparent/opaque = one undoable command).
     this.appearanceManager = new AppearanceManager({
       modelManager: this.modelManager,
       requestRender,
       history: this.history,
-      pristineFor,
     });
 
     // Element selection (Phase 2 — Inspector). Must be constructed after
     // viewer / modelManager / toolManager exist; defers clicks to active
-    // tools and pivot picking via those dependencies. The appearanceBaseFor
-    // provider lets the highlight compose on top of the appearance base
-    // (transparent clone or pristine original) rather than capturing a stale
-    // material — see AppearanceManager / SelectionManager.refreshHighlights.
+    // tools and pivot picking via those dependencies. The highlight is its own
+    // per-element flag in the renderer, so it composes with appearance
+    // overrides without either manager knowing about the other.
     this.selectionManager = new SelectionManager({
       viewer: this.viewer,
       modelManager: this.modelManager,
       toolManager: this.toolManager,
       history: this.history,
-      appearanceBaseFor: (mesh) => this.appearanceManager.getBaseForMesh(mesh, pristineFor(mesh)),
       // Pick arbitration: elements outrank the annotations drawn over them, so
       // this normally answers 'element' and the click proceeds exactly as it
       // did before. Only a Tab-cycled candidate diverts it.
@@ -307,6 +314,14 @@ export class App {
     // Orbiting over empty space with something selected almost always means
     // "turn around that", so give the viewer a way to ask where it is.
     this.viewer.setSelectionCenterProvider(() => this.selectionManager.getSelectionCenter());
+    // Everything loaded, hidden included, kept up to date as each batch
+    // arrives (see SceneBounds). Sizes the clipping planes, so neither a
+    // streaming load nor unhiding can reveal a cut.
+    this.viewer.setSceneBoundsProvider(() => this.sceneBounds.box());
+    // See-through elements blend in the right order only if drawn back to
+    // front; the batches sort themselves for the view before each frame.
+    this.viewer.onUpdate(() => this.modelManager.sortSeeThrough(this.viewer.getCamera()));
+    this.sceneBounds.onChange(() => this.viewer.refreshSceneBounds());
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency
     // graph as SelectionManager; coexists via capture-phase pointerdown
@@ -390,6 +405,7 @@ export class App {
           this.parser.disposeModel(id);
         }
         this.modelManager.removeModel(id);
+        this.sceneBounds.removeModel(id);
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
         this.modelRecords.delete(id);
@@ -860,9 +876,10 @@ export class App {
             this.modelManager.beginStream(id);
             const parsed = await this.parser.parseStreaming(stored.buffer, id, (batch) => {
               this.modelManager.appendMeshes(id, batch);
+              this.sceneBounds.addMeshes(id, batch);
             });
             this.modelManager.endStream(id);
-            this.modelTreePanel.addModel(id, stored.name, parsed.meshes.length);
+            this.modelTreePanel.addModel(id, stored.name, parsed.meshCount);
             this.bufferCache.set(id, stored.buffer);
             this.modelRecords.set(id, {
               id,
@@ -875,6 +892,7 @@ export class App {
           } catch {
             // skip files that fail to parse on restore — drop a partial stream
             this.modelManager.removeModel(stored.id);
+            this.sceneBounds.removeModel(stored.id);
           }
         }
         const box = this.modelManager.getBoundingBox();
@@ -912,11 +930,16 @@ export class App {
                 id: record.id,
                 meshes: cachedMeshes,
               });
+              this.sceneBounds.addMeshes(record.id, cachedMeshes);
               this.modelTreePanel.addModel(
                 record.id, record.name, cachedMeshes.length, record.source.type,
               );
               this.bufferCache.set(record.id, stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+              this.emitLoadSettled({
+                name: record.name, source: 'restore', ok: true,
+                meshCount: cachedMeshes.length, fromCache: true,
+              });
               // Open the model in the worker for property queries. A later
               // `getProps` for this id simply queues behind this open in
               // the worker and resolves once the model is ready — the old
@@ -929,17 +952,25 @@ export class App {
               // so the *next* restore is fast. Backfills also rescue
               // sessions saved before the cache feature shipped (no hash).
               this.modelManager.beginStream(record.id);
+              const forCache = this.geometryCache.collector();
               const parsed = await this.parser.parseStreaming(
                 stored.buffer, record.id, (batch) => {
                   this.modelManager.appendMeshes(record.id, batch);
+                  this.sceneBounds.addMeshes(record.id, batch);
+                  forCache.add(batch);
                 },
               );
               this.modelManager.endStream(record.id);
-              this.modelTreePanel.addModel(record.id, record.name, parsed.meshes.length);
+              this.modelTreePanel.addModel(record.id, record.name, parsed.meshCount);
               this.bufferCache.set(record.id, stored.buffer);
               const hash = record.hash ?? await sha256Hex(stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
-              void this.geometryCache.save(hash, parsed.meshes);
+              const meshes = forCache.meshes();
+              if (meshes) void this.geometryCache.save(hash, meshes);
+              this.emitLoadSettled({
+                name: record.name, source: 'restore', ok: true,
+                meshCount: parsed.meshCount, fromCache: false,
+              });
             }
             // Fix the IndexedDB key to match the session UUID
             if (stored.id !== record.id) {
@@ -964,9 +995,14 @@ export class App {
             this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
             this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
           }
-        } catch {
+        } catch (err) {
           // skip models that fail to restore — drop any partial stream
           this.modelManager.removeModel(record.id);
+          this.sceneBounds.removeModel(record.id);
+          this.emitLoadSettled({
+            name: record.name, source: 'restore', ok: false, meshCount: 0, fromCache: false,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          });
         }
       }
       const box = this.modelManager.getBoundingBox();
@@ -1053,8 +1089,12 @@ export class App {
       streamId = id;
       let totalElements = 0;
       let framed = false;
+      // Only gather meshes for the geometry cache when it will be written.
+      const forCache = this.sessionStore.isMemoryEnabled() ? this.geometryCache.collector() : null;
       const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
         this.modelManager.appendMeshes(id, batch);
+        this.sceneBounds.addMeshes(id, batch);
+        forCache?.add(batch);
         totalElements = progress.total;
         this.setStatus(
           `Loading ${file.name}… ` +
@@ -1090,7 +1130,7 @@ export class App {
       // a pre-existing selection-undo can't restore against the new geometry.
       this.history.clear();
       this.modelTreePanel.addModel(
-        id, file.name, parsed.meshes.length,
+        id, file.name, parsed.meshCount,
         modelSource.type,
       );
 
@@ -1103,17 +1143,27 @@ export class App {
         // Fire-and-forget geometry-cache write. Runs after the scene is
         // up so the user-perceived parse time is unaffected; a failed
         // write just means the next restore falls back to a full parse.
-        void this.geometryCache.save(hash, parsed.meshes);
+        const meshes = forCache?.meshes();
+        if (meshes) void this.geometryCache.save(hash, meshes);
       }
 
       this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
+      this.emitLoadSettled({
+        name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
+      });
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
-      if (streamId) this.modelManager.removeModel(streamId);
+      if (streamId) {
+        this.modelManager.removeModel(streamId);
+        this.sceneBounds.removeModel(streamId);
+      }
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
+      this.emitLoadSettled({
+        name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false, error: msg,
+      });
     }
   }
 
@@ -1312,10 +1362,10 @@ export class App {
 
   // ── Appearance actions (D) ─────────────────────────────────
   //
-  // Each wraps an AppearanceManager op on the current-selection Scope, then
-  // reconciles the highlight for any selected meshes whose base material just
-  // changed. App is the single owner of the precedence chain
-  // hidden > transparent > highlighted > base (the orchestrated reconciliation).
+  // Each wraps an AppearanceManager op on the current-selection Scope. The
+  // precedence hidden > transparent > highlighted > base holds in the
+  // renderer itself (independent per-element flags), so nothing needs
+  // reconciling afterwards.
 
   /** The Scope these verbs act on = the current live selection. */
   private selectionScope(): import('../inspector/types').Scope {
@@ -1325,32 +1375,26 @@ export class App {
 
   private appearanceHide(): void {
     this.appearanceManager.hide(this.selectionScope());
-    this.selectionManager.refreshHighlights();
   }
 
   private appearanceIsolate(): void {
     this.appearanceManager.isolate(this.selectionScope());
-    this.selectionManager.refreshHighlights();
   }
 
   private appearanceShowAll(): void {
     this.appearanceManager.showAll();
-    this.selectionManager.refreshHighlights();
   }
 
   private appearanceTransparent(): void {
     this.appearanceManager.transparent(this.selectionScope());
-    this.selectionManager.refreshHighlights();
   }
 
   private appearanceOpaque(): void {
     this.appearanceManager.opaque(this.selectionScope());
-    this.selectionManager.refreshHighlights();
   }
 
   private appearanceClearTransparency(): void {
     this.appearanceManager.clearTransparency();
-    this.selectionManager.refreshHighlights();
   }
 
   /** Tray label for the "Show N hidden" button, kept in sync via onChange. */
@@ -1405,6 +1449,7 @@ export class App {
         this.parser.disposeModel(id);
       }
       this.modelManager.removeModel(id);
+      this.sceneBounds.removeModel(id);
       this.modelTreePanel.removeModel(id);
     }
 
@@ -1419,18 +1464,35 @@ export class App {
         this.modelManager.beginStream(id);
         const parsed = await this.parser.parseStreaming(buffer, id, (batch) => {
           this.modelManager.appendMeshes(id, batch);
+          this.sceneBounds.addMeshes(id, batch);
         });
         this.modelManager.endStream(id);
-        this.modelTreePanel.addModel(id, record.name, parsed.meshes.length, record.source.type);
+        this.modelTreePanel.addModel(id, record.name, parsed.meshCount, record.source.type);
       } catch {
         // skip files that fail to re-parse — drop any partial stream
         this.modelManager.removeModel(id);
+        this.sceneBounds.removeModel(id);
       }
     }
 
     const box = this.modelManager.getBoundingBox();
     this.viewer.fitToBox(box);
     this.setStatus('');
+  }
+
+  /** The internals the `?stats` debug surface measures. Not for features. */
+  debugHandles(): DebugHandles {
+    return {
+      viewer: this.viewer,
+      modelManager: this.modelManager,
+      onLoadSettled: (cb) => {
+        this.loadSettledListeners.push(cb);
+      },
+    };
+  }
+
+  private emitLoadSettled(event: LoadSettledEvent): void {
+    for (const cb of this.loadSettledListeners) cb(event);
   }
 
   private setStatus(text: string): void {

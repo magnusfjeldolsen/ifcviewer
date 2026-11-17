@@ -15,6 +15,12 @@ export interface ClippingToolDeps {
    * behaviour.
    */
   requestRender?: () => void;
+  /**
+   * Stop a camera fly-to in progress. Grabbing the handle claims the press
+   * before the animation's own interrupt listener sees it, so without this the
+   * camera would keep gliding under the drag.
+   */
+  cancelCameraAnimation?: () => void;
 }
 
 /**
@@ -94,8 +100,9 @@ export class ClippingTool implements Tool {
   private planePoint = new THREE.Vector3();
   private handleGroup: THREE.Group | null = null;
 
-  // Drag state
-  private dragging = false;
+  // Drag state. Only the pointer that grabbed the handle moves the plane; a
+  // second finger must neither move it too nor start navigating underneath.
+  private dragPointerId: number | null = null;
   private dragPrev = new THREE.Vector2();
 
   // State-change listeners for the contextual-action tray (and any other
@@ -111,6 +118,7 @@ export class ClippingTool implements Tool {
   private boundOnPointerDown: (e: PointerEvent) => void;
   private boundOnPointerMove: (e: PointerEvent) => void;
   private boundOnPointerUp: (e: PointerEvent) => void;
+  private boundOnLostCapture: (e: PointerEvent) => void;
 
   constructor(deps: ClippingToolDeps) {
     this.deps = deps;
@@ -118,6 +126,7 @@ export class ClippingTool implements Tool {
     this.boundOnPointerDown = this.onPointerDown.bind(this);
     this.boundOnPointerMove = this.onPointerMove.bind(this);
     this.boundOnPointerUp = this.onPointerUp.bind(this);
+    this.boundOnLostCapture = this.onLostCapture.bind(this);
   }
 
   activate(): void {
@@ -165,6 +174,26 @@ export class ClippingTool implements Tool {
   clearClipPlane(): void {
     this.removeDragListeners();
     this.removeClipPlane();
+  }
+
+  /**
+   * Grow `box` to cover the handle as drawn — the ring and the arrow, which
+   * keep a constant size on screen. The viewer keeps this box between its
+   * clipping planes, so the handle can never be dragged out of sight beyond
+   * the far plane, nor cut by the near plane when the camera is beside it.
+   */
+  expandViewBounds(box: THREE.Box3): void {
+    if (!this.handleGroup) return;
+    const centre = this.handleGroup.getWorldPosition(new THREE.Vector3());
+    // Unit ring of radius 1 and an arrow of length 2, scaled by `update()`.
+    const reach = this.handleGroup.scale.x * 2;
+    box.expandByPoint(centre.clone().addScalar(reach));
+    box.expandByPoint(centre.clone().addScalar(-reach));
+  }
+
+  /** True while the handle is being dragged. */
+  isDragging(): boolean {
+    return this.dragPointerId !== null;
   }
 
   /** True when a clip plane is currently active. */
@@ -269,7 +298,7 @@ export class ClippingTool implements Tool {
     }
 
     this.clipPlane = null;
-    this.dragging = false;
+    this.endDrag();
 
     if (had) this.notifyStateChange();
   }
@@ -331,19 +360,38 @@ export class ClippingTool implements Tool {
   // ── Drag to move plane ─────────────────────────────────────
 
   private addDragListeners(): void {
-    this.deps.canvas.addEventListener('pointerdown', this.boundOnPointerDown);
+    // Capture phase: at the target, capturing listeners run before the
+    // viewer's own (registered earlier, non-capturing), so a press on the
+    // handle can claim the gesture before navigation ever sees it.
+    this.deps.canvas.addEventListener('pointerdown', this.boundOnPointerDown, { capture: true });
     this.deps.canvas.addEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.addEventListener('pointerup', this.boundOnPointerUp);
+    // A drag can also end without a pointerup: the browser cancels it (a
+    // touch turned into a scroll, a palm rejected) or capture is lost.
+    this.deps.canvas.addEventListener('pointercancel', this.boundOnPointerUp);
+    this.deps.canvas.addEventListener('lostpointercapture', this.boundOnLostCapture);
   }
 
   private removeDragListeners(): void {
-    this.deps.canvas.removeEventListener('pointerdown', this.boundOnPointerDown);
+    this.deps.canvas.removeEventListener('pointerdown', this.boundOnPointerDown, { capture: true });
     this.deps.canvas.removeEventListener('pointermove', this.boundOnPointerMove);
     this.deps.canvas.removeEventListener('pointerup', this.boundOnPointerUp);
+    this.deps.canvas.removeEventListener('pointercancel', this.boundOnPointerUp);
+    this.deps.canvas.removeEventListener('lostpointercapture', this.boundOnLostCapture);
+    this.endDrag();
   }
 
   private onPointerDown(e: PointerEvent): void {
     if (!this.handleGroup || !this.clipPlane) return;
+    if (this.dragPointerId !== null) {
+      // Another finger while the handle is held: keep it away from the plane
+      // and from navigation alike, or it would orbit the view under the drag.
+      if (e.pointerId !== this.dragPointerId) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      return;
+    }
     if (e.button !== 0) return;
     if (this.placing) return;
 
@@ -358,20 +406,26 @@ export class ClippingTool implements Tool {
     const ray = this.raycaster.ray;
     if (!ray.intersectsSphere(hitSphere)) return;
 
-    this.dragging = true;
+    this.dragPointerId = e.pointerId;
     this.dragPrev.set(e.clientX, e.clientY);
     this.deps.canvas.style.cursor = 'ns-resize';
     this.deps.canvas.setPointerCapture(e.pointerId);
+    // A fly-to still running would keep moving the camera under the drag.
+    this.deps.cancelCameraAnimation?.();
 
+    // Immediate: the viewer's orbit and OrbitControls' pan listen on this same
+    // canvas, and plain stopPropagation does not stop listeners on the target.
+    // Without it the drag moved the plane and orbited the camera at once.
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
   }
 
   private onPointerMove(e: PointerEvent): void {
     if (!this.clipPlane || !this.handleGroup) return;
     if (this.placing) return;
 
-    if (this.dragging) {
+    if (this.dragPointerId !== null) {
+      if (e.pointerId !== this.dragPointerId) return;
       const cursorDeltaPx = {
         x: e.clientX - this.dragPrev.x,
         y: e.clientY - this.dragPrev.y,
@@ -413,10 +467,19 @@ export class ClippingTool implements Tool {
   }
 
   private onPointerUp(e: PointerEvent): void {
-    if (this.dragging) {
-      this.dragging = false;
-      this.deps.canvas.style.cursor = '';
-      this.deps.canvas.releasePointerCapture(e.pointerId);
-    }
+    if (e.pointerId === this.dragPointerId) this.endDrag();
+  }
+
+  private onLostCapture(e: PointerEvent): void {
+    if (e.pointerId === this.dragPointerId) this.endDrag();
+  }
+
+  /** Let go of the handle, however the drag ended. Safe to call when idle. */
+  private endDrag(): void {
+    const id = this.dragPointerId;
+    if (id === null) return;
+    this.dragPointerId = null;
+    this.deps.canvas.style.cursor = '';
+    if (this.deps.canvas.hasPointerCapture?.(id)) this.deps.canvas.releasePointerCapture(id);
   }
 }

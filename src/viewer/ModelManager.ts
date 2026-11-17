@@ -1,63 +1,53 @@
 import * as THREE from 'three';
 import type { ParsedMesh, ParsedModel } from '../parser/types';
+import { ModelBatch, SEE_THROUGH_SETTLE_MS, type ElementDrawState, type ModelBatchOptions } from './ModelBatch';
 
 export interface ModelEntry {
   id: string;
+  /** The model's scene node: hide it to hide the whole model. */
   group: THREE.Group;
   visible: boolean;
-  /**
-   * Index from expressID to all meshes in `group` that carry that ID.
-   *
-   * Built incrementally as meshes are added (`addModel`, or `appendMeshes`
-   * during a streamed load) and read by SelectionManager (and any future
-   * code that needs to look up meshes for an element). Without this index,
-   * highlight of N elements is O(N x meshCount); with it, it's O(N + hits).
-   * On a 100k-mesh model that's the difference between 10+ seconds and
-   * sub-100ms when selecting tens of thousands of elements via marquee.
-   */
-  meshesByExpressId: Map<number, THREE.Mesh[]>;
+  /** What is drawn for this model, and the per-element appearance API. */
+  batch: ModelBatch;
+}
+
+/** An element in a loaded model. */
+export interface ElementRef {
+  modelId: string;
+  expressId: number;
 }
 
 /**
- * Per-model state held only while a streamed load is in progress
- * (`beginStream` .. `endStream`).
+ * Owns every loaded model and what is drawn for it.
  *
- * `materialCache` is keyed by stringified RGBA. Reusing one
- * MeshPhongMaterial across every mesh that shares a color (a) shrinks
- * material count from ~mesh-count to a few dozen on real IFC models,
- * cutting WebGL state changes between draws, and (b) shrinks the
- * SelectionManager.highlightVariants pool proportionally (a
- * WeakMap<Material, Material> keyed by the original material reference;
- * shared originals -> shared variants).
+ * Each model is one `ModelBatch`: its pieces merged into a few dozen chunk
+ * meshes, with per-element colour, opacity, visibility and highlight held in
+ * a texture rather than in per-mesh materials. Consumers talk about elements
+ * — `(modelId, expressId)` — and never see meshes or materials:
  *
- * The cache is scoped to ONE model. Different models keep their own
- * material instances, which keeps removeModel's dispose loop safe: no
- * model references another model's materials.
+ * - `setHidden` / `setOpacity` / `setColor` / `setHighlighted` take a model
+ *   and a list of expressIDs, so colouring or filtering tens of thousands of
+ *   elements is one call.
+ * - `getBoundingBox` and `forEachVisiblePiece` answer framing and marquee
+ *   questions; `elementOfHit` (in ModelBatch) resolves a raycast hit.
  */
-interface StreamState {
-  entry: ModelEntry;
-  materialCache: Map<string, THREE.MeshPhongMaterial>;
-}
-
 export class ModelManager {
   private scene: THREE.Scene;
   private models = new Map<string, ModelEntry>();
-  /**
-   * In-progress streamed loads, keyed by model id. Populated by
-   * `beginStream`, consumed by `appendMeshes`, cleared by `endStream`
-   * (and by `removeModel`, in case a model is removed mid-stream).
-   */
-  private streams = new Map<string, StreamState>();
+  /** Models whose streamed load is still open. */
+  private streams = new Set<string>();
   /**
    * Optional render-on-demand hook. Called when models are added /
    * removed / hidden / shown, since those changes happen without any
    * camera movement and therefore won't trip OrbitControls' 'change' event.
    */
   private requestRender: (() => void) | null;
+  private batchOptions: ModelBatchOptions;
 
-  constructor(scene: THREE.Scene, requestRender?: () => void) {
+  constructor(scene: THREE.Scene, requestRender?: () => void, batchOptions: ModelBatchOptions = {}) {
     this.scene = scene;
     this.requestRender = requestRender ?? null;
+    this.batchOptions = batchOptions;
   }
 
   /**
@@ -74,8 +64,8 @@ export class ModelManager {
   }
 
   /**
-   * Start a streamed load: create the model's group, add it to the scene
-   * empty, and register an entry. Meshes are then delivered in batches via
+   * Start a streamed load: create the model, add it to the scene empty, and
+   * register an entry. Meshes are then delivered in batches via
    * `appendMeshes`, and the stream is closed with `endStream`. Lets the
    * scene fill progressively during a long parse instead of appearing all
    * at once.
@@ -85,20 +75,11 @@ export class ModelManager {
     if (this.models.has(id)) {
       this.removeModel(id);
     }
-    // Drop a stale in-progress stream for the same id, if any.
-    this.streams.delete(id);
-
-    const group = new THREE.Group();
-    group.name = id;
-    const entry: ModelEntry = {
-      id,
-      group,
-      visible: true,
-      meshesByExpressId: new Map(),
-    };
-    this.scene.add(group);
+    const batch = new ModelBatch(id, this.batchOptions);
+    const entry: ModelEntry = { id, group: batch.group, visible: true, batch };
+    this.scene.add(batch.group);
     this.models.set(id, entry);
-    this.streams.set(id, { entry, materialCache: new Map() });
+    this.streams.add(id);
     // No requestRender here: an empty group has nothing to draw. The first
     // appendMeshes call requests the render once there is geometry.
     return entry;
@@ -109,51 +90,35 @@ export class ModelManager {
    * there is no active stream for `id`.
    */
   appendMeshes(id: string, meshes: ParsedMesh[]): void {
-    const stream = this.streams.get(id);
-    if (!stream) return;
-    for (const mesh of meshes) {
-      this.buildMesh(stream, mesh);
-    }
+    if (!this.streams.has(id)) return;
+    const entry = this.models.get(id);
+    if (!entry) return;
+    entry.batch.append(meshes);
     if (meshes.length > 0) this.requestRender?.();
   }
 
   /**
    * Close a streamed load. Returns the finished entry (or undefined if no
-   * stream was open for `id`). Drops the per-stream material cache — the
-   * materials themselves stay alive, referenced by the meshes.
+   * stream was open for `id`).
    */
   endStream(id: string): ModelEntry | undefined {
-    const stream = this.streams.get(id);
-    this.streams.delete(id);
-    return stream?.entry;
+    if (!this.streams.delete(id)) return undefined;
+    const entry = this.models.get(id);
+    entry?.batch.finish();
+    this.requestRender?.();
+    return entry;
   }
 
   removeModel(id: string): boolean {
     // Drop any in-progress stream first so a later appendMeshes can't add
-    // meshes to a group we are about to dispose.
+    // meshes to a model we are about to dispose.
     this.streams.delete(id);
 
     const entry = this.models.get(id);
     if (!entry) return false;
 
     this.scene.remove(entry.group);
-    // Materials are shared across meshes within a model (see StreamState's
-    // materialCache), so dedupe before disposing. THREE.Material.dispose()
-    // is idempotent — calling it twice is harmless — but deduping is the
-    // honest accounting and keeps the dispose count meaningful in tests.
-    const seenMaterials = new Set<THREE.Material>();
-    entry.group.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose();
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        for (const m of mats) {
-          if (!seenMaterials.has(m)) {
-            seenMaterials.add(m);
-            m.dispose();
-          }
-        }
-      }
-    });
+    entry.batch.dispose();
 
     this.models.delete(id);
     this.requestRender?.();
@@ -182,43 +147,123 @@ export class ModelManager {
     return Array.from(this.models.keys());
   }
 
-  /**
-   * Bounding box of the loaded geometry — fit-to-VISIBLE. Hidden elements
-   * (`mesh.visible === false`, set by AppearanceManager.hide) and hidden model
-   * groups (`entry.visible === false`) are excluded so "Fit" frames what the
-   * user can actually see. `THREE.Box3.expandByObject` does NOT honour per-mesh
-   * `.visible`, so we expand mesh-by-mesh and skip invisible ones.
-   *
-   * When `id` is given, that single model's visible meshes are framed
-   * regardless of the group's `visible` flag (callers ask for a specific model
-   * to frame it). When omitted, only visible model groups contribute.
-   */
-  getBoundingBox(id?: string): THREE.Box3 {
-    const box = new THREE.Box3();
+  /** Geometry pieces loaded across all models. */
+  pieceCount(): number {
+    let n = 0;
+    for (const entry of this.models.values()) n += entry.batch.pieceCount;
+    return n;
+  }
 
-    if (id) {
-      const entry = this.models.get(id);
-      if (entry) this.expandByVisibleMeshes(box, entry.group);
-    } else {
-      for (const entry of this.models.values()) {
-        if (entry.visible) this.expandByVisibleMeshes(box, entry.group);
-      }
+  // ── Elements ───────────────────────────────────────────────
+
+  /** Every element with geometry in a model (empty when the model is not loaded). */
+  elementIds(modelId: string): number[] {
+    const entry = this.models.get(modelId);
+    return entry ? Array.from(entry.batch.elementIds()) : [];
+  }
+
+  hasElement(modelId: string, expressId: number): boolean {
+    return this.models.get(modelId)?.batch.hasElement(expressId) ?? false;
+  }
+
+  /** How an element is drawn right now, or null if it is not loaded. */
+  getElementState(modelId: string, expressId: number): ElementDrawState | null {
+    return this.models.get(modelId)?.batch.elementState(expressId) ?? null;
+  }
+
+  /** Hide or show elements of one model. */
+  setHidden(modelId: string, expressIds: Iterable<number>, hidden: boolean): void {
+    this.apply(modelId, (b) => b.setHidden(expressIds, hidden));
+  }
+
+  /** Override the opacity of elements of one model; `null` restores their own. */
+  setOpacity(modelId: string, expressIds: Iterable<number>, opacity: number | null): void {
+    this.apply(modelId, (b) => b.setOpacity(expressIds, opacity));
+  }
+
+  /** Override the colour (linear RGB) of elements of one model; `null` restores their own. */
+  setColor(
+    modelId: string,
+    expressIds: Iterable<number>,
+    color: { r: number; g: number; b: number } | null,
+  ): void {
+    this.apply(modelId, (b) => b.setColor(expressIds, color));
+  }
+
+  /** Turn the selection highlight on or off for elements of one model. */
+  setHighlighted(modelId: string, expressIds: Iterable<number>, highlighted: boolean): void {
+    this.apply(modelId, (b) => b.setHighlighted(expressIds, highlighted));
+  }
+
+  /** World-space bounds of the given elements, hidden or not. */
+  getElementsBoundingBox(elements: Iterable<ElementRef>): THREE.Box3 {
+    const byModel = new Map<string, number[]>();
+    for (const { modelId, expressId } of elements) {
+      let list = byModel.get(modelId);
+      if (!list) byModel.set(modelId, (list = []));
+      list.push(expressId);
     }
-
+    const box = new THREE.Box3();
+    for (const [modelId, ids] of byModel) this.models.get(modelId)?.batch.expandByElements(ids, box);
     return box;
   }
 
-  /** Expand `box` by every visible mesh under `group` (skips visible=false). */
-  private expandByVisibleMeshes(box: THREE.Box3, group: THREE.Object3D): void {
-    group.traverseVisible((child) => {
-      if (child instanceof THREE.Mesh) {
-        box.expandByObject(child);
-      }
-    });
+  /**
+   * Visit every piece that is drawn — in a visible model and not hidden —
+   * with its world-space box. One element can have several pieces.
+   */
+  forEachVisiblePiece(visit: (modelId: string, expressId: number, worldBox: THREE.Box3) => void): void {
+    for (const entry of this.models.values()) {
+      if (!entry.visible) continue;
+      entry.batch.forEachVisiblePiece((expressId, box) => visit(entry.id, expressId, box));
+    }
   }
 
+  /**
+   * Bounding box of the loaded geometry — fit-to-VISIBLE. Hidden elements
+   * and hidden models are excluded so "Fit" frames what the user can
+   * actually see.
+   *
+   * When `id` is given, that single model's visible elements are framed
+   * regardless of the model's own `visible` flag (callers ask for a specific
+   * model to frame it). When omitted, only visible models contribute.
+   */
+  getBoundingBox(id?: string): THREE.Box3 {
+    const box = new THREE.Box3();
+    if (id) {
+      this.models.get(id)?.batch.expandByVisible(box);
+    } else {
+      for (const entry of this.models.values()) {
+        if (entry.visible) entry.batch.expandByVisible(box);
+      }
+    }
+    return box;
+  }
+
+  /**
+   * Order see-through drawing back to front for `camera`; call before each
+   * frame. Asks for one more frame once the view has rested, when the
+   * pieces inside the see-through draws get sorted too (see
+   * `ModelBatch.sortSeeThrough`).
+   */
+  sortSeeThrough(camera: THREE.Camera): void {
+    const now = performance.now();
+    let later = false;
+    for (const entry of this.models.values()) {
+      if (entry.visible && entry.batch.sortSeeThrough(camera, now)) later = true;
+    }
+    if (later && !this.seeThroughTimer) {
+      this.seeThroughTimer = setTimeout(() => {
+        this.seeThroughTimer = null;
+        this.requestRender?.();
+      }, SEE_THROUGH_SETTLE_MS + 10);
+    }
+  }
+
+  private seeThroughTimer: ReturnType<typeof setTimeout> | null = null;
+
   clear(): void {
-    for (const id of this.models.keys()) {
+    for (const id of Array.from(this.models.keys())) {
       this.removeModel(id);
     }
   }
@@ -227,57 +272,10 @@ export class ModelManager {
     this.clear();
   }
 
-  // ── Internals ──────────────────────────────────────────────
-
-  /**
-   * Build one THREE.Mesh from a ParsedMesh and add it to the stream's
-   * group plus the per-element index. Reuses a cached material when
-   * another mesh in the same model already used the same RGBA color.
-   */
-  private buildMesh(stream: StreamState, mesh: ParsedMesh): void {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertices, 3));
-    geometry.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
-    geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
-    // Bounding box is computed lazily by MarqueeSelector.classifyMesh on
-    // first use. Eager computeBoundingBox here cost ~1-3s on a 100k-mesh
-    // model load for no benefit when no marquee runs; the first marquee
-    // pays the cost (~50-200ms) instead.
-
-    const c = mesh.color;
-    // toFixed(6) gives a stable key: the parser emits doubles, and two
-    // meshes that should share a color must produce the same string.
-    // Six decimals is well below the 8-bit sRGB precision of a real GPU
-    // upload while still being far inside double-precision noise.
-    const matKey = `${c.r.toFixed(6)},${c.g.toFixed(6)},${c.b.toFixed(6)},${c.a.toFixed(6)}`;
-    let material = stream.materialCache.get(matKey);
-    if (!material) {
-      material = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(c.r, c.g, c.b),
-        opacity: c.a,
-        transparent: c.a < 1,
-        side: THREE.DoubleSide,
-      });
-      stream.materialCache.set(matKey, material);
-    }
-
-    const threeMesh = new THREE.Mesh(geometry, material);
-    threeMesh.userData.expressID = mesh.expressID;
-
-    // Apply the placement transform from web-ifc
-    const matrix = new THREE.Matrix4();
-    matrix.fromArray(mesh.transform);
-    threeMesh.applyMatrix4(matrix);
-
-    stream.entry.group.add(threeMesh);
-
-    // Populate the per-element index. One expressID can map to multiple
-    // meshes (an IFC element can decompose into several geometry parts).
-    let bucket = stream.entry.meshesByExpressId.get(mesh.expressID);
-    if (!bucket) {
-      bucket = [];
-      stream.entry.meshesByExpressId.set(mesh.expressID, bucket);
-    }
-    bucket.push(threeMesh);
+  private apply(modelId: string, change: (batch: ModelBatch) => void): void {
+    const entry = this.models.get(modelId);
+    if (!entry) return;
+    change(entry.batch);
+    this.requestRender?.();
   }
 }

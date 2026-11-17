@@ -8,6 +8,7 @@ import {
 } from './snapCandidates';
 import type { MeasurementEnd } from './MeasurementStore';
 import { cycleIndex } from '../inspector/candidateMath';
+import { modelIdOfObject, pieceGeometryOfHit } from '../viewer/ModelBatch';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
 
 /**
@@ -72,8 +73,8 @@ export class SnapCursor {
    * bargain `CandidateResolver` strikes, for the same reason.
    */
   refresh(e: MouseEvent, hit: THREE.Intersection | null): void {
-    const mesh = hit?.object;
-    if (!hit || !(mesh instanceof THREE.Mesh) || hit.faceIndex == null) {
+    const mesh = pieceGeometryOfHit(hit);
+    if (!hit || !mesh || hit.faceIndex == null) {
       this.clear();
       return;
     }
@@ -154,15 +155,9 @@ export class SnapCursor {
   }
 }
 
-/**
- * The model a hit mesh belongs to. `ModelManager` names each model group with
- * the app's model UUID and parents the meshes directly under it, so the
- * parent's name is the id — the same lookup `SelectionManager.identityFromHit`
- * does. Null for anything not under a model group.
- */
+/** The model a hit object belongs to, or null for anything that is not model geometry. */
 export function modelIdOf(object: THREE.Object3D): string | null {
-  const parent = object.parent;
-  return parent && parent.name ? parent.name : null;
+  return modelIdOfObject(object);
 }
 
 /** What an end caught, in the vocabulary the glyphs are drawn from. */

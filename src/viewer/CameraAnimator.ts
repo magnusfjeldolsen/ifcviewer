@@ -82,10 +82,14 @@ export class CameraAnimator {
       this.interruptHandler = interrupt;
       this.addInterruptListeners(canvas);
 
-      const tick = (now: number): void => {
+      // Elapsed time from the same clock as `startTime`, not from the rAF
+      // timestamp: browsers share one time origin between the two, but jsdom
+      // does not (its rAF clock starts ~1 s later), which left tests waiting
+      // for an animation whose elapsed time stayed negative.
+      const tick = (): void => {
         if (!this.active) return;
 
-        const elapsed = now - startTime;
+        const elapsed = performance.now() - startTime;
         const rawT = Math.min(elapsed / durationMs, 1);
         const t = easeOutCubic(rawT);
 

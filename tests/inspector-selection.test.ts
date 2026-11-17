@@ -12,6 +12,8 @@ import type { Tool, ToolManager } from '../src/tools/Tool';
 import type { Viewer } from '../src/viewer/Viewer';
 import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
 import type { ElementIdentity, SelectionState } from '../src/inspector/types';
+import type { ParsedModel } from '../src/parser/types';
+import { boxModel, boxMesh, makeModelManager, cameraLookingAt } from './helpers/models';
 
 // ── localStorage mock — must be installed before SelectionManager is
 // constructed because its constructor reads the persisted lock flag.
@@ -38,7 +40,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 /**
  * Tests focus on:
  *   - Pure state transitions via `apply(mode, identity)` (no DOM dispatch).
- *   - Material clone / restore lifecycle on highlight.
+ *   - Highlight on / off per element (read back from the real ModelManager).
  *   - Tool / pivot ownership gating: SelectionManager must NOT mutate state
  *     when a tool is active or pivot picking is on.
  *   - `clear()` and `onModelRemoved()` lifecycle.
@@ -52,59 +54,48 @@ Object.defineProperty(globalThis, 'localStorage', {
 
 // ── Fixtures ────────────────────────────────────────────────
 
-function makeMeshUnderGroup(group: THREE.Group, expressId: number): THREE.Mesh {
-  const geom = new THREE.BufferGeometry();
-  const mat = new THREE.MeshPhongMaterial({ color: 0x808080 });
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.userData.expressID = expressId;
-  group.add(mesh);
-  return mesh;
-}
-
-function makeModelEntry(modelId: string, expressIds: number[]): ModelEntry {
-  const group = new THREE.Group();
-  group.name = modelId;
-  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-  for (const id of expressIds) {
-    const mesh = makeMeshUnderGroup(group, id);
-    let bucket = meshesByExpressId.get(id);
-    if (!bucket) {
-      bucket = [];
-      meshesByExpressId.set(id, bucket);
-    }
-    bucket.push(mesh);
-  }
-  return { id: modelId, group, visible: true, meshesByExpressId };
+/** A model of unit boxes, one per id (a repeated id = a two-piece element). */
+function makeModelEntry(modelId: string, expressIds: number[]): ParsedModel {
+  return boxModel(modelId, expressIds);
 }
 
 function identity(modelId: string, expressId: number): ElementIdentity {
   return { modelId, expressId, ifcClass: '', ifcTypeCode: 0 };
 }
 
+/** Thin facade over a real ModelManager so test bodies read like a map. */
+interface ModelStore {
+  set(id: string, model: ParsedModel): void;
+  get(id: string): ModelEntry | undefined;
+  delete(id: string): void;
+}
+
 function makeStubDeps(): {
   deps: SelectionManagerDeps;
-  modelStore: Map<string, ModelEntry>;
+  modelManager: ModelManager;
+  modelStore: ModelStore;
   toolState: { active: Tool | null };
   pivotState: { picking: boolean };
   canvas: HTMLCanvasElement;
 } {
-  const modelStore = new Map<string, ModelEntry>();
+  const { modelManager, scene } = makeModelManager();
+  const modelStore: ModelStore = {
+    set: (_id, model) => void modelManager.addModel(model),
+    get: (id) => modelManager.getModel(id),
+    delete: (id) => void modelManager.removeModel(id),
+  };
   const toolState = { active: null as Tool | null };
   const pivotState = { picking: false };
   const canvas = document.createElement('canvas');
 
   const viewer = {
     getCanvas: () => canvas,
-    getScene: () => new THREE.Scene(),
+    getScene: () => scene,
     getCamera: () => new THREE.PerspectiveCamera(),
     getRenderer: () => ({ clippingPlanes: [] }) as unknown as THREE.WebGLRenderer,
     isPivotPicking: () => pivotState.picking,
     requestRender: () => { /* no-op for tests */ },
   } as unknown as Viewer;
-
-  const modelManager = {
-    getModel: (id: string) => modelStore.get(id),
-  } as unknown as ModelManager;
 
   const toolManager = {
     getActiveTool: () => toolState.active,
@@ -112,11 +103,17 @@ function makeStubDeps(): {
 
   return {
     deps: { viewer, modelManager, toolManager, canvas },
+    modelManager,
     modelStore,
     toolState,
     pivotState,
     canvas,
   };
+}
+
+/** Whether an element is drawn highlighted right now. */
+function highlighted(mm: ModelManager, modelId: string, expressId: number): boolean {
+  return mm.getElementState(modelId, expressId)?.highlighted ?? false;
 }
 
 // ── Tests ───────────────────────────────────────────────────
@@ -259,105 +256,82 @@ describe('SelectionManager — state transitions', () => {
 });
 
 describe('SelectionManager — highlight lifecycle', () => {
-  it('highlights all meshes that share the selected expressID', () => {
+  it('highlights every piece of the selected element and nothing else', () => {
     const env = makeStubDeps();
-    // Two meshes in model A both carry expressID 7 (one element, two geoms).
-    const group = new THREE.Group();
-    group.name = 'A';
-    const m1 = makeMeshUnderGroup(group, 7);
-    const m2 = makeMeshUnderGroup(group, 7);
-    const m3 = makeMeshUnderGroup(group, 8);
-    const meshesByExpressId = new Map<number, THREE.Mesh[]>([
-      [7, [m1, m2]],
-      [8, [m3]],
-    ]);
-    env.modelStore.set('A', { id: 'A', group, visible: true, meshesByExpressId });
-
+    // Element 7 is made of two boxes (one element, two geometry pieces).
+    env.modelStore.set('A', makeModelEntry('A', [7, 7, 8]));
+    const batch = env.modelStore.get('A')!.batch;
     const manager = new SelectionManager(env.deps);
-    const before = group.children.map((c) => (c as THREE.Mesh).material);
 
     manager.apply('replace', identity('A', 7));
 
-    const after = group.children.map((c) => (c as THREE.Mesh).material);
-    // The two expressID===7 meshes got new material references; the third didn't.
-    expect(after[0]).not.toBe(before[0]);
-    expect(after[1]).not.toBe(before[1]);
-    expect(after[2]).toBe(before[2]);
+    expect(highlighted(env.modelManager, 'A', 7)).toBe(true);
+    expect(highlighted(env.modelManager, 'A', 8)).toBe(false);
+    // Both pieces of 7 are framed by the highlight: the selection centre lies
+    // midway between the two boxes (x = 0 and x = 2).
+    expect(batch.pieceCount).toBe(3);
+    expect(manager.getSelectionCenter()!.x).toBeCloseTo(1);
   });
 
-  it('applied highlight uses brand-blue emissive', () => {
+  it('a highlighted element keeps its own colour and opacity', () => {
+    const env = makeStubDeps();
+    env.modelStore.set('A', makeModelEntry('A', [1]));
+    const manager = new SelectionManager(env.deps);
+    const before = env.modelManager.getElementState('A', 1)!;
+
+    manager.apply('replace', identity('A', 1));
+
+    const after = env.modelManager.getElementState('A', 1)!;
+    expect(after.highlighted).toBe(true);
+    expect(after.color).toEqual(before.color);
+    expect(after.opacity).toBe(before.opacity);
+    expect(after.hidden).toBe(false);
+  });
+
+  it('deselect clears the highlight', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     const manager = new SelectionManager(env.deps);
 
     manager.apply('replace', identity('A', 1));
-
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const mat = mesh.material as THREE.MeshPhongMaterial;
-    expect(mat.emissive.getHex()).toBe(0x3b82f6);
-    expect(mat.emissiveIntensity).toBeCloseTo(0.3);
-  });
-
-  it('restores the original material on deselect', () => {
-    const env = makeStubDeps();
-    env.modelStore.set('A', makeModelEntry('A', [1]));
-    const manager = new SelectionManager(env.deps);
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const originalMat = mesh.material;
-
-    manager.apply('replace', identity('A', 1));
-    expect(mesh.material).not.toBe(originalMat);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
 
     manager.clear();
-    expect(mesh.material).toBe(originalMat);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(false);
   });
 
-  it('does NOT dispose the highlight variant on deselect (it is cache-shared)', () => {
-    // Variants are cached per-original-material across the entire selection
-    // (and across re-selections), so we cannot safely dispose them when one
-    // mesh deselects — another mesh may still be using the same variant,
-    // and a future reselect must reuse it. Variants release naturally when
-    // the original material is GC'd (model removal).
+  it('reselecting after deselect highlights again', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     const manager = new SelectionManager(env.deps);
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
 
     manager.apply('replace', identity('A', 1));
-    const variant = mesh.material as THREE.Material;
-    const disposeSpy = vi.spyOn(variant, 'dispose');
-
     manager.clear();
-    expect(disposeSpy).not.toHaveBeenCalled();
+    manager.apply('replace', identity('A', 1));
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
   });
 
-  it('highlight idempotent: re-adding same element does not double-clone', () => {
+  it('highlight idempotent: re-picking the same element keeps it highlighted', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     const manager = new SelectionManager(env.deps);
 
     manager.apply('replace', identity('A', 1));
-    const firstClone = (env.modelStore.get('A')!.group.children[0] as THREE.Mesh).material;
     manager.apply('replace', identity('A', 1));
-    const secondClone = (env.modelStore.get('A')!.group.children[0] as THREE.Mesh).material;
-    expect(secondClone).toBe(firstClone);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
   });
 
-  it('swapping selection restores A and highlights B', () => {
+  it('swapping selection unhighlights A and highlights B', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1, 2]));
     const manager = new SelectionManager(env.deps);
-    const meshA = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const meshB = env.modelStore.get('A')!.group.children[1] as THREE.Mesh;
-    const origA = meshA.material;
-    const origB = meshB.material;
 
     manager.apply('replace', identity('A', 1));
-    expect(meshA.material).not.toBe(origA);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
 
     manager.apply('replace', identity('A', 2));
-    expect(meshA.material).toBe(origA);
-    expect(meshB.material).not.toBe(origB);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(false);
+    expect(highlighted(env.modelManager, 'A', 2)).toBe(true);
   });
 });
 
@@ -474,14 +448,12 @@ describe('SelectionManager — lifecycle', () => {
   it('dispose() detaches listeners and clears state', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const originalMat = mesh.material; // Capture BEFORE selection so we can verify restore on dispose.
     const manager = new SelectionManager(env.deps);
     manager.apply('replace', identity('A', 1));
-    expect(mesh.material).not.toBe(originalMat); // Highlighted with a clone.
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
 
     manager.dispose();
-    expect(mesh.material).toBe(originalMat);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(false);
     expect(manager.getState().kind).toBe('none');
 
     // A subsequent canvas click should not throw or revive the manager.
@@ -854,110 +826,74 @@ describe('SelectionManager — applyMany (batch)', () => {
 
   it('highlights are applied for every added identity', () => {
     manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
-    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
-    // Meshes for expressID 1 and 2 should be highlighted (material clone),
-    // mesh for expressID 3 untouched.
-    const mat1 = meshes[0].material as THREE.MeshPhongMaterial;
-    const mat2 = meshes[1].material as THREE.MeshPhongMaterial;
-    expect(mat1.emissive.getHex()).toBe(0x3b82f6);
-    expect(mat2.emissive.getHex()).toBe(0x3b82f6);
+    // Elements 1 and 2 highlighted, 3 untouched.
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
+    expect(highlighted(env.modelManager, 'A', 2)).toBe(true);
+    expect(highlighted(env.modelManager, 'A', 3)).toBe(false);
   });
 
-  it('replace from N to [] restores all highlighted meshes', () => {
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const orig = mesh.material;
+  it('replace from N to [] clears every highlight', () => {
     manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
-    expect(mesh.material).not.toBe(orig);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
     manager.applyMany('replace', []);
-    expect(mesh.material).toBe(orig);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(false);
+    expect(highlighted(env.modelManager, 'A', 2)).toBe(false);
   });
 });
 
 // ── Highlight scaling (variant cache) ───────────────────────────
 
 describe('SelectionManager — highlight scaling', () => {
-  /**
-   * Construct a model whose meshes deliberately share material references
-   * so we can assert that the highlight variant cache reuses one variant
-   * across all sharing meshes. Each expressID gets its own mesh, but the
-   * caller controls which expressIDs share a material via `groups`.
-   *
-   * Example: `groups = [[1, 2, 3], [4, 5]]` produces 5 meshes; 1,2,3 share
-   * a MeshPhongMaterial and 4,5 share another, distinct one.
-   */
-  function makeSharedMaterialEntry(modelId: string, groups: number[][]): ModelEntry {
-    const group = new THREE.Group();
-    group.name = modelId;
-    const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-    for (const ids of groups) {
-      const sharedMat = new THREE.MeshPhongMaterial({ color: 0x808080 });
-      for (const id of ids) {
-        const mesh = new THREE.Mesh(new THREE.BufferGeometry(), sharedMat);
-        mesh.userData.expressID = id;
-        group.add(mesh);
-        meshesByExpressId.set(id, [mesh]);
-      }
-    }
-    return { id: modelId, group, visible: true, meshesByExpressId };
-  }
-
-  it('selecting N elements that share M distinct original materials creates only M variants', () => {
-    // 6 elements split across 2 shared-material groups → expect 2 distinct
-    // highlight variants regardless of selection size.
+  it('highlighting thousands of elements adds no materials or meshes (one draw state, not one clone each)', () => {
     const env = makeStubDeps();
-    env.modelStore.set(
-      'A',
-      makeSharedMaterialEntry('A', [
-        [1, 2, 3, 4],
-        [5, 6],
-      ]),
-    );
+    const ids = Array.from({ length: 2000 }, (_, i) => i + 1);
+    env.modelStore.set('A', makeModelEntry('A', ids));
+    const entry = env.modelStore.get('A')!;
+    const childrenBefore = entry.group.children.length;
+    const materialsBefore = new Set(entry.batch.chunkMeshes().map((m) => m.material));
     const manager = new SelectionManager(env.deps);
-    manager.setSingleModelLock(false);
 
-    manager.applyMany('replace', [
-      identity('A', 1),
-      identity('A', 2),
-      identity('A', 3),
-      identity('A', 4),
-      identity('A', 5),
-      identity('A', 6),
-    ]);
+    manager.applyMany('replace', ids.map((id) => identity('A', id)));
 
-    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
-    const uniqueVariants = new Set(meshes.map((m) => m.material));
-    expect(uniqueVariants.size).toBe(2);
+    expect(manager.getState().kind).toBe('multi');
+    expect(ids.every((id) => highlighted(env.modelManager, 'A', id))).toBe(true);
+    expect(entry.group.children.length).toBe(childrenBefore);
+    const materialsAfter = new Set(entry.batch.chunkMeshes().map((m) => m.material));
+    expect(materialsAfter).toEqual(materialsBefore);
   });
 
-  it('two meshes that share an original material share the SAME variant reference', () => {
+  it('elements of different colours are all highlighted and keep their own colours', () => {
     const env = makeStubDeps();
-    env.modelStore.set('A', makeSharedMaterialEntry('A', [[1, 2]]));
+    const red = { r: 1, g: 0, b: 0, a: 1 };
+    const blue = { r: 0, g: 0, b: 1, a: 1 };
+    env.modelStore.set('A', {
+      id: 'A',
+      meshes: [boxMesh(1, { color: red }), boxMesh(2, { color: blue, at: [2, 0, 0] })],
+    });
     const manager = new SelectionManager(env.deps);
 
     manager.applyMany('replace', [identity('A', 1), identity('A', 2)]);
 
-    const meshes = env.modelStore.get('A')!.group.children as THREE.Mesh[];
-    expect(meshes[0].material).toBe(meshes[1].material);
+    const s1 = env.modelManager.getElementState('A', 1)!;
+    const s2 = env.modelManager.getElementState('A', 2)!;
+    expect(s1.highlighted && s2.highlighted).toBe(true);
+    expect(s1.color).toEqual({ r: 1, g: 0, b: 0 });
+    expect(s2.color).toEqual({ r: 0, g: 0, b: 1 });
   });
 
-  it('reselecting the same element after deselect reuses the cached variant', () => {
+  it('reselecting the same element after deselect highlights it again', () => {
     const env = makeStubDeps();
     env.modelStore.set('A', makeModelEntry('A', [1]));
     const manager = new SelectionManager(env.deps);
-    const mesh = env.modelStore.get('A')!.group.children[0] as THREE.Mesh;
-    const original = mesh.material;
 
     manager.apply('replace', identity('A', 1));
-    const firstVariant = mesh.material;
-    expect(firstVariant).not.toBe(original);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
 
     manager.clear();
-    expect(mesh.material).toBe(original);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(false);
 
     manager.apply('replace', identity('A', 1));
-    const secondVariant = mesh.material;
-    // Cache hit: same variant reference as the first selection.
-    expect(secondVariant).toBe(firstVariant);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
   });
 
   it('removing a model releases highlight bookkeeping for that model only', () => {
@@ -1056,14 +992,10 @@ describe('SelectionManager — selectExactly (basket recall, lock-bypassing)', (
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
-  it('highlights meshes in every recalled model', () => {
+  it('highlights elements in every recalled model', () => {
     manager.selectExactly([identity('A', 1), identity('B', 10)]);
-    const aMesh = env.modelStore.get('A')!.meshesByExpressId.get(1)![0];
-    const bMesh = env.modelStore.get('B')!.meshesByExpressId.get(10)![0];
-    const aMat = aMesh.material as THREE.MeshPhongMaterial;
-    const bMat = bMesh.material as THREE.MeshPhongMaterial;
-    expect(aMat.emissive.getHex()).toBe(0x3b82f6);
-    expect(bMat.emissive.getHex()).toBe(0x3b82f6);
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
+    expect(highlighted(env.modelManager, 'B', 10)).toBe(true);
   });
 });
 
@@ -1230,127 +1162,123 @@ describe('SelectionManager — undo / redo (history-backed)', () => {
   });
 });
 
-// ── Highlight ↔ appearance interplay (T12-T14b) ────────────────────────
+// ── Highlight ↔ appearance interplay ─────────────────────────────────
 //
-// Decision (orchestrator): App-orchestrated reconciliation. App owns the
-// precedence chain hidden > transparent > highlighted > base. The pieces:
-//   - A single App-owned `pristine` WeakMap captures each mesh's load-time
-//     material the FIRST time either manager touches it (write-once → the true
-//     pristine regardless of which manager runs first).
-//   - AppearanceManager derives its base (pristine OR transparent clone) from
-//     that pristine; never from "whatever is currently on the mesh".
-//   - SelectionManager's highlight derives its emissive variant from the
-//     APPEARANCE base (via the `appearanceBaseFor` provider) and restores to
-//     that base on deselect — never to the pristine original.
-//   - After any appearance op touching selected meshes, App calls
-//     `selectionManager.refreshHighlights()` so the highlight re-derives from
-//     the new base. This makes the result identical regardless of op order.
-//
-// These tests wire a REAL AppearanceManager + SelectionManager exactly the way
-// App will, plus a tiny App-like reconcile shim, and pin order independence.
+// Highlight, opacity and visibility are independent per-element attributes in
+// the renderer (ModelManager / ModelBatch), so the precedence
+// hidden > transparent > highlighted > base holds by construction, whatever
+// order the two managers act in. These tests wire a REAL AppearanceManager and
+// SelectionManager to ONE real ModelManager, as App does, and pin that.
 describe('SelectionManager ↔ AppearanceManager interplay', () => {
   function makeInterplayEnv() {
     lsStore.clear();
     const base = makeStubDeps();
     base.modelStore.set('A', makeModelEntry('A', [1, 2, 3]));
-
-    // App-owned pristine store: write-once per mesh, so whichever manager
-    // touches a mesh first records the true load-time material.
-    const pristine = new WeakMap<THREE.Mesh, THREE.Material | THREE.Material[]>();
-    const pristineFor = (mesh: THREE.Mesh): THREE.Material | THREE.Material[] => {
-      let p = pristine.get(mesh);
-      if (!p) {
-        p = mesh.material;
-        pristine.set(mesh, p);
-      }
-      return p;
-    };
-
-    const modelManager = {
-      getModel: (id: string) => base.modelStore.get(id),
-      getAllModels: () => Array.from(base.modelStore.values()),
-    } as unknown as import('../src/viewer/ModelManager').ModelManager;
-
-    const appearance = new AppearanceManager({ modelManager, pristineFor });
-
-    const manager = new SelectionManager({
-      ...base.deps,
-      modelManager,
-      appearanceBaseFor: (mesh: THREE.Mesh) => appearance.getBaseForMesh(mesh, pristineFor(mesh)),
-    });
+    const appearance = new AppearanceManager({ modelManager: base.modelManager });
+    const manager = new SelectionManager(base.deps);
     manager.setSingleModelLock(false);
-
-    return { base, manager, appearance };
+    const state = (id: number) => base.modelManager.getElementState('A', id)!;
+    return { manager, appearance, state };
   }
 
-  it('T12: a selected element made transparent shows BOTH (highlight re-derived from the transparent base)', () => {
-    const { base, manager, appearance } = makeInterplayEnv();
-    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+  it('T12: a transparent element that is then selected shows BOTH highlight and transparency', () => {
+    const { manager, appearance, state } = makeInterplayEnv();
 
-    // transparent FIRST, then select.
     appearance.transparent([identity('A', 1)]);
     manager.apply('replace', identity('A', 1));
 
-    const mat = mesh.material as THREE.MeshPhongMaterial;
-    // Highlight present (brand-blue emissive) AND transparent (faded).
-    expect(mat.emissive.getHex()).toBe(0x3b82f6);
-    expect(mat.transparent).toBe(true);
-    expect(mat.opacity).toBeCloseTo(0.25);
+    expect(state(1).highlighted).toBe(true);
+    expect(state(1).opacity).toBeCloseTo(0.25);
   });
 
-  it('T13: opaque on a still-selected mesh keeps the highlight (emissive variant of the original)', () => {
-    const { base, manager, appearance } = makeInterplayEnv();
-    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+  it('T13: opaque on a still-selected element keeps the highlight', () => {
+    const { manager, appearance, state } = makeInterplayEnv();
 
     appearance.transparent([identity('A', 1)]);
     manager.apply('replace', identity('A', 1));
-
-    // Make opaque while still selected; App reconciles the highlight.
     appearance.opaque([identity('A', 1)]);
-    manager.refreshHighlights();
 
-    const mat = mesh.material as THREE.MeshPhongMaterial;
-    expect(mat.emissive.getHex()).toBe(0x3b82f6); // still highlighted
-    expect(mat.opacity).toBe(1); // no longer faded
+    expect(state(1).highlighted).toBe(true);
+    expect(state(1).opacity).toBe(1);
   });
 
-  it('T14: deselecting a transparent mesh keeps it transparent (restore targets the appearance base)', () => {
-    const { base, manager, appearance } = makeInterplayEnv();
-    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
+  it('T14: deselecting a transparent element keeps it transparent', () => {
+    const { manager, appearance, state } = makeInterplayEnv();
 
     appearance.transparent([identity('A', 1)]);
     manager.apply('replace', identity('A', 1));
-    manager.clear(); // deselect
-
-    const mat = mesh.material as THREE.MeshPhongMaterial;
-    // Highlight gone, but transparency remains (restore → appearance base).
-    expect(mat.transparent).toBe(true);
-    expect(mat.opacity).toBeCloseTo(0.25);
-    // And it must NOT carry the emissive boost anymore.
-    expect(mat.emissive.getHex()).not.toBe(0x3b82f6);
-  });
-
-  it('T14b: ORDER INDEPENDENCE — select FIRST, THEN make transparent → shows both, and on deselect stays transparent', () => {
-    const { base, manager, appearance } = makeInterplayEnv();
-    const mesh = base.modelStore.get('A')!.meshesByExpressId.get(1)![0];
-
-    // select FIRST (mesh now carries the highlight variant)…
-    manager.apply('replace', identity('A', 1));
-    // …THEN transparent. App reconciles by recomputing from pristine + state.
-    appearance.transparent([identity('A', 1)]);
-    manager.refreshHighlights();
-
-    const mat = mesh.material as THREE.MeshPhongMaterial;
-    expect(mat.emissive.getHex()).toBe(0x3b82f6); // shows highlight
-    expect(mat.transparent).toBe(true); // shows transparency
-    expect(mat.opacity).toBeCloseTo(0.25);
-
-    // On deselect it stays transparent (proves AppearanceManager captured the
-    // PRISTINE original, not the highlight variant, as its base).
     manager.clear();
-    const after = mesh.material as THREE.MeshPhongMaterial;
-    expect(after.transparent).toBe(true);
-    expect(after.opacity).toBeCloseTo(0.25);
-    expect(after.emissive.getHex()).not.toBe(0x3b82f6);
+
+    expect(state(1).highlighted).toBe(false);
+    expect(state(1).opacity).toBeCloseTo(0.25);
+  });
+
+  it('T14b: ORDER INDEPENDENCE — select FIRST, THEN make transparent → both; deselect → stays transparent', () => {
+    const { manager, appearance, state } = makeInterplayEnv();
+
+    manager.apply('replace', identity('A', 1));
+    appearance.transparent([identity('A', 1)]);
+
+    expect(state(1).highlighted).toBe(true);
+    expect(state(1).opacity).toBeCloseTo(0.25);
+
+    manager.clear();
+    expect(state(1).highlighted).toBe(false);
+    expect(state(1).opacity).toBeCloseTo(0.25);
+  });
+
+  it('hiding a selected element keeps it selected but not drawn; show-all brings it back highlighted', () => {
+    const { manager, appearance, state } = makeInterplayEnv();
+
+    manager.apply('replace', identity('A', 2));
+    appearance.hide([identity('A', 2)]);
+    expect(state(2).hidden).toBe(true);
+    expect(manager.getState().kind).toBe('single');
+
+    appearance.showAll();
+    expect(state(2).hidden).toBe(false);
+    expect(state(2).highlighted).toBe(true);
+  });
+});
+
+describe('SelectionManager — click path (real raycast)', () => {
+  function makeClickEnv() {
+    lsStore.clear();
+    const env = makeStubDeps();
+    // Box 1 at the origin, box 2 at x = 2; camera looks straight at box 1.
+    env.modelStore.set('A', makeModelEntry('A', [1, 2]));
+    const camera = cameraLookingAt([0, 0, 10], [0, 0, 0]);
+    (env.deps.viewer as unknown as { getCamera: () => THREE.Camera }).getCamera = () => camera;
+    env.canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100, x: 0, y: 0 }) as DOMRect;
+    const manager = new SelectionManager(env.deps);
+    const click = (x: number, y: number, init: PointerEventInit = {}) => {
+      env.canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: x, clientY: y, ...init }));
+      env.canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: x, clientY: y, ...init }));
+    };
+    return { env, manager, click };
+  }
+
+  it('a click on an element selects and highlights it', () => {
+    const { env, manager, click } = makeClickEnv();
+    click(50, 50); // screen centre → box 1
+    const state = manager.getState();
+    expect(state.kind).toBe('single');
+    if (state.kind === 'single') expect(state.identities[0]).toMatchObject({ modelId: 'A', expressId: 1 });
+    expect(highlighted(env.modelManager, 'A', 1)).toBe(true);
+  });
+
+  it('a click on empty space clears the selection', () => {
+    const { manager, click } = makeClickEnv();
+    click(50, 50);
+    click(50, 5); // well above the boxes
+    expect(manager.getState().kind).toBe('none');
+  });
+
+  it('a hidden element is clicked through, not selected', () => {
+    const { env, manager, click } = makeClickEnv();
+    env.modelManager.setHidden('A', [1], true);
+    click(50, 50);
+    expect(manager.getState().kind).toBe('none');
   });
 });

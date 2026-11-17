@@ -11,7 +11,7 @@
  * file readable. No behavior change.
  */
 
-import * as WebIFC from 'web-ifc';
+import { IFC_TYPE_CODES } from '../ifcTypeCodes';
 import {
   IFCBOOLEAN,
   IFCCOMPLEXPROPERTY,
@@ -24,7 +24,7 @@ import {
   IFCQUANTITYTIME,
   IFCQUANTITYVOLUME,
   IFCQUANTITYWEIGHT,
-} from 'web-ifc';
+} from '../ifcTypeCodes';
 
 import {
   measureKindForType,
@@ -64,7 +64,7 @@ export interface TypedValue {
 /** Map IFC measure class names → typecodes so the new-shape wrappers can
  *  feed `unitSuffixForType` / `measureKindForType`. */
 export const MEASURE_NAME_TO_TYPECODE: Readonly<Record<string, number>> = (() => {
-  const w = WebIFC as unknown as Record<string, number>;
+  const w = IFC_TYPE_CODES;
   const out: Record<string, number> = {};
   for (const k of [
     'IFCLENGTHMEASURE',

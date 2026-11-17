@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
   buildSelectionFrustum,
-  classifyMesh,
+  classifyBox,
   bucketResults,
   modeFromModifiers,
   computeDeep,
@@ -27,13 +27,10 @@ function makeCamera(): THREE.PerspectiveCamera {
   return cam;
 }
 
-function makeMeshAt(x: number, y: number, z: number, size = 1): THREE.Mesh {
-  const geom = new THREE.BoxGeometry(size, size, size);
-  const mat = new THREE.MeshBasicMaterial();
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.position.set(x, y, z);
-  mesh.updateMatrixWorld(true);
-  return mesh;
+/** World-space AABB of a cube of edge `size` centred at (x, y, z). */
+function boxAt(x: number, y: number, z: number, size = 1): THREE.Box3 {
+  const h = size / 2;
+  return new THREE.Box3(new THREE.Vector3(x - h, y - h, z - h), new THREE.Vector3(x + h, y + h, z + h));
 }
 
 describe('buildSelectionFrustum', () => {
@@ -143,7 +140,7 @@ describe('computeDeep', () => {
   });
 });
 
-describe('classifyMesh', () => {
+describe('classifyBox', () => {
   function fullFrustum(cam: THREE.PerspectiveCamera): THREE.Frustum {
     return buildSelectionFrustum(
       new THREE.Vector2(-0.99, -0.99),
@@ -163,18 +160,12 @@ describe('classifyMesh', () => {
 
   it('returns outside when AABB is wholly outside the frustum', () => {
     const cam = makeCamera();
-    const frustum = tinyCornerFrustum(cam);
-    const mesh = makeMeshAt(0, 0, 0);
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [], tmpBox)).toBe('outside');
+    expect(classifyBox(boxAt(0, 0, 0), tinyCornerFrustum(cam), [])).toBe('outside');
   });
 
   it('returns window when AABB is wholly inside the frustum', () => {
     const cam = makeCamera();
-    const frustum = fullFrustum(cam);
-    const mesh = makeMeshAt(0, 0, 0, 0.1);
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [], tmpBox)).toBe('window');
+    expect(classifyBox(boxAt(0, 0, 0, 0.1), fullFrustum(cam), [])).toBe('window');
   });
 
   it('returns crossing when AABB straddles a frustum side plane', () => {
@@ -186,55 +177,34 @@ describe('classifyMesh', () => {
       cam,
       computeDeep(cam, new THREE.Box3()),
     );
-    // Mesh centred at x=0 (right at the cut) with size 2 → straddles.
-    const mesh = makeMeshAt(0, 0, 0, 2);
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [], tmpBox)).toBe('crossing');
+    // Box centred at x=0 (right at the cut) with size 2 → straddles.
+    expect(classifyBox(boxAt(0, 0, 0, 2), frustum, [])).toBe('crossing');
   });
 
-  it('respects mesh.matrixWorld translation (moves AABB out of frustum)', () => {
+  it('a box far off to the side is outside', () => {
     const cam = makeCamera();
-    const frustum = fullFrustum(cam);
-    // Place the mesh far off to the side.
-    const mesh = makeMeshAt(100, 0, 0, 1);
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [], tmpBox)).toBe('outside');
+    expect(classifyBox(boxAt(100, 0, 0, 1), fullFrustum(cam), [])).toBe('outside');
   });
 
   it('returns outside when AABB is fully clipped by a clip plane', () => {
     const cam = makeCamera();
-    const frustum = fullFrustum(cam);
     // Clip plane at z=5, visible side is z >= 5 (everything farther from
-    // camera than z=5 is visible). Mesh at z=0 is entirely on the cut side.
+    // camera than z=5 is visible). Box at z=0 is entirely on the cut side.
     const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -5);
-    const mesh = makeMeshAt(0, 0, 0, 0.1);
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [plane], tmpBox)).toBe('outside');
+    expect(classifyBox(boxAt(0, 0, 0, 0.1), fullFrustum(cam), [plane])).toBe('outside');
   });
 
   it('keeps original classification when AABB straddles a clip plane', () => {
     const cam = makeCamera();
-    const frustum = fullFrustum(cam);
-    // Plane at z=0, visible side is z >= 0. Mesh of size 2 centred at z=0
+    // Plane at z=0, visible side is z >= 0. Box of size 2 centred at z=0
     // has half on each side — not fully clipped.
     const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-    const mesh = makeMeshAt(0, 0, 0, 2);
-    const tmpBox = new THREE.Box3();
-    const result = classifyMesh(mesh, frustum, [plane], tmpBox);
-    // Mesh is inside the frustum (small enough), so classification is window
-    // — not outside, despite the clip plane straddling.
-    expect(result).not.toBe('outside');
+    expect(classifyBox(boxAt(0, 0, 0, 2), fullFrustum(cam), [plane])).not.toBe('outside');
   });
 
-  it('falls back to computing boundingBox if missing', () => {
+  it('an empty box (a piece without triangles) is outside', () => {
     const cam = makeCamera();
-    const frustum = fullFrustum(cam);
-    const mesh = makeMeshAt(0, 0, 0, 0.1);
-    // Manually null out boundingBox to exercise the fallback.
-    mesh.geometry.boundingBox = null;
-    const tmpBox = new THREE.Box3();
-    expect(classifyMesh(mesh, frustum, [], tmpBox)).toBe('window');
-    expect(mesh.geometry.boundingBox).not.toBeNull();
+    expect(classifyBox(new THREE.Box3(), fullFrustum(cam), [])).toBe('outside');
   });
 });
 

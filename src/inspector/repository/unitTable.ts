@@ -11,7 +11,7 @@
  * memoization + per-element fetch coordination. No behavior change.
  */
 
-import { IFCPROJECT, IFCSIUNIT, IFCCONVERSIONBASEDUNIT } from 'web-ifc';
+import { IFCPROJECT, IFCSIUNIT, IFCCONVERSIONBASEDUNIT } from '../ifcTypeCodes';
 
 import {
   buildUnitTable,

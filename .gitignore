@@ -36,3 +36,6 @@ assets/ifcs/*.ifc
 
 # Claude Code agent-local memory — machine-local scratch, not project content.
 .claude/agent-memory/
+
+# Benchmark output (npm run bench / npm run lighthouse). Machine-specific, and may name private models.
+bench-results/

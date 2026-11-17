@@ -11,8 +11,10 @@ import { SelectionManager } from '../src/inspector/SelectionManager';
 import type { SelectionManagerDeps } from '../src/inspector/SelectionManager';
 import type { Tool, ToolManager } from '../src/tools/Tool';
 import type { Viewer } from '../src/viewer/Viewer';
-import type { ModelManager, ModelEntry } from '../src/viewer/ModelManager';
+import type { ModelManager } from '../src/viewer/ModelManager';
 import type { ElementIdentity } from '../src/inspector/types';
+import type { ParsedModel } from '../src/parser/types';
+import { boxMesh, makeModelManager } from './helpers/models';
 
 const lsStore = new Map<string, string>();
 Object.defineProperty(globalThis, 'localStorage', {
@@ -35,28 +37,12 @@ const identity = (modelId: string, expressId: number): ElementIdentity => ({
   ifcTypeCode: 0,
 });
 
-/** A unit cube centred on `at`, so the expected centre is obvious by eye. */
-function makeModelEntry(modelId: string, cubes: Array<[number, THREE.Vector3]>): ModelEntry {
-  const group = new THREE.Group();
-  group.name = modelId;
-  const meshesByExpressId = new Map<number, THREE.Mesh[]>();
-
-  for (const [expressId, at] of cubes) {
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshPhongMaterial({ color: 0x808080 }),
-    );
-    mesh.userData.expressID = expressId;
-    mesh.position.copy(at);
-    group.add(mesh);
-    meshesByExpressId.set(expressId, [mesh]);
-  }
-
-  group.updateMatrixWorld(true);
-  return { id: modelId, group, visible: true, meshesByExpressId };
+/** Unit cubes centred on `at`, so the expected centre is obvious by eye. */
+function makeModel(modelId: string, cubes: Array<[number, [number, number, number]]>): ParsedModel {
+  return { id: modelId, meshes: cubes.map(([expressId, at]) => boxMesh(expressId, { at })) };
 }
 
-function makeDeps(store: Map<string, ModelEntry>): SelectionManagerDeps {
+function makeDeps(modelManager: ModelManager): SelectionManagerDeps {
   const canvas = document.createElement('canvas');
   const viewer = {
     getCanvas: () => canvas,
@@ -70,24 +56,24 @@ function makeDeps(store: Map<string, ModelEntry>): SelectionManagerDeps {
   return {
     viewer,
     canvas,
-    modelManager: { getModel: (id: string) => store.get(id) } as unknown as ModelManager,
+    modelManager,
     toolManager: { getActiveTool: () => null as Tool | null } as unknown as ToolManager,
   };
 }
 
 describe('SelectionManager.getSelectionCenter', () => {
-  let store: Map<string, ModelEntry>;
   let manager: SelectionManager;
 
   beforeEach(() => {
     lsStore.clear();
-    store = new Map();
-    store.set('A', makeModelEntry('A', [
-      [1, new THREE.Vector3(0, 0, 0)],
-      [2, new THREE.Vector3(10, 0, 0)],
-      [3, new THREE.Vector3(0, 6, 0)],
-    ]));
-    manager = new SelectionManager(makeDeps(store));
+    const { modelManager } = makeModelManager([
+      makeModel('A', [
+        [1, [0, 0, 0]],
+        [2, [10, 0, 0]],
+        [3, [0, 6, 0]],
+      ]),
+    ]);
+    manager = new SelectionManager(makeDeps(modelManager));
   });
 
   it('returns null when nothing is selected', () => {

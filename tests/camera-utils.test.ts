@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
-  computeClippingPlanes,
+  clippingPlanesForView,
   computeFitPosition,
   sceneRadius,
 } from '../src/viewer/cameraUtils';
@@ -48,19 +48,16 @@ describe('computeFitPosition', () => {
     expect(result.far).toBeGreaterThan(eye + sceneRadius(box));
   });
 
-  it('agrees with computeClippingPlanes, so the fit does not fight the loop', () => {
-    // The render loop recomputes the planes every frame from the live camera
-    // distance. If the fit installed a different formula the view would shift
-    // on the first frame after a fit.
+  it('agrees with clippingPlanesForView, so the fit does not fight the loop', () => {
+    // The render loop recomputes the planes every frame from the live camera.
+    // If the fit installed a different formula the view would shift on the
+    // first frame after a fit.
     const box = new THREE.Box3(
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(20, 20, 20),
     );
     const result = computeFitPosition(box)!;
-    const live = computeClippingPlanes(
-      result.position.distanceTo(result.center),
-      sceneRadius(box),
-    );
+    const live = clippingPlanesForView({ position: result.position, hitDistance: null, scene: box });
     expect(result.near).toBeCloseTo(live.near);
     expect(result.far).toBeCloseTo(live.far);
   });

@@ -3,6 +3,7 @@ import type { Viewer } from '../viewer/Viewer';
 import type { ModelManager } from '../viewer/ModelManager';
 import type { ToolManager } from '../tools/Tool';
 import { raycastVisible } from '../utils/raycast';
+import { elementOfHit } from '../viewer/ModelBatch';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
 import { makeKey } from './elementKey';
@@ -20,9 +21,8 @@ import type { ElementIdentity, SelectionMode, SelectionState } from './types';
  *        - no modifier → 'replace' (or 'clear' on empty hit)
  *        - ctrl/cmd    → 'add' (toggle: deselect if already in selection)
  *        - shift       → 'remove' (no-op if not selected; no-op on empty hit)
- *   3. Highlight all meshes that share the selected `expressID` by cloning
- *      their materials and boosting emissive to the brand blue. On deselect,
- *      restore the original material reference and dispose the clone.
+ *   3. Highlight every piece of the selected element in the brand blue, via
+ *      ModelManager's per-element highlight flag; clear it on deselect.
  *   4. Expose `clear()` and `onModelRemoved(modelId)` so App can keep the
  *      selection in sync with `removeModel` and `resetView`.
  *
@@ -51,19 +51,6 @@ export interface SelectionManagerDeps {
    */
   history?: HistoryManager;
   /**
-   * Optional appearance-base provider (element-appearance interplay). Returns
-   * the material the highlight should compose ON TOP OF for a given mesh — the
-   * AppearanceManager's current base (a transparent clone if the element is
-   * transparent, else the pristine original). The highlight derives its
-   * emissive variant from this base and RESTORES to it on deselect, so:
-   *   - selecting a transparent element shows both (highlight of the faded base)
-   *   - deselecting a transparent element leaves it faded (not pristine).
-   * When absent, the highlight captures `mesh.material` exactly as before —
-   * preserving the existing test baseline. App wires this to AppearanceManager
-   * and calls `refreshHighlights()` after any appearance op on selected meshes.
-   */
-  appearanceBaseFor?: (mesh: THREE.Mesh) => THREE.Material | THREE.Material[];
-  /**
    * Optional pick arbitration (D9). When wired, a click first asks the
    * candidate system what is under the cursor: elements outrank the
    * annotations drawn over them, so this normally answers `'element'` and the
@@ -81,10 +68,6 @@ export interface SelectionManagerDeps {
   };
 }
 
-/** Color and intensity for the highlight emissive boost (brand blue). */
-const HIGHLIGHT_COLOR = 0x3b82f6;
-const HIGHLIGHT_INTENSITY = 0.3;
-
 /** Movement threshold (in CSS pixels) for distinguishing click vs drag. */
 const CLICK_THRESHOLD = 3;
 
@@ -95,12 +78,6 @@ const CLICK_THRESHOLD = 3;
  * inspector header checkbox.
  */
 export const SINGLE_MODEL_LOCK_STORAGE_KEY = 'ifcviewer:inspectorSingleModelLock';
-
-/** Snapshot of one mesh's pre-highlight material for restoration on deselect. */
-interface MeshHighlight {
-  mesh: THREE.Mesh;
-  originalMaterial: THREE.Material | THREE.Material[];
-}
 
 /** Internal key: "<modelId>:<expressId>". */
 type SelectionKey = string;
@@ -130,37 +107,12 @@ export class SelectionManager {
   private identities = new Map<SelectionKey, ElementIdentity>();
 
   /**
-   * Per-mesh highlight bookkeeping. Multiple keys can share a mesh in
-   * pathological cases (different expressIDs on one mesh — currently
-   * impossible because we filter by `expressID === target`, but the map
-   * structure is by mesh.uuid for safety and direct lookup on cleanup).
-   */
-  private highlights = new Map<string, MeshHighlight>();
-
-  /**
    * Cached centre of the selection's world bounds, for `getSelectionCenter`.
-   * Recomputed lazily because the union runs over every highlighted mesh, and
+   * Recomputed lazily because the union runs over every selected piece, and
    * a marquee selection can hold tens of thousands of them.
    */
   private selectionCenter: THREE.Vector3 | null = null;
   private selectionCenterDirty = true;
-
-  /**
-   * Cache: original material reference -> shared highlight variant. Two
-   * meshes that share an original material now share the same emissive
-   * clone instead of each cloning their own.
-   *
-   * Why this matters: marquee-selecting ~18k elements in a 100k-mesh model
-   * previously cloned ~22k materials at ~1ms each (the dominant cost). The
-   * cache makes that O(distinct materials in selection), typically a few
-   * dozen.
-   *
-   * Lifetime: WeakMap entries release when the original material gets GC'd
-   * (i.e. when the model is removed and ModelManager disposes its meshes).
-   * We must NOT `.dispose()` cache variants on deselect — they may be in
-   * use by another selected mesh and will be needed again on reselect.
-   */
-  private highlightVariants = new WeakMap<THREE.Material, THREE.Material>();
 
   /** Listeners notified whenever the selection state changes. */
   private changeListeners: Array<(state: SelectionState) => void> = [];
@@ -230,17 +182,8 @@ export class SelectionManager {
   }
 
   private computeSelectionCenter(): THREE.Vector3 | null {
-    if (this.highlights.size === 0) return null;
-
-    const bounds = new THREE.Box3();
-    const meshBox = new THREE.Box3();
-    for (const { mesh } of this.highlights.values()) {
-      if (mesh.geometry.boundingBox === null) mesh.geometry.computeBoundingBox();
-      const local = mesh.geometry.boundingBox;
-      if (!local) continue;
-      meshBox.copy(local).applyMatrix4(mesh.matrixWorld);
-      bounds.union(meshBox);
-    }
+    if (this.selected.size === 0) return null;
+    const bounds = this.deps.modelManager.getElementsBoundingBox(this.identities.values());
     return bounds.isEmpty() ? null : bounds.getCenter(new THREE.Vector3());
   }
 
@@ -556,7 +499,7 @@ export class SelectionManager {
     );
   }
 
-  /** Drop all selection and restore materials. No-op if nothing selected. */
+  /** Drop all selection and its highlight. No-op if nothing selected. */
   clear(): void {
     if (this.selected.size === 0) return;
     const before = this.snapshotSelection();
@@ -568,9 +511,8 @@ export class SelectionManager {
   /**
    * Remove any selection entries owned by the given model. Called by
    * `App.removeModel` so stale references don't survive model teardown.
-   * Note: when the model's group is removed from the scene, the meshes
-   * are disposed by ModelManager — we drop our highlight bookkeeping
-   * here without trying to restore materials on those dead meshes.
+   * The model's geometry (and with it the highlight) goes with the model,
+   * so this only drops bookkeeping.
    */
   onModelRemoved(modelId: string): void {
     const before = this.selected.size;
@@ -582,16 +524,9 @@ export class SelectionManager {
         this.identities.delete(key);
       }
     }
-    // Drop highlight entries pointing at meshes from the removed model.
-    // ModelManager disposed the materials already; we just clear our refs.
-    for (const [uuid, hl] of Array.from(this.highlights)) {
-      const owner = hl.mesh.parent;
-      if (owner && owner.name === modelId) {
-        this.highlights.delete(uuid);
-      }
-    }
 
     if (this.selected.size !== before) {
+      this.selectionCenterDirty = true;
       this.notifyChange();
     }
   }
@@ -660,7 +595,7 @@ export class SelectionManager {
 
     const mode = pickMode(e);
 
-    if (!hit || !(hit.object instanceof THREE.Mesh)) {
+    if (!hit) {
       // No element under cursor.
       if (mode === 'replace') {
         this.clear();
@@ -669,10 +604,10 @@ export class SelectionManager {
       return;
     }
 
-    const identity = identityFromHit(hit.object);
-    if (!identity) return; // Mesh isn't part of a model group (helper/marker leaked through).
+    const element = elementOfHit(hit);
+    if (!element) return; // Not a model piece (helper/marker leaked through).
 
-    this.apply(mode, identity);
+    this.apply(mode, placeholderIdentity(element.modelId, element.expressId));
   }
 
   // ── Highlight lifecycle ────────────────────────────────────
@@ -695,104 +630,31 @@ export class SelectionManager {
   }
 
   private clearInternal(): void {
-    for (const [, hl] of this.highlights) {
-      restoreMaterial(hl);
+    // One call per model, however many elements were selected.
+    const byModel = new Map<string, number[]>();
+    for (const id of this.identities.values()) {
+      let list = byModel.get(id.modelId);
+      if (!list) byModel.set(id.modelId, (list = []));
+      list.push(id.expressId);
     }
-    this.highlights.clear();
+    for (const [modelId, ids] of byModel) this.deps.modelManager.setHighlighted(modelId, ids, false);
     this.selected.clear();
     this.identities.clear();
     this.selectionCenterDirty = true;
   }
 
-  private highlightExpress(modelId: string, expressId: number): void {
-    const model = this.deps.modelManager.getModel(modelId);
-    if (!model) return;
-
-    // O(1) lookup into the per-model index built at addModel time.
-    const matches = model.meshesByExpressId.get(expressId);
-    if (!matches) return;
-
-    for (const mesh of matches) {
-      if (this.highlights.has(mesh.uuid)) continue; // Already highlighted.
-
-      // Derive the highlight from the APPEARANCE base (transparent clone or
-      // pristine original) when a provider is wired; otherwise from the mesh's
-      // current material (legacy behaviour, preserved for the baseline).
-      const base = this.deps.appearanceBaseFor?.(mesh) ?? mesh.material;
-      const variant = this.getHighlightVariant(base);
-      mesh.material = variant;
-      this.highlights.set(mesh.uuid, { mesh, originalMaterial: base });
-    }
-  }
-
   /**
-   * Re-derive the highlight for every currently-highlighted mesh from its
-   * CURRENT appearance base. App calls this after any appearance op that
-   * touched selected meshes (e.g. make-transparent / opaque on the selection),
-   * so the highlight composes on top of the new base — keeping the
-   * hidden>transparent>highlighted>base precedence order-independent.
-   *
-   * No-op when no appearance-base provider is wired. Requests a render since
-   * material refs changed without a camera move.
+   * The highlight is a per-element flag in the renderer, independent of the
+   * element's colour, opacity and visibility, so it composes on top of
+   * whatever AppearanceManager has set (a transparent element shows faded and
+   * highlighted) and needs no reconciliation when that changes.
    */
-  refreshHighlights(): void {
-    const provider = this.deps.appearanceBaseFor;
-    if (!provider) return;
-    let changed = false;
-    for (const hl of this.highlights.values()) {
-      const base = provider(hl.mesh);
-      hl.originalMaterial = base; // restore target follows the appearance base
-      const variant = this.getHighlightVariant(base);
-      if (hl.mesh.material !== variant) {
-        hl.mesh.material = variant;
-        changed = true;
-      }
-    }
-    if (changed) this.deps.viewer.requestRender();
+  private highlightExpress(modelId: string, expressId: number): void {
+    this.deps.modelManager.setHighlighted(modelId, [expressId], true);
   }
 
   private unhighlightExpress(modelId: string, expressId: number): void {
-    const model = this.deps.modelManager.getModel(modelId);
-    if (!model) {
-      // Model already removed; just drop bookkeeping.
-      return;
-    }
-    const matches = model.meshesByExpressId.get(expressId);
-    if (!matches) return;
-
-    for (const mesh of matches) {
-      const hl = this.highlights.get(mesh.uuid);
-      if (!hl) continue;
-      restoreMaterial(hl);
-      this.highlights.delete(mesh.uuid);
-    }
-  }
-
-  /**
-   * Return a (possibly cached) emissive-boosted variant of `original`.
-   * Two meshes that share `original` get the SAME variant reference —
-   * makes highlight allocation O(distinct materials in selection) instead
-   * of O(N selected meshes).
-   *
-   * Handles both single-material and array-of-materials meshes. Arrays
-   * are NOT cached as a whole; each slot's material is cached individually.
-   */
-  private getHighlightVariant(
-    original: THREE.Material | THREE.Material[],
-  ): THREE.Material | THREE.Material[] {
-    if (Array.isArray(original)) {
-      return original.map((m) => this.getOrBuildVariant(m));
-    }
-    return this.getOrBuildVariant(original);
-  }
-
-  private getOrBuildVariant(original: THREE.Material): THREE.Material {
-    let variant = this.highlightVariants.get(original);
-    if (!variant) {
-      variant = cloneSingleWithEmissive(original);
-      this.highlightVariants.set(original, variant);
-    }
-    return variant;
+    this.deps.modelManager.setHighlighted(modelId, [expressId], false);
   }
 
   // ── Helpers ────────────────────────────────────────────────
@@ -804,9 +666,9 @@ export class SelectionManager {
   }
 
   private notifyChange(): void {
-    // Highlight + unhighlight only mutate `mesh.material` references — the
-    // camera doesn't move, so OrbitControls won't fire 'change' to wake
-    // the render loop. Trigger it here so the highlight is drawn.
+    // Highlight + unhighlight only change per-element state — the camera
+    // doesn't move, so OrbitControls won't fire 'change' to wake the render
+    // loop. Trigger it here so the highlight is drawn.
     this.deps.viewer.requestRender();
     const state = this.getState();
     for (const cb of this.changeListeners) cb(state);
@@ -841,41 +703,6 @@ function pickMode(e: MouseEvent): SelectionMode {
 }
 
 /**
- * Turn a hit mesh into a minimal ElementIdentity. Requires the mesh to
- * carry `userData.expressID` and live under a named model group (the
- * model group's `.name` is the App UUID). Returns null for helper meshes
- * or anything not parented to a model group.
- */
-function identityFromHit(mesh: THREE.Mesh): ElementIdentity | null {
-  const expressId = mesh.userData.expressID;
-  if (typeof expressId !== 'number') return null;
-  const parent = mesh.parent;
-  if (!parent || !parent.name) return null;
-  return placeholderIdentity(parent.name, expressId);
-}
-
-/**
- * Clone a single material and apply the brand-blue emissive boost.
- * Used by SelectionManager.getOrBuildVariant — never call directly from
- * highlight code; go through the variant cache so two meshes with the
- * same original material share their highlight clone.
- */
-function cloneSingleWithEmissive(material: THREE.Material): THREE.Material {
-  const clone = material.clone();
-  // Three.js material types that support emissive (Phong, Standard, Lambert,
-  // Physical, etc.) all expose `.emissive` as a THREE.Color. Basic materials
-  // don't — we silently skip those (the clone still gets installed, just
-  // without a visible emissive boost).
-  if ('emissive' in clone && clone.emissive instanceof THREE.Color) {
-    clone.emissive.setHex(HIGHLIGHT_COLOR);
-    if ('emissiveIntensity' in clone) {
-      (clone as { emissiveIntensity: number }).emissiveIntensity = HIGHLIGHT_INTENSITY;
-    }
-  }
-  return clone;
-}
-
-/**
  * Read the persisted single-model-lock flag.
  * Default: `true` (Phase 4 spec — most users want one-model intersection).
  */
@@ -895,18 +722,4 @@ function writePersistedLock(enabled: boolean): void {
   } catch {
     /* ignore — storage may be disabled */
   }
-}
-
-/**
- * Restore the mesh's original material.
- *
- * IMPORTANT: do not `.dispose()` the variant we're swapping out — the
- * variant is shared by every mesh that selected this same original
- * material, via SelectionManager.highlightVariants. Disposing here would
- * break the next reselect (and any other mesh currently using the variant).
- * The variant releases naturally when the original gets GC'd because the
- * WeakMap holds the original as the key, not the variant.
- */
-function restoreMaterial(hl: MeshHighlight): void {
-  hl.mesh.material = hl.originalMaterial;
 }

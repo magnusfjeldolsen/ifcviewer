@@ -48,6 +48,17 @@ describe('GeometryCache pure helpers', () => {
     }
   });
 
+  it('keeps the worker-computed local bounds, so a cache hit need not walk vertices', () => {
+    const withBounds: ParsedMesh = {
+      ...makeMesh(1),
+      bounds: { min: [1, 1.1, 1.2], max: [1.6, 1.7, 1.8] },
+    };
+    const restored = deserializeMeshes(serializeMeshes([withBounds, makeMesh(2)]));
+    expect(restored[0].bounds).toEqual(withBounds.bounds);
+    // Entries written before bounds existed come back without them.
+    expect(restored[1].bounds).toBeUndefined();
+  });
+
   it('serialize copies buffers so the cached form is independent of the source', () => {
     const parsed = [makeMesh(1)];
     const cached = serializeMeshes(parsed);
@@ -166,6 +177,32 @@ describe('GeometryCache', () => {
     expect(store.records.has('new')).toBe(true);
     expect(store.records.has('mid')).toBe(false);
     expect(store.records.has('old')).toBe(false);
+  });
+
+  it('a model bigger than the whole cache is not written, and evicts nothing', async () => {
+    const store = fakeStore() as unknown as FakeStore;
+    const cache = new GeometryCache(store as unknown as SessionStore, 4000);
+    await cache.save('small', [makeMesh(1, 100)]); // 2968 bytes: fits
+    await cache.save('huge', [makeMesh(2, 100), makeMesh(3, 100)]); // 5936 bytes
+    expect(store.records.has('huge')).toBe(false);
+    expect(store.records.has('small')).toBe(true);
+  });
+
+  it('a collector gathers a streamed model batch by batch while it fits the cap', () => {
+    const cache = new GeometryCache(fakeStore(), 4000);
+    const fits = cache.collector();
+    fits.add([makeMesh(1, 50)]);
+    fits.add([makeMesh(2, 50)]); // 2 × 1568 = 3136 bytes
+    expect(fits.meshes()?.map((m) => m.expressID)).toEqual([101, 102]);
+
+    // Past the cap it lets go of what it held: no second copy of a model
+    // the cache could not keep anyway.
+    const tooBig = cache.collector();
+    tooBig.add([makeMesh(1, 100)]);
+    tooBig.add([makeMesh(2, 100)]);
+    expect(tooBig.meshes()).toBeNull();
+    tooBig.add([makeMesh(3, 1)]);
+    expect(tooBig.meshes()).toBeNull();
   });
 
   it('eviction is a no-op when total is under cap', async () => {

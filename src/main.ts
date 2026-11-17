@@ -19,7 +19,19 @@ if (!canvas) {
 }
 
 const app = new App(canvas);
-app.start().then(() => {
+
+// `?stats` turns on the performance readout and the `window.__ifcPerf` hook
+// the benchmark drives. Imported on demand, so without the parameter none of
+// it is downloaded. Installed before `start()` so a session restore is timed.
+const statsReady = new URLSearchParams(window.location.search).has('stats')
+  ? import('./debug/perfSurface')
+      .then((m) => {
+        m.installPerfSurface(app.debugHandles());
+      })
+      .catch((err) => console.warn('Stats surface failed to load', err))
+  : Promise.resolve();
+
+statsReady.then(() => app.start()).then(() => {
   if (!deepLink.url) return;
 
   let domain: string;
