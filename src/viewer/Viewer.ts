@@ -62,6 +62,7 @@ export class Viewer {
   private canvas: HTMLCanvasElement;
   private animationId: number | null = null;
   private updateCallbacks: Array<() => void> = [];
+  private renderedCallbacks: Array<(timestamp: number, renderCpuMs: number) => void> = [];
 
   /**
    * Render-on-demand gate. The animate loop still runs at requestAnimationFrame
@@ -297,8 +298,27 @@ export class Viewer {
     // flyTo tween and a session restore all end up here before the draw.
     this.updateClipping();
     this.updateMarkerScales();
+    if (this.renderedCallbacks.length === 0) {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    const start = performance.now();
     this.renderer.render(this.scene, this.camera);
+    const end = performance.now();
+    for (const cb of this.renderedCallbacks) cb(end, end - start);
   };
+
+  /**
+   * Hear about every frame actually drawn, with the CPU time spent inside
+   * `renderer.render`. Only the `?stats` debug surface subscribes; with no
+   * subscriber the render loop does not even read the clock.
+   */
+  onRendered(callback: (timestamp: number, renderCpuMs: number) => void): () => void {
+    this.renderedCallbacks.push(callback);
+    return () => {
+      this.renderedCallbacks = this.renderedCallbacks.filter((cb) => cb !== callback);
+    };
+  }
 
   fitToBox(box: THREE.Box3): void {
     const fit = computeFitPosition(box);

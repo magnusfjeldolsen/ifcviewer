@@ -53,6 +53,28 @@ import type { SelectionState } from '../inspector/types';
 import type { ModelRecord, ModelSource, SessionState } from '../services/SessionStore';
 import type { LoadedFile } from '../loader/FileLoader';
 
+/**
+ * A model load has finished, one way or the other. `source` says whether it
+ * was a file the user opened or a model brought back by session restore;
+ * `fromCache` is true when restore hydrated it from the geometry cache instead
+ * of parsing the IFC again.
+ */
+export interface LoadSettledEvent {
+  name: string;
+  source: 'file' | 'restore';
+  ok: boolean;
+  meshCount: number;
+  fromCache: boolean;
+  error?: string;
+}
+
+/** What the `?stats` debug surface needs to reach. Nothing else uses it. */
+export interface DebugHandles {
+  viewer: Viewer;
+  modelManager: ModelManager;
+  onLoadSettled(cb: (event: LoadSettledEvent) => void): void;
+}
+
 /** How long a transient status message stays up before clearing. */
 const STATUS_CLEAR_MS = 4000;
 
@@ -145,6 +167,9 @@ export class App {
   // bridge the basket to the SelectionManager. Persisted in the session.
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
+  // Told when a model load finishes or fails. Only the `?stats` debug
+  // surface listens; see `onLoadSettled`.
+  private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.viewer = new Viewer(canvas);
@@ -917,6 +942,10 @@ export class App {
               );
               this.bufferCache.set(record.id, stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+              this.emitLoadSettled({
+                name: record.name, source: 'restore', ok: true,
+                meshCount: cachedMeshes.length, fromCache: true,
+              });
               // Open the model in the worker for property queries. A later
               // `getProps` for this id simply queues behind this open in
               // the worker and resolves once the model is ready — the old
@@ -940,6 +969,10 @@ export class App {
               const hash = record.hash ?? await sha256Hex(stored.buffer);
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
               void this.geometryCache.save(hash, parsed.meshes);
+              this.emitLoadSettled({
+                name: record.name, source: 'restore', ok: true,
+                meshCount: parsed.meshes.length, fromCache: false,
+              });
             }
             // Fix the IndexedDB key to match the session UUID
             if (stored.id !== record.id) {
@@ -964,9 +997,13 @@ export class App {
             this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
             this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
           }
-        } catch {
+        } catch (err) {
           // skip models that fail to restore — drop any partial stream
           this.modelManager.removeModel(record.id);
+          this.emitLoadSettled({
+            name: record.name, source: 'restore', ok: false, meshCount: 0, fromCache: false,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          });
         }
       }
       const box = this.modelManager.getBoundingBox();
@@ -1108,12 +1145,18 @@ export class App {
 
       this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
       setTimeout(() => this.setStatus(''), 3000);
+      this.emitLoadSettled({
+        name: file.name, source: 'file', ok: true, meshCount: parsed.meshes.length, fromCache: false,
+      });
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
       if (streamId) this.modelManager.removeModel(streamId);
       const msg = err instanceof Error ? err.message : 'Unknown error';
       this.setStatus(`Error: ${msg}`);
+      this.emitLoadSettled({
+        name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false, error: msg,
+      });
     }
   }
 
@@ -1431,6 +1474,21 @@ export class App {
     const box = this.modelManager.getBoundingBox();
     this.viewer.fitToBox(box);
     this.setStatus('');
+  }
+
+  /** The internals the `?stats` debug surface measures. Not for features. */
+  debugHandles(): DebugHandles {
+    return {
+      viewer: this.viewer,
+      modelManager: this.modelManager,
+      onLoadSettled: (cb) => {
+        this.loadSettledListeners.push(cb);
+      },
+    };
+  }
+
+  private emitLoadSettled(event: LoadSettledEvent): void {
+    for (const cb of this.loadSettledListeners) cb(event);
   }
 
   private setStatus(text: string): void {
