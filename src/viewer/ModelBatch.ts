@@ -344,6 +344,7 @@ export class ModelBatch {
       pieceState: { value: makeStateTexture(this.stateData) },
       highlightEmissive: { value: highlight },
     };
+    this.trackStateUploads(this.uniforms.pieceState.value);
     this.opaqueMaterial = makePieceMaterial('opaque', this.uniforms);
     this.transparentMaterial = makePieceMaterial('transparent', this.uniforms);
   }
@@ -854,10 +855,13 @@ export class ModelBatch {
     d[o + 3] = this.effectiveAlpha(p);
     d[o + 4] = f & FLAG_HIDDEN ? 1 : 0;
     d[o + 5] = f & FLAG_HIGHLIGHT ? 1 : 0;
-    this.stateDirty = true;
+    this.dirtyRows.add(Math.floor((p * TEXELS_PER_PIECE) / STATE_TEXTURE_WIDTH));
   }
 
-  private stateDirty = false;
+  /** Rows of the state texture written since the last upload request. */
+  private dirtyRows = new Set<number>();
+  /** The state texture's next upload must be whole (new, or already asked for whole). */
+  private stateWholePending = true;
 
   private growState(minFloats: number): void {
     const rowFloats = STATE_TEXTURE_WIDTH * 4;
@@ -867,14 +871,39 @@ export class ModelBatch {
     data.set(this.stateData);
     this.stateData = data;
     const old = this.uniforms.pieceState.value;
-    this.uniforms.pieceState.value = makeStateTexture(data);
+    this.uniforms.pieceState.value = this.trackStateUploads(makeStateTexture(data));
+    this.stateWholePending = true;
     old.dispose();
   }
 
+  private trackStateUploads(texture: THREE.DataTexture): THREE.DataTexture {
+    texture.onUpdate = () => {
+      if (texture === this.uniforms.pieceState.value) this.stateWholePending = false;
+    };
+    return texture;
+  }
+
+  /**
+   * Send what changed in the state texture: only the dirty rows (16 KB
+   * each) when they are few, so selecting one element in a model of a
+   * million pieces does not resend 32 MB. The first upload of a texture, or
+   * one following a whole-texture request that has not happened yet, stays
+   * whole — three uploads only the listed rows when any are listed, which
+   * would leave the rest of a fresh texture undefined.
+   */
   private uploadState(): void {
-    if (!this.stateDirty) return;
-    this.stateDirty = false;
-    this.uniforms.pieceState.value.needsUpdate = true;
+    if (this.dirtyRows.size === 0) return;
+    const texture = this.uniforms.pieceState.value;
+    const rows = texture.image.height;
+    const rowFloats = STATE_TEXTURE_WIDTH * 4;
+    if (this.stateWholePending || this.dirtyRows.size * 4 > rows) {
+      texture.clearUpdateRanges();
+      this.stateWholePending = true;
+    } else {
+      for (const row of this.dirtyRows) texture.addUpdateRange(row * rowFloats, rowFloats);
+    }
+    this.dirtyRows.clear();
+    texture.needsUpdate = true;
   }
 
   private updateFlags(expressIds: Iterable<number>, flag: number, on: boolean): void {

@@ -687,6 +687,35 @@ describe('ModelBatch — cheap to stream', () => {
   });
 });
 
+describe('ModelBatch — per-element state upload', () => {
+  const stateTexture = (b: ModelBatch) =>
+    (b as unknown as { uniforms: { pieceState: { value: THREE.DataTexture } } }).uniforms.pieceState.value;
+
+  it('a change to a few elements sends only their rows of the state texture', () => {
+    const meshes = Array.from({ length: 20000 }, (_, i) => boxMesh(i + 1, { at: [i % 200, Math.floor(i / 200), 0] }));
+    const batch = new ModelBatch('m');
+    batch.append(meshes);
+    const texture = stateTexture(batch);
+    const rowFloats = texture.image.width * 4;
+    // Not on the GPU yet: whatever changes, the first upload is whole.
+    batch.setHighlighted([5], true);
+    expect(texture.updateRanges).toEqual([]);
+    texture.onUpdate!(texture); // the renderer uploaded it
+
+    const version = texture.version;
+    batch.setHighlighted([1500], true); // piece 1499: texels 2998–2999, row 2
+    expect(texture.version).toBeGreaterThan(version);
+    expect(texture.updateRanges).toEqual([{ start: 2 * rowFloats, count: rowFloats }]);
+    texture.onUpdate!(texture);
+    texture.clearUpdateRanges();
+
+    // Touching most rows sends the whole texture in one go.
+    batch.setHidden(meshes.map((m) => m.expressID).filter((id) => id % 2 === 0), true);
+    expect(texture.updateRanges).toEqual([]);
+    expect(batch.elementState(2)!.hidden).toBe(true);
+  });
+});
+
 describe('ModelBatch — freeing memory', () => {
   it('removeModel disposes every geometry and material', () => {
     const { modelManager } = makeModelManager([
