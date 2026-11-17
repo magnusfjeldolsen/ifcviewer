@@ -75,7 +75,8 @@ export function packMeshes(meshes: readonly ParsedMesh[]): ArrayBuffer {
     else new Uint32Array(out, offset, m.indices.length).set(m.indices);
     offset += indexBytes(vertexCount, m.indices.length);
     const normals = new Int8Array(out, offset, m.normals.length);
-    for (let k = 0; k < m.normals.length; k++) normals[k] = Math.round(m.normals[k] * 127);
+    // Clamped: a component a hair over 1 (float noise) must not wrap to -128.
+    for (let k = 0; k < m.normals.length; k++) normals[k] = Math.max(-127, Math.min(127, Math.round(m.normals[k] * 127)));
     offset += align4(m.normals.length);
   });
   return out;

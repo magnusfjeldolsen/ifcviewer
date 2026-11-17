@@ -41,6 +41,14 @@ describe('packMeshes / unpackMeshes', () => {
     for (let i = 0; i < m.normals.length; i++) expect(Math.abs(b.normals[i] - m.normals[i])).toBeLessThanOrEqual(0.5 / 127 + 1e-7);
   });
 
+  it('a normal component a hair over 1 stays +1, not wrapped to -1', () => {
+    const m = mesh(1, 2);
+    m.normals = new Float32Array([1.004, -1.004, 1.5, 0.99, -2, 0]);
+    const [b] = unpackMeshes(packMeshes([m]));
+    const want = [1, -1, 1, Math.round(0.99 * 127) / 127, -1, 0];
+    want.forEach((w, i) => expect(b.normals[i]).toBeCloseTo(w, 6));
+  });
+
   it('keeps 32-bit indices for a piece with more vertices than 16 bits can address', () => {
     const big = mesh(3, 70000);
     big.indices = new Uint32Array([0, 65536, 69999, 1, 2, 3]);
