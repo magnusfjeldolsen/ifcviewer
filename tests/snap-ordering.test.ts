@@ -96,4 +96,18 @@ describe('orderSnapCandidates', () => {
   it('handles an empty list', () => {
     expect(orderSnapCandidates([])).toEqual([]);
   });
+
+  // A densely tessellated piece seen from afar puts hundreds of thousands of
+  // corners inside the snap radius. Spreading them into one call overflowed
+  // the stack, and the click that asked for them did nothing at all.
+  it('orders a very large number of candidates without overflowing', () => {
+    const many: Candidate[] = [];
+    for (let i = 0; i < 300_000; i++) many.push(candidate('vertex', (i % 1000) / 100, `v${i}`));
+    many.push(candidate('face', 0));
+
+    const ranked = orderSnapCandidates(many);
+
+    expect(ranked).toHaveLength(300_001);
+    expect(ranked[ranked.length - 1].id).toBe('face:0');
+  });
 });
