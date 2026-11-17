@@ -21,6 +21,7 @@ import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { PropertySelector } from '../inspector/matchValue';
 import type { ParsedMesh } from './types';
 import type { WorkerTimings } from '../core/LoadTimeline';
+import type { CacheWriteReport } from '../services/geometryParts';
 
 // ---------------------------------------------------------------------------
 // main → worker
@@ -34,7 +35,7 @@ export type ToWorker =
    * with `ids`), waits for its `chunkPort`, and streams only the chunks the
    * coordinator hands it there.
    */
-  | { type: 'parse'; id: string; buffer: ArrayBuffer; shared?: boolean }
+  | { type: 'parse'; id: string; buffer: ArrayBuffer; shared?: boolean; cacheKey?: string }
   /**
    * The port to the chunk coordinator for a shared parse (transferred).
    * NOT enqueued: the parse that waits for it holds the queue.
@@ -48,9 +49,9 @@ export type ToWorker =
   /**
    * Help parse a model: open it, stream the chunks the coordinator hands out
    * over `port` (transferred), then close it and say `shareDone`. Geometry
-   * only; no property queries.
+   * only; no property queries. `worker` is its number in the parse (1, 2, …).
    */
-  | { type: 'share'; id: string; buffer: ArrayBuffer; port: MessagePort }
+  | { type: 'share'; id: string; buffer: ArrayBuffer; port: MessagePort; worker: number; cacheKey?: string }
   /**
    * Open a model for property queries only — no geometry streamed. Used
    * by the geometry-cache fast-restore path: the scene is already up from
@@ -130,8 +131,18 @@ export type FromWorker =
    * has delivered none of it, and the chunk can be streamed again.
    */
   | { type: 'batch'; id: string; meshes: ParsedMesh[]; products: number }
-  /** A `share` worker has streamed everything it was handed and closed the model. */
-  | { type: 'shareDone'; id: string; timings?: WorkerTimings }
+  /** A `share` worker has posted the geometry of everything it was handed. */
+  | { type: 'shareStreamed'; id: string; timings?: WorkerTimings }
+  /**
+   * A `share` worker is done, its part file flushed and closed (when asked
+   * to cache); it can be terminated.
+   */
+  | { type: 'shareDone'; id: string; cache?: CacheWriteReport }
+  /**
+   * The main worker's part file for a `parse` with `cacheKey` is flushed and
+   * closed (or failed): where its parts are, for the cache's index.
+   */
+  | { type: 'cacheWritten'; id: string; report: CacheWriteReport }
   /**
    * A `parse` / `openForProps` completed successfully. A `parse` reply
    * carries where the worker's time went (see `LoadTimeline`).

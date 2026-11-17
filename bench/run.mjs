@@ -180,12 +180,12 @@ const geometryCacheCount = () =>
     req.onerror = () => resolve(-1);
     req.onsuccess = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains('geometry-cache')) {
+      if (!db.objectStoreNames.contains('geometry-index')) {
         db.close();
         resolve(0);
         return;
       }
-      const c = db.transaction('geometry-cache', 'readonly').objectStore('geometry-cache').count();
+      const c = db.transaction('geometry-index', 'readonly').objectStore('geometry-index').count();
       c.onsuccess = () => {
         db.close();
         resolve(c.result);

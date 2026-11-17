@@ -58,6 +58,7 @@ import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 import { WorkerTimeline } from '../core/LoadTimeline';
 import { geometryProductIds } from './geometryProducts';
 import { StreamBatcher } from './streamBatcher';
+import { openPartFile, PartWriter } from '../services/geometryParts';
 
 /**
  * When `parse` sends a `batch`: after this many products, or after this many
@@ -221,9 +222,12 @@ async function handleParse(
   id: string,
   buffer: ArrayBuffer,
   shared: boolean,
+  cacheKey: string | undefined,
   timeline: WorkerTimeline,
 ): Promise<void> {
   timeline.mark('worker.started');
+  // Opened while the model opens; awaited once there is geometry to store.
+  const file = cacheKey ? openPartFile(cacheKey, 0) : null;
   const ifc = await getApi();
   timeline.mark('worker.ready');
   const t0 = performance.now();
@@ -239,17 +243,19 @@ async function handleParse(
   post(shared ? { type: 'listed', id, total: ids.length, ids } : { type: 'listed', id, total: ids.length });
   timeline.mark('worker.listed');
 
+  const writer = file ? new PartWriter(await file, 0) : null;
+
   // Geometry is extracted inside the stream callback (it is only valid
   // there) and posted in batches as the batcher decides.
   const batcher = new StreamBatcher<ParsedMesh>(
-    (meshes, products) => postBatch(id, meshes, products, timeline),
+    (meshes, products) => postBatch(id, meshes, products, timeline, 'worker', writer),
     { maxProducts: STREAM_BATCH_SIZE, maxIntervalMs: STREAM_BATCH_INTERVAL_MS },
   );
 
   if (shared) {
     timeline.mark('worker.waitPort');
     const port = await chunkPortFor(id);
-    await streamChunks(ifc, modelID, id, port, batcher, timeline);
+    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'worker', writer);
   } else {
     streamIds(ifc, modelID, ids, batcher, timeline);
   }
@@ -259,6 +265,8 @@ async function handleParse(
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
   post({ type: 'parsed', id, timings: timeline.toJSON() });
+
+  if (writer) post({ type: 'cacheWritten', id, report: writer.finish() });
 }
 
 /**
@@ -271,25 +279,32 @@ async function handleShare(
   id: string,
   buffer: ArrayBuffer,
   port: MessagePort,
+  worker: number,
+  cacheKey: string | undefined,
   timeline: WorkerTimeline,
 ): Promise<void> {
   timeline.mark('helper.started');
+  const file = cacheKey ? openPartFile(cacheKey, worker) : null;
   const ifc = await getApi();
   const t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
   timeline.add('helper.open', performance.now() - t0);
   timeline.mark('helper.opened');
+  const writer = file ? new PartWriter(await file, worker) : null;
   try {
     const batcher = new StreamBatcher<ParsedMesh>(() => {}, {
       maxProducts: Infinity,
       maxIntervalMs: Infinity,
     });
-    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'helper');
+    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'helper', writer);
   } finally {
     ifc.CloseModel(modelID);
   }
   timeline.mark('helper.streamed');
-  post({ type: 'shareDone', id, timings: timeline.toJSON() });
+  post({ type: 'shareStreamed', id, timings: timeline.toJSON() });
+  // Flushed and closed before saying done: terminating the worker would
+  // otherwise lose what the file system has not written yet.
+  post({ type: 'shareDone', id, cache: writer?.finish() });
 }
 
 /**
@@ -364,6 +379,7 @@ async function streamChunks(
   batcher: StreamBatcher<ParsedMesh>,
   timeline: WorkerTimeline,
   role: 'worker' | 'helper' = 'worker',
+  writer: PartWriter | null = null,
 ): Promise<void> {
   const inbox = new ChunkInbox();
   port.onmessage = (e: MessageEvent<ToChunkPort>): void => inbox.push(e.data);
@@ -373,13 +389,14 @@ async function streamChunks(
   tell({ type: 'ready' });
   try {
     for (;;) {
+
       const tw = performance.now();
       const chunk = await inbox.next();
       timeline.add(`${role}.waitChunk`, performance.now() - tw);
       if (chunk.ids === null) break;
       streamIds(ifc, modelID, chunk.ids, batcher, timeline, role);
       const { items, products } = batcher.take();
-      postBatch(id, items, products, timeline, role);
+      postBatch(id, items, products, timeline, role, writer);
       tell({ type: 'done', index: chunk.index });
     }
   } finally {
@@ -413,8 +430,15 @@ function postBatch(
   products: number,
   timeline: WorkerTimeline,
   role: 'worker' | 'helper' = 'worker',
+  writer: PartWriter | null = null,
 ): void {
   if (meshes.length === 0 && products === 0) return;
+  if (writer && meshes.length > 0) {
+    // Packed (copied) before the buffers are transferred away below.
+    const tw = performance.now();
+    writer.write(meshes);
+    timeline.add(`${role}.cacheWrite`, performance.now() - tw);
+  }
   const tp = performance.now();
   post({ type: 'batch', id, meshes, products }, batchTransferables(meshes));
   timeline.add(`${role}.post`, performance.now() - tp);
@@ -835,7 +859,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       timeline.mark('worker.received');
       enqueue(async () => {
         try {
-          await handleParse(msg.id, msg.buffer, msg.shared === true, timeline);
+          await handleParse(msg.id, msg.buffer, msg.shared === true, msg.cacheKey, timeline);
         } catch (err) {
           post({ type: 'error', id: msg.id, message: errorMessage(err) });
         }
@@ -848,7 +872,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       timeline.mark('helper.received');
       enqueue(async () => {
         try {
-          await handleShare(msg.id, msg.buffer, msg.port, timeline);
+          await handleShare(msg.id, msg.buffer, msg.port, msg.worker, msg.cacheKey, timeline);
         } catch (err) {
           post({ type: 'error', id: msg.id, message: errorMessage(err) });
         }

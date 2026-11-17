@@ -10,6 +10,7 @@
  */
 
 import type { WorkerTimings } from '../core/LoadTimeline';
+import type { CacheWriteReport } from '../services/geometryParts';
 
 export interface ParsedMesh {
   expressID: number;
@@ -43,6 +44,8 @@ export interface StreamedModel {
   meshCount: number;
   /** Where the worker's time went; absent if the worker did not report it. */
   timings?: WorkerTimings;
+  /** With a cache key: resolves once the workers' cache parts are stored (or failed). */
+  cache?: Promise<CacheWriteReport>;
 }
 
 /**

@@ -405,7 +405,7 @@ describe('WorkerIfcParser — shared parse', () => {
     const { main, helpers, parser } = sharedSetup(1);
     const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
     main.reply({ type: 'listed', id: 'm', total: 0, ids: [] });
-    helpers[0].reply({ type: 'shareDone', id: 'm', timings: { marks: { 'helper.opened': 5 }, spans: { 'helper.open': 3 } } });
+    helpers[0].reply({ type: 'shareStreamed', id: 'm', timings: { marks: { 'helper.opened': 5 }, spans: { 'helper.open': 3 } } });
     main.reply({ type: 'parsed', id: 'm', timings: { marks: { 'worker.opened': 2 }, spans: { 'worker.open': 4 } } });
     const model = await done;
     expect(model.timings).toEqual({
@@ -430,5 +430,91 @@ describe('WorkerIfcParser — shared parse', () => {
     expect(main.posted[0]).toEqual({ type: 'parse', id: 'm', buffer: expect.any(ArrayBuffer) });
     main.reply({ type: 'listed', id: 'm', total: 3 });
     expect(coordinators).toHaveLength(0);
+  });
+});
+describe('WorkerIfcParser — cache writes', () => {
+  const ids = Array.from({ length: 10 }, (_, i) => i + 1);
+
+  it('asks the worker to store the geometry under the key, and says when it is stored', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {}, undefined, { cacheKey: 'k1' });
+    expect(worker.posted[0]).toMatchObject({ type: 'parse', id: 'm', cacheKey: 'k1' });
+    worker.reply({ type: 'parsed', id: 'm' });
+    const model = await done;
+    // The load settles first; the disk catches up after.
+    worker.reply({ type: 'cacheWritten', id: 'm', report: { ok: true, parts: 3, bytes: 300 } });
+    await expect(model.cache).resolves.toMatchObject({ ok: true, parts: 3, bytes: 300 });
+  });
+
+  it('without a key there is nothing to wait for', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    expect(worker.posted[0]).not.toHaveProperty('cacheKey');
+    worker.reply({ type: 'parsed', id: 'm' });
+    expect((await done).cache).toBeUndefined();
+  });
+
+  it('a shared load is cached once the main worker and every helper have stored their parts', async () => {
+    const { main, helpers, parser } = sharedSetup(2);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {}, undefined, { cacheKey: 'k' });
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    expect(helpers.map((h) => h.posted[0])).toEqual([
+      expect.objectContaining({ type: 'share', worker: 1, cacheKey: 'k' }),
+      expect.objectContaining({ type: 'share', worker: 2, cacheKey: 'k' }),
+    ]);
+    // Helpers report "all delivered" before their writes finish: the load settles then.
+    helpers[0].reply({ type: 'shareStreamed', id: 'm' });
+    helpers[1].reply({ type: 'shareStreamed', id: 'm' });
+    main.reply({ type: 'parsed', id: 'm' });
+    const model = await done;
+    expect(helpers.some((h) => h.terminated)).toBe(false); // still writing
+    let settled = false;
+    void model.cache!.then(() => (settled = true));
+    main.reply({ type: 'cacheWritten', id: 'm', report: { ok: true, parts: 2, bytes: 20, files: [{ worker: 0, sizes: [10, 10] }] } });
+    helpers[0].reply({ type: 'shareDone', id: 'm', cache: { ok: true, parts: 1, bytes: 10, files: [{ worker: 1, sizes: [10] }] } });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    helpers[1].reply({ type: 'shareDone', id: 'm', cache: { ok: true, parts: 4, bytes: 40, files: [{ worker: 2, sizes: [10, 10, 10, 10] }] } });
+    // Every worker's file, so the reader can find every part.
+    await expect(model.cache).resolves.toEqual({
+      ok: true, parts: 7, bytes: 70,
+      files: [{ worker: 0, sizes: [10, 10] }, { worker: 1, sizes: [10] }, { worker: 2, sizes: [10, 10, 10, 10] }],
+    });
+    expect(helpers.every((h) => h.terminated)).toBe(true);
+  });
+
+  it('a helper that fails spoils the cache write (its parts may be missing) but not the load', async () => {
+    const { main, helpers, parser } = sharedSetup(1);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {}, undefined, { cacheKey: 'k' });
+    main.reply({ type: 'listed', id: 'm', total: ids.length, ids });
+    helpers[0].crash();
+    main.reply({ type: 'parsed', id: 'm' });
+    const model = await done;
+    main.reply({ type: 'cacheWritten', id: 'm', report: { ok: true, parts: 2, bytes: 20 } });
+    await expect(model.cache).resolves.toMatchObject({ ok: false });
+  });
+
+  it('removing the model before its parts are stored spoils the cache write', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {}, undefined, { cacheKey: 'k' });
+    worker.reply({ type: 'parsed', id: 'm' });
+    const model = await done;
+    parser.disposeModel('m');
+    await expect(model.cache).resolves.toMatchObject({ ok: false });
+  });
+
+  it('a failed load spoils its cache write', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    let cache: Promise<unknown> | undefined;
+    const done = parser
+      .parseStreaming(new ArrayBuffer(8), 'm', () => {}, undefined, { cacheKey: 'k' })
+      .then((m) => (cache = m.cache));
+    worker.reply({ type: 'error', id: 'm', message: 'bad' });
+    await expect(done).rejects.toThrow('bad');
+    expect(cache).toBeUndefined();
   });
 });
