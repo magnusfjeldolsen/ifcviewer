@@ -11,6 +11,8 @@
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "typecheck": "tsc --noEmit",
+    "bench": "node bench/run.mjs",
+    "lighthouse": "node bench/lighthouse.mjs",
     "postinstall": "node -e \"const fs=require('fs');const p='public';if(!fs.existsSync(p))fs.mkdirSync(p);['web-ifc.wasm','web-ifc-mt.wasm'].forEach(f=>fs.copyFileSync('node_modules/web-ifc/'+f,p+'/'+f))\""
   },
   "devDependencies": {
@@ -18,6 +20,7 @@
     "@types/three": "^0.183.1",
     "eslint": "^10.2.0",
     "jsdom": "^29.0.2",
+    "playwright-core": "^1.65.1",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.8",
