@@ -37,12 +37,17 @@ export interface HelperPlanInput {
   cores?: number;
   /** `navigator.deviceMemory` in GB; unknown means assume 4. */
   deviceMemoryGB?: number;
+  /**
+   * What helpers of other loads still running are assumed to hold: the
+   * budget is for all helpers at once, not per load.
+   */
+  helperBytesInUse?: number;
 }
 
-export function planHelpers({ fileBytes, cores, deviceMemoryGB }: HelperPlanInput): number {
+export function planHelpers({ fileBytes, cores, deviceMemoryGB, helperBytesInUse = 0 }: HelperPlanInput): number {
   if (!(fileBytes >= MIN_HELPER_FILE_BYTES)) return 0;
   const byCores = Math.floor((cores ?? 4) / 2) - 1;
-  const budget = Math.min(HELPER_BUDGET_BYTES, ((deviceMemoryGB ?? 4) * 1024 ** 3) / 4);
+  const budget = Math.min(HELPER_BUDGET_BYTES, ((deviceMemoryGB ?? 4) * 1024 ** 3) / 4) - helperBytesInUse;
   const byMemory = Math.floor(budget / (HELPER_MEMORY_FACTOR * fileBytes));
   return Math.max(0, Math.min(MAX_HELPERS, byCores, byMemory));
 }

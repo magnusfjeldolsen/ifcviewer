@@ -25,5 +25,8 @@ self.onmessage = (event: MessageEvent<ToCoordinator>): void => {
     case 'end':
       coordinator?.end();
       break;
+    case 'received':
+      coordinator?.received(msg.worker, msg.index);
+      break;
   }
 };

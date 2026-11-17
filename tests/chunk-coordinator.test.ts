@@ -32,6 +32,9 @@ function runAll(c: ChunkCoordinator, ports: FakePort[], alive: (k: number) => bo
       progressed = true;
       if (next.ids === null) return;
       delivered.push(...next.ids);
+      // As in the app: the geometry reaches the main thread, which says so,
+      // and the worker asks for the next chunk.
+      c.received(key, next.index);
       c.receive(key, { type: 'done', index: next.index });
     });
     if (!progressed) break;
@@ -67,6 +70,7 @@ describe('ChunkCoordinator', () => {
     for (let i = 0; i < 3; i++) {
       const next = ports[0].open()[0];
       ports[0].answered++;
+      c.received(0, next.index);
       c.receive(0, { type: 'done', index: next.index });
     }
     // …then the helper is ready.
@@ -88,6 +92,37 @@ describe('ChunkCoordinator', () => {
     expect(lost.every((id) => delivered.includes(id))).toBe(true);
     expect(ports[0].stops()).toBe(1);
     expect(ports[1].stops()).toBe(0); // a dead worker is not written to
+  });
+
+  it('a worker saying it is done does not make a chunk delivered: only the main thread’s receipt does', () => {
+    const ports = [new FakePort(), new FakePort()];
+    const c = new ChunkCoordinator([1, 2, 3], ports);
+    c.receive(1, { type: 'ready' });
+    const held = ports[1].open();
+    expect(held.length).toBeGreaterThan(0);
+    // The helper finishes its chunks and says so, but dies before its
+    // geometry reaches the main thread.
+    for (const ch of held) c.receive(1, { type: 'done', index: ch.index });
+    c.fail(1);
+    // The main worker gets those chunks again: nothing is lost.
+    c.receive(0, { type: 'ready' });
+    const again = ports[0].open().flatMap((m) => m.ids!);
+    expect(again.sort()).toEqual(held.flatMap((m) => m.ids!).sort());
+  });
+
+  it('a chunk whose geometry did arrive is not handed out again when its worker fails afterwards', () => {
+    const ports = [new FakePort(), new FakePort()];
+    const all = Array.from({ length: 100 }, (_, i) => i + 1);
+    const c = new ChunkCoordinator(all, ports);
+    c.receive(1, { type: 'ready' });
+    const [first, second] = ports[1].open();
+    c.received(1, first.index); // arrived on the main thread
+    c.fail(1); // then the helper died
+    c.receive(0, { type: 'ready' });
+    const delivered = runAll(c, ports, (k) => k === 0);
+    expect(delivered).not.toEqual(expect.arrayContaining(first.ids!));
+    expect([...first.ids!, ...delivered].sort((a, b) => a - b)).toEqual(all);
+    expect(second.ids!.every((id) => delivered.includes(id))).toBe(true);
   });
 
   it('end stops everyone still listening, once', () => {

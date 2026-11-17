@@ -88,6 +88,13 @@ describe('planHelpers', () => {
     expect(planHelpers({ fileBytes: 100e6, cores: 20, deviceMemoryGB: 2 })).toBe(1);
   });
 
+  it('counts helpers of other loads against the same budget', () => {
+    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32 })).toBe(3);
+    // A 357 MB load's helper holds ~1.07 GB of the 1.25 GB budget: one more 48 MB load gets one.
+    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32, helperBytesInUse: 3 * 357e6 })).toBe(1);
+    expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 32, helperBytesInUse: 3 * 357e6 })).toBe(0);
+  });
+
   it('assumes a modest device when the browser does not say', () => {
     expect(planHelpers({ fileBytes: 48 * MB })).toBe(1);
   });

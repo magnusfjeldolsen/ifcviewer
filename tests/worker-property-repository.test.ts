@@ -320,12 +320,12 @@ describe('WorkerPropertyRepository — message isolation', () => {
     ).not.toThrow();
   });
 
-  it('a model-scoped (id) error does not reject a property get', async () => {
+  it('a parse-scoped (token) error does not reject a property get', async () => {
     const { repo, worker } = setup();
     const p = repo.get('m', 1);
     const sent = lastGetProps(worker);
-    // An error correlated by `id` (geometry path) — must not touch this get.
-    worker.reply({ type: 'error', id: 'm', message: 'parse failed' });
+    // An error correlated by `token` (geometry path) — must not touch this get.
+    worker.reply({ type: 'error', token: 1, message: 'parse failed' });
     worker.reply({ type: 'props', reqId: sent.reqId, props: fakeProps('m', 1) });
     await expect(p).resolves.toMatchObject({ identity: { expressId: 1 } });
   });

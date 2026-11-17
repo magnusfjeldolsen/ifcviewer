@@ -59,6 +59,7 @@ import { WorkerTimeline } from '../core/LoadTimeline';
 import { geometryProductIds } from './geometryProducts';
 import { StreamBatcher } from './streamBatcher';
 import { openPartFile, PartWriter, type SyncFile } from '../services/geometryParts';
+import { ShareRegistry } from './shareRegistry';
 
 /**
  * When `parse` sends a `batch`: after this many products, or after this many
@@ -216,10 +217,12 @@ function batchTransferables(meshes: ParsedMesh[]): Transferable[] {
  * Parse a model: open it, then stream geometry. The worker is not the UI
  * thread, so it never has to yield — it lists the elements, runs ONE
  * `StreamMeshes` pass over them, extracts geometry inside the callback, and
- * posts `batch` messages as products accumulate.
+ * posts `batch` messages as products accumulate. Every reply carries the
+ * parse's `token`.
  */
 async function handleParse(
   id: string,
+  token: number,
   buffer: ArrayBuffer,
   shared: boolean,
   cacheKey: string | undefined,
@@ -228,27 +231,33 @@ async function handleParse(
   timeline.mark('worker.started');
   // Opened while the model opens; awaited once there is geometry to store.
   const file = cacheKey ? openPartFile(cacheKey, 0) : null;
+  const opened: { modelID: number | null } = { modelID: null };
   try {
-    await parseInto(id, buffer, shared, file, timeline);
+    await parseInto(id, token, buffer, shared, file, timeline, opened);
   } catch (err) {
     // The part file holds a lock for as long as it is open: let it go, so a
     // later sweep can remove the half-written load.
     closeQuietly(file);
+    // A model opened for a parse that failed is of no use to anyone.
+    if (opened.modelID !== null) closeModel(id, opened.modelID);
     throw err;
   }
 }
 
 async function parseInto(
   id: string,
+  token: number,
   buffer: ArrayBuffer,
   shared: boolean,
   file: Promise<SyncFile | null> | null,
   timeline: WorkerTimeline,
+  opened: { modelID: number | null },
 ): Promise<void> {
   const ifc = await getApi();
   timeline.mark('worker.ready');
   const t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  opened.modelID = modelID;
   timeline.add('worker.open', performance.now() - t0);
   timeline.mark('worker.opened');
   modelIds.set(id, modelID);
@@ -257,7 +266,7 @@ async function parseInto(
   // is the progress total: an upper bound, since a product without a body
   // is listed but streams nothing. See `geometryProducts.ts`.
   const ids = geometryProductIds(ifc, modelID);
-  post(shared ? { type: 'listed', id, total: ids.length, ids } : { type: 'listed', id, total: ids.length });
+  post(shared ? { type: 'listed', token, total: ids.length, ids } : { type: 'listed', token, total: ids.length });
   timeline.mark('worker.listed');
 
   const writer = file ? new PartWriter(await file, 0) : null;
@@ -265,14 +274,14 @@ async function parseInto(
   // Geometry is extracted inside the stream callback (it is only valid
   // there) and posted in batches as the batcher decides.
   const batcher = new StreamBatcher<ParsedMesh>(
-    (meshes, products) => postBatch(id, meshes, products, timeline, 'worker', writer),
+    (meshes, products) => postBatch(token, meshes, products, undefined, timeline, 'worker', writer),
     { maxProducts: STREAM_BATCH_SIZE, maxIntervalMs: STREAM_BATCH_INTERVAL_MS },
   );
 
   if (shared) {
     timeline.mark('worker.waitPort');
-    const port = await chunkPortFor(id);
-    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'worker', writer);
+    const port = await shares.portFor(token);
+    await streamChunks(ifc, modelID, token, port, batcher, timeline, 'worker', writer);
   } else {
     streamIds(ifc, modelID, ids, batcher, timeline);
   }
@@ -281,9 +290,23 @@ async function parseInto(
 
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
-  post({ type: 'parsed', id, timings: timeline.toJSON() });
+  post({ type: 'parsed', token, timings: timeline.toJSON() });
 
-  if (writer) post({ type: 'cacheWritten', id, report: writer.finish() });
+  if (writer) post({ type: 'cacheWritten', token, report: writer.finish() });
+}
+
+/** Close a model this worker opened, unless a later request has replaced it. */
+function closeModel(id: string, modelID: number): void {
+  if (modelIds.get(id) === modelID) {
+    modelIds.delete(id);
+    unitTables.delete(id);
+    propertyCaches.drop(id);
+  }
+  try {
+    api?.CloseModel(modelID);
+  } catch {
+    // web-ifc may be down already
+  }
 }
 
 /** Close a part file whatever state the load got to (closing twice is harmless). */
@@ -300,11 +323,12 @@ function closeQuietly(file: Promise<SyncFile | null> | null): void {
 /**
  * Help another worker parse a model: open it, stream the chunks the
  * coordinator hands out over `port`, close it. A chunk's geometry goes out in
- * one batch right before the chunk is reported done, so if this worker dies
- * mid-chunk none of that chunk was delivered and another worker can stream it.
+ * one batch, marked with the chunk's index: the main thread counts the chunk
+ * delivered when that batch arrives, so if this worker dies mid-chunk none of
+ * that chunk was delivered and another worker streams it.
  */
 async function handleShare(
-  id: string,
+  token: number,
   buffer: ArrayBuffer,
   port: MessagePort,
   worker: number,
@@ -314,7 +338,7 @@ async function handleShare(
   timeline.mark('helper.started');
   const file = cacheKey ? openPartFile(cacheKey, worker) : null;
   try {
-    await shareInto(id, buffer, port, worker, file, timeline);
+    await shareInto(token, buffer, port, worker, file, timeline);
   } catch (err) {
     closeQuietly(file);
     throw err;
@@ -322,7 +346,7 @@ async function handleShare(
 }
 
 async function shareInto(
-  id: string,
+  token: number,
   buffer: ArrayBuffer,
   port: MessagePort,
   worker: number,
@@ -340,111 +364,54 @@ async function shareInto(
       maxProducts: Infinity,
       maxIntervalMs: Infinity,
     });
-    await streamChunks(ifc, modelID, id, port, batcher, timeline, 'helper', writer);
+    await streamChunks(ifc, modelID, token, port, batcher, timeline, 'helper', writer);
   } finally {
     ifc.CloseModel(modelID);
   }
   timeline.mark('helper.streamed');
-  post({ type: 'shareStreamed', id, timings: timeline.toJSON() });
+  post({ type: 'shareStreamed', token, timings: timeline.toJSON() });
   // Flushed and closed before saying done: terminating the worker would
   // otherwise lose what the file system has not written yet.
-  post({ type: 'shareDone', id, cache: writer?.finish() });
+  post({ type: 'shareDone', token, cache: writer?.finish() });
 }
 
-/**
- * Coordinator ports for shared parses, by model id. The `chunkPort` message
- * and the parse that needs it race, so whichever comes first makes the entry.
- */
-const chunkPorts = new Map<string, { promise: Promise<MessagePort>; resolve: (p: MessagePort) => void }>();
-
-function chunkPortEntry(id: string): { promise: Promise<MessagePort>; resolve: (p: MessagePort) => void } {
-  let entry = chunkPorts.get(id);
-  if (!entry) {
-    let resolve!: (p: MessagePort) => void;
-    const promise = new Promise<MessagePort>((r) => {
-      resolve = r;
-    });
-    entry = { promise, resolve };
-    chunkPorts.set(id, entry);
-  }
-  return entry;
-}
-
-function chunkPortFor(id: string): Promise<MessagePort> {
-  const promise = chunkPortEntry(id).promise;
-  void promise.then(() => chunkPorts.delete(id));
-  return promise;
-}
-
-/** The "no more chunks" message. */
-const NO_MORE: ToChunkPort = { type: 'chunk', index: -1, ids: null };
-
-/** Inboxes of the shared parses streaming now, by model id (for `stopShare`). */
-const activeInboxes = new Map<string, ChunkInbox>();
-
-/** `stopShare`s that arrived before their parse began streaming chunks. */
-const stoppedShares = new Set<string>();
-
-/** The chunks handed to this worker, in arrival order. */
-class ChunkInbox {
-  private items: ToChunkPort[] = [];
-  private waiter: ((c: ToChunkPort) => void) | null = null;
-
-  push(chunk: ToChunkPort): void {
-    const w = this.waiter;
-    if (w) {
-      this.waiter = null;
-      w(chunk);
-    } else {
-      this.items.push(chunk);
-    }
-  }
-
-  next(): Promise<ToChunkPort> {
-    const c = this.items.shift();
-    if (c) return Promise.resolve(c);
-    return new Promise((resolve) => {
-      this.waiter = resolve;
-    });
-  }
-}
+/** Coordinator ports, chunk inboxes and early stops of shared parses, by token. */
+const shares = new ShareRegistry<MessagePort>();
 
 /**
  * Stream the chunks the coordinator hands out over `port` until it says
- * there are no more. After each chunk its geometry is posted to the main
- * thread and the chunk reported done to the coordinator, which hands out
- * another.
+ * there are no more (or the main thread stops the parse). After each chunk
+ * its geometry is posted to the main thread with the chunk's index, and the
+ * coordinator asked for another.
  */
 async function streamChunks(
   ifc: WebIFC.IfcAPI,
   modelID: number,
-  id: string,
+  token: number,
   port: MessagePort,
   batcher: StreamBatcher<ParsedMesh>,
   timeline: WorkerTimeline,
   role: 'worker' | 'helper' = 'worker',
   writer: PartWriter | null = null,
 ): Promise<void> {
-  const inbox = new ChunkInbox();
+  const inbox = shares.open(token);
   port.onmessage = (e: MessageEvent<ToChunkPort>): void => inbox.push(e.data);
-  activeInboxes.set(id, inbox);
-  if (stoppedShares.delete(id)) inbox.push(NO_MORE);
   const tell = (msg: FromChunkPort): void => port.postMessage(msg);
   tell({ type: 'ready' });
   try {
     for (;;) {
-
       const tw = performance.now();
       const chunk = await inbox.next();
       timeline.add(`${role}.waitChunk`, performance.now() - tw);
       if (chunk.ids === null) break;
       streamIds(ifc, modelID, chunk.ids, batcher, timeline, role);
       const { items, products } = batcher.take();
-      postBatch(id, items, products, timeline, role, writer);
+      // Always posted, even empty: it is what marks the chunk delivered.
+      postBatch(token, items, products, chunk.index, timeline, role, writer);
       tell({ type: 'done', index: chunk.index });
     }
   } finally {
-    activeInboxes.delete(id);
+    shares.close(token);
     port.onmessage = null;
     port.close();
   }
@@ -469,14 +436,15 @@ function streamIds(
 }
 
 function postBatch(
-  id: string,
+  token: number,
   meshes: ParsedMesh[],
   products: number,
+  chunk: number | undefined,
   timeline: WorkerTimeline,
   role: 'worker' | 'helper' = 'worker',
   writer: PartWriter | null = null,
 ): void {
-  if (meshes.length === 0 && products === 0) return;
+  if (chunk === undefined && meshes.length === 0 && products === 0) return;
   if (writer && meshes.length > 0) {
     // Packed (copied) before the buffers are transferred away below.
     const tw = performance.now();
@@ -484,7 +452,10 @@ function postBatch(
     timeline.add(`${role}.cacheWrite`, performance.now() - tw);
   }
   const tp = performance.now();
-  post({ type: 'batch', id, meshes, products }, batchTransferables(meshes));
+  const msg: FromWorker = chunk === undefined
+    ? { type: 'batch', token, meshes, products }
+    : { type: 'batch', token, meshes, products, chunk };
+  post(msg, batchTransferables(meshes));
   timeline.add(`${role}.post`, performance.now() - tp);
   if (meshes.length > 0) timeline.mark(`${role}.firstBatchPosted`);
 }
@@ -495,11 +466,11 @@ function postBatch(
  * from cached meshes, the worker just needs the model open so later
  * `getProps` messages resolve.
  */
-async function handleOpenForProps(id: string, buffer: ArrayBuffer): Promise<void> {
+async function handleOpenForProps(id: string, token: number, buffer: ArrayBuffer): Promise<void> {
   const ifc = await getApi();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
   modelIds.set(id, modelID);
-  post({ type: 'parsed', id });
+  post({ type: 'parsed', token });
 }
 
 /**
@@ -895,17 +866,15 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
   const msg = event.data;
   switch (msg.type) {
     case 'parse': {
-      // A stop meant for an earlier parse of this id must not end this one.
-      stoppedShares.delete(msg.id);
       // Stamped on arrival, before the queue: the gap to `worker.started` is
       // time spent waiting behind other requests.
       const timeline = new WorkerTimeline();
       timeline.mark('worker.received');
       enqueue(async () => {
         try {
-          await handleParse(msg.id, msg.buffer, msg.shared === true, msg.cacheKey, timeline);
+          await handleParse(msg.id, msg.token, msg.buffer, msg.shared === true, msg.cacheKey, timeline);
         } catch (err) {
-          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
         }
       });
       break;
@@ -916,9 +885,9 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       timeline.mark('helper.received');
       enqueue(async () => {
         try {
-          await handleShare(msg.id, msg.buffer, msg.port, msg.worker, msg.cacheKey, timeline);
+          await handleShare(msg.token, msg.buffer, msg.port, msg.worker, msg.cacheKey, timeline);
         } catch (err) {
-          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
         }
       });
       break;
@@ -926,23 +895,20 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
 
     // NOT enqueued: the shared parse waiting for it holds the queue.
     case 'chunkPort':
-      chunkPortEntry(msg.id).resolve(msg.port);
+      shares.providePort(msg.token, msg.port);
       break;
 
     // NOT enqueued either: it must reach the parse that holds the queue.
-    case 'stopShare': {
-      const inbox = activeInboxes.get(msg.id);
-      if (inbox) inbox.push(NO_MORE);
-      else stoppedShares.add(msg.id);
+    case 'stopShare':
+      shares.stop(msg.token);
       break;
-    }
 
     case 'openForProps':
       enqueue(async () => {
         try {
-          await handleOpenForProps(msg.id, msg.buffer);
+          await handleOpenForProps(msg.id, msg.token, msg.buffer);
         } catch (err) {
-          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
         }
       });
       break;

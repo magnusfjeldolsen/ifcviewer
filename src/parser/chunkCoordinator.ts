@@ -9,7 +9,12 @@
  * event loop does nothing else, so a request is answered at once.
  *
  * Each worker asks for `PREFETCH_CHUNKS` when it is ready, and one more each
- * time it finishes one. When every chunk is delivered, every worker still
+ * time it finishes one. A chunk is **delivered** only when the main thread
+ * says its geometry has arrived there (`received`) — not when the worker says
+ * it is done with it, because a worker can die between the two, and the two
+ * messages travel by different routes. That makes a failed worker's chunks
+ * exactly the ones the main thread never got: handed out again, nothing lost,
+ * nothing drawn twice. When every chunk is delivered, every worker still
  * listening is told there is no more (`ids: null`), exactly once.
  */
 
@@ -36,14 +41,15 @@ export class ChunkCoordinator {
     this.settle();
   }
 
-  /** A message from worker `key`'s port. */
+  /** A message from worker `key`'s port: ready for chunks, or done with one and ready for the next. */
   receive(key: number, msg: FromChunkPort): void {
-    if (msg.type === 'ready') {
-      this.serve(key, PREFETCH_CHUNKS);
-    } else {
-      this.plan.done(key, msg.index);
-      this.serve(key, 1);
-    }
+    this.serve(key, msg.type === 'ready' ? PREFETCH_CHUNKS : 1);
+  }
+
+  /** The main thread has the geometry of chunk `index` from worker `key`. */
+  received(key: number, index: number): void {
+    this.plan.done(key, index);
+    this.settle();
   }
 
   /** Worker `key` is gone: its unfinished chunks go to the others. */

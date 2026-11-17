@@ -10,21 +10,33 @@
  * shares the SAME worker instance (passed in via the constructor) so all
  * web-ifc state lives in one place and requests serialize naturally.
  *
+ * ## Tokens
+ *
+ * Every parse and every properties-only open gets a **token**, and every
+ * message about it carries that token. Replies are matched by token, never by
+ * model id: one model id can have several requests in the worker's queue (a
+ * restore that opens a model for properties, finds its cache entry broken and
+ * parses it instead; Reset View twice), and a reply meant for an earlier one
+ * must not settle, or feed, a later one.
+ *
  * ## Helpers
  *
  * A large model's geometry is streamed by more than one worker. The main
  * worker opens the model, lists its elements and starts streaming; helper
- * workers open their own copy of the file meanwhile and join in. This class
- * hands the element ids out in chunks (`ChunkPlan`) to whichever worker asks,
- * and closes the helpers when the list is done. Only the main worker keeps
- * the model: property queries never see a helper. How many helpers a model
- * gets is `planHelpers`' call.
+ * workers open their own copy of the file meanwhile and join in. A small
+ * coordinator worker hands the element ids out in chunks (`ChunkCoordinator`)
+ * to whichever worker asks. A chunk counts as delivered only when its
+ * geometry has reached this thread, which tells the coordinator so: a helper
+ * that fails can then give back exactly the chunks that never arrived —
+ * nothing is lost and nothing is drawn twice. Only the main worker keeps the
+ * model: property queries never see a helper. How many helpers a model gets
+ * is `planHelpers`' call.
  */
 
 import type { FromWorker, ToCoordinator, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamedModel, StreamProgress } from './types';
 import { mergeWorkerTimings, type LoadTimeline, type WorkerTimings } from '../core/LoadTimeline';
-import { planHelpers } from './parsePlan';
+import { HELPER_MEMORY_FACTOR, planHelpers } from './parsePlan';
 import type { CacheWriteReport } from '../services/geometryParts';
 
 /**
@@ -44,11 +56,14 @@ const MAIN = 0;
 /** A parse whose geometry is shared with helper workers. */
 interface SharedParse {
   id: string;
+  token: number;
   buffer: ArrayBuffer;
   helperCount: number;
+  /** Memory the helpers are assumed to hold, against the global budget. */
+  helperBytes: number;
   cacheKey?: string;
   /** Runs the `ChunkCoordinator`. */
-  coordinator: WorkerLike | null;
+  coordinator: WorkerLike;
   /** The coordinator's ends of the workers' ports, until the plan carries them over. */
   coordinatorPorts: MessagePort[] | null;
   /** Helpers that could not be created. */
@@ -66,13 +81,16 @@ interface SharedParse {
 
 /** Collects the workers' cache-write reports for one load. */
 interface CacheReports {
+  /** The model, so removing it can spoil a write that outlived its parse. */
+  id: string;
   expected: number;
   reports: CacheWriteReport[];
   resolve: (report: CacheWriteReport) => void;
 }
 
-/** Per-model in-flight parse / openForProps state. */
+/** Per-request in-flight parse / openForProps state. */
 interface PendingModel {
+  id: string;
   resolve: (model: StreamedModel) => void;
   reject: (err: Error) => void;
   /** Meshes delivered so far. They are not kept: `onBatch` owns them. */
@@ -100,8 +118,11 @@ export interface WorkerIfcParserOptions {
   createHelper?: () => WorkerLike;
   /** Creates the chunk coordinator's worker (tests inject stubs). */
   createCoordinator?: () => WorkerLike;
-  /** How many helpers a file of `bytes` gets. Defaults to `planHelpers`. */
-  helpersFor?: (bytes: number) => number;
+  /**
+   * How many helpers a file of `bytes` gets, given the bytes helpers of other
+   * loads already hold. Defaults to `planHelpers`.
+   */
+  helpersFor?: (bytes: number, helperBytesInUse: number) => number;
 }
 
 /**
@@ -122,12 +143,13 @@ function createCoordinatorWorker(): WorkerLike {
   }) as unknown as WorkerLike;
 }
 
-function defaultHelpersFor(bytes: number): number {
+function defaultHelpersFor(bytes: number, helperBytesInUse: number): number {
   const nav = globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined;
   return planHelpers({
     fileBytes: bytes,
     cores: nav?.hardwareConcurrency,
     deviceMemoryGB: nav?.deviceMemory,
+    helperBytesInUse,
   });
 }
 
@@ -135,10 +157,15 @@ const FAILED_WRITE: CacheWriteReport = { ok: false, parts: 0, bytes: 0 };
 
 export class WorkerIfcParser {
   private worker: WorkerLike;
-  /** In-flight parses / opens, keyed by app-UUID model id. */
-  private pending = new Map<string, PendingModel>();
-  /** Cache writes still outstanding, by model id. Outlive the parse. */
-  private cacheReports = new Map<string, CacheReports>();
+  /** In-flight parses / opens, by token. */
+  private pending = new Map<number, PendingModel>();
+  /** Cache writes still outstanding, by token. Outlive the parse. */
+  private cacheReports = new Map<number, CacheReports>();
+  /** Shared parses whose helpers may still be running, by token. */
+  private shares = new Map<number, SharedParse>();
+  private nextToken = 1;
+  /** Memory all live helpers are assumed to hold (see `HELPER_MEMORY_FACTOR`). */
+  private helperBytesInUse = 0;
   /**
    * Extra message sink — `WorkerPropertyRepository` registers here so it
    * can receive `props` / property-scoped `error` messages over the SAME
@@ -149,9 +176,7 @@ export class WorkerIfcParser {
   private crashListeners: (() => void)[] = [];
   private createHelper: () => WorkerLike;
   private createCoordinator: () => WorkerLike;
-  private helpersFor: (bytes: number) => number;
-  /** Shared parses whose helpers may still be running, by model id. */
-  private shares = new Map<string, SharedParse>();
+  private helpersFor: (bytes: number, helperBytesInUse: number) => number;
 
   /**
    * @param worker  Optional injected worker (tests). Defaults to the real
@@ -169,12 +194,13 @@ export class WorkerIfcParser {
       // every in-flight request hanging. Reject them all and notify
       // listeners (WorkerPropertyRepository) so they can do the same.
       const err = new Error('IFC worker crashed');
-      for (const [id, p] of this.pending) {
-        this.failLoad(id, p);
+      for (const [token, p] of this.pending) {
+        if (p.shared) this.endShare(p.shared, false);
+        this.settleCache(token, FAILED_WRITE, true);
         p.reject(err);
       }
       this.pending.clear();
-      for (const id of [...this.cacheReports.keys()]) this.settleCache(id, FAILED_WRITE, true);
+      for (const token of [...this.cacheReports.keys()]) this.settleCache(token, FAILED_WRITE, true);
       for (const listener of this.crashListeners) listener();
     };
   }
@@ -213,23 +239,37 @@ export class WorkerIfcParser {
     timeline?: LoadTimeline,
     options: ParseOptions = {},
   ): Promise<StreamedModel> {
+    const token = this.nextToken++;
     let cache: Promise<CacheWriteReport> | undefined;
     if (options.cacheKey) {
       cache = new Promise<CacheWriteReport>((resolve) => {
-        this.cacheReports.set(id, { expected: 1, reports: [], resolve });
+        this.cacheReports.set(token, { id, expected: 1, reports: [], resolve });
       });
     }
     const done = new Promise<StreamedModel>((resolve, reject) => {
       const t0 = performance.now();
-      const helperCount = Math.max(0, Math.floor(this.helpersFor(buffer.byteLength)));
-      const p: PendingModel = { resolve, reject, meshCount: 0, loaded: 0, total: 0, onBatch, timeline };
+      const p: PendingModel = { id, resolve, reject, meshCount: 0, loaded: 0, total: 0, onBatch, timeline };
+      let helperCount = Math.max(0, Math.floor(this.helpersFor(buffer.byteLength, this.helperBytesInUse)));
+      // The coordinator first: if it cannot be created, the parse is simply
+      // not shared — the main worker must never be told to wait for chunks
+      // that nobody will hand out.
+      let coordinator: WorkerLike | null = null;
       if (helperCount > 0) {
-        p.shared = {
+        try {
+          coordinator = this.createCoordinator();
+        } catch {
+          helperCount = 0;
+        }
+      }
+      if (coordinator) {
+        const shared: SharedParse = {
           id,
+          token,
           buffer,
           helperCount,
+          helperBytes: helperCount * HELPER_MEMORY_FACTOR * buffer.byteLength,
           cacheKey: options.cacheKey,
-          coordinator: null,
+          coordinator,
           coordinatorPorts: null,
           failedEarly: [],
           helpers: new Map(),
@@ -238,9 +278,11 @@ export class WorkerIfcParser {
           mainDone: false,
           timings: [],
         };
-        this.shares.set(id, p.shared);
+        p.shared = shared;
+        this.shares.set(token, shared);
+        this.helperBytesInUse += shared.helperBytes;
       }
-      this.pending.set(id, p);
+      this.pending.set(token, p);
       // We intentionally do NOT transfer the buffer. The main thread still
       // needs the original alive after this call — for `sessionStore.saveModel`
       // (IDB persistence) and `App.bufferCache` (used by `resetView`).
@@ -248,8 +290,8 @@ export class WorkerIfcParser {
       // save silently fail and turned a reload into "File missing — re-upload"
       // for every model. The worker gets a structured-clone copy; the cost is
       // one copy of the .ifc bytes, which is fine.
-      const msg: ToWorker = { type: 'parse', id, buffer };
-      if (helperCount > 0) msg.shared = true;
+      const msg: ToWorker = { type: 'parse', id, token, buffer };
+      if (p.shared) msg.shared = true;
       if (options.cacheKey) msg.cacheKey = options.cacheKey;
       this.worker.postMessage(msg);
       if (p.shared) this.startSharing(p, p.shared);
@@ -267,55 +309,57 @@ export class WorkerIfcParser {
    * transferred — see the rationale on `parseStreaming`).
    */
   openForProperties(buffer: ArrayBuffer, id: string): Promise<void> {
+    const token = this.nextToken++;
     return new Promise<void>((resolve, reject) => {
-      this.pending.set(id, {
+      this.pending.set(token, {
+        id,
         resolve: () => resolve(),
         reject,
         meshCount: 0,
         loaded: 0,
         total: 0,
       });
-      this.worker.postMessage({ type: 'openForProps', id, buffer });
+      this.worker.postMessage({ type: 'openForProps', id, token, buffer });
     });
   }
 
   /**
    * Close a model in the worker and free its per-model caches. A shared
-   * parse still running is cut short first: the helpers go, and the main
-   * worker is told there is nothing more to stream, so it reaches the close.
-   * Its geometry is not cached.
+   * parse of it still running is cut short first: the helpers go, and the
+   * main worker is told there is nothing more to stream, so it reaches the
+   * close. Its geometry is not cached.
    */
   disposeModel(id: string): void {
-    const shared = this.shares.get(id);
-    if (shared) this.endShare(shared);
-    this.settleCache(id, FAILED_WRITE, true);
+    for (const shared of [...this.shares.values()]) if (shared.id === id) this.endShare(shared);
+    for (const [token, c] of [...this.cacheReports]) if (c.id === id) this.settleCache(token, FAILED_WRITE, true);
     this.worker.postMessage({ type: 'disposeModel', id });
   }
 
   /** Tear down the worker: dispose web-ifc, then terminate the thread. */
   dispose(): void {
-    for (const shared of [...this.shares.values()]) this.endShare(shared);
-    for (const id of [...this.cacheReports.keys()]) this.settleCache(id, FAILED_WRITE, true);
+    for (const shared of [...this.shares.values()]) this.endShare(shared, false);
+    for (const token of [...this.cacheReports.keys()]) this.settleCache(token, FAILED_WRITE, true);
     this.worker.postMessage({ type: 'dispose' });
     this.worker.terminate();
   }
 
   // --- internals -------------------------------------------------------------
 
+
   private onMessage(msg: FromWorker): void {
     switch (msg.type) {
       case 'listed': {
-        const p = this.pending.get(msg.id);
+        const p = this.pending.get(msg.token);
         if (!p) return;
         p.total = msg.total;
         if (p.shared && msg.ids) this.plan(p.shared, msg.ids);
         break;
       }
       case 'batch':
-        this.onBatchMessage(msg);
+        this.onBatchMessage(MAIN, msg);
         break;
       case 'parsed': {
-        const p = this.pending.get(msg.id);
+        const p = this.pending.get(msg.token);
         if (!p) return;
         if (p.shared) {
           if (msg.timings) p.shared.timings.unshift(msg.timings);
@@ -323,23 +367,24 @@ export class WorkerIfcParser {
           this.maybeFinish(p.shared);
           return;
         }
-        this.pending.delete(msg.id);
-        p.resolve({ id: msg.id, meshCount: p.meshCount, timings: msg.timings });
+        this.pending.delete(msg.token);
+        p.resolve({ id: p.id, meshCount: p.meshCount, timings: msg.timings });
         break;
       }
       case 'cacheWritten':
-        this.addCacheReport(msg.id, msg.report);
+        this.addCacheReport(msg.token, msg.report);
         break;
       case 'error': {
-        if (msg.id === undefined) {
+        if (msg.token === undefined) {
           // A property-query error (correlated by reqId) — hand off.
           this.extraSink?.(msg);
           return;
         }
-        const p = this.pending.get(msg.id);
+        const p = this.pending.get(msg.token);
         if (!p) return;
-        this.pending.delete(msg.id);
-        this.failLoad(msg.id, p);
+        this.pending.delete(msg.token);
+        if (p.shared) this.endShare(p.shared);
+        this.settleCache(msg.token, FAILED_WRITE, true);
         p.reject(new Error(msg.message));
         break;
       }
@@ -359,30 +404,33 @@ export class WorkerIfcParser {
     }
   }
 
-  /** A `batch` from any worker taking part in a parse. */
-  private onBatchMessage(msg: Extract<FromWorker, { type: 'batch' }>): void {
-    const p = this.pending.get(msg.id);
+  /** A `batch` from worker `key` of a parse. */
+  private onBatchMessage(key: number, msg: Extract<FromWorker, { type: 'batch' }>): void {
+    const p = this.pending.get(msg.token);
     if (!p) return;
     p.meshCount += msg.meshes.length;
     p.loaded += msg.products;
-    p.onBatch?.(msg.meshes, { loaded: p.loaded, total: Math.max(p.total, p.loaded) });
+    if (msg.meshes.length > 0 || msg.products > 0) {
+      p.onBatch?.(msg.meshes, { loaded: p.loaded, total: Math.max(p.total, p.loaded) });
+    }
+    // The chunk's geometry is here: only now does it count as delivered.
+    if (msg.chunk !== undefined && p.shared && !p.shared.cancelled) {
+      this.tellCoordinator(p.shared, { type: 'received', worker: key, index: msg.chunk });
+    }
   }
 
   /**
-   * Start the coordinator and the helpers, and give every worker its port to
-   * the coordinator. The helpers open their copy of the file while the main
-   * worker opens its own; the chunks come once the main worker has listed the
-   * elements (`plan`).
+   * Start the helpers, and give every worker its port to the coordinator.
+   * The helpers open their copy of the file while the main worker opens its
+   * own; the chunks come once the main worker has listed the elements (`plan`).
    */
   private startSharing(p: PendingModel, shared: SharedParse): void {
-    const { id } = shared;
+    const { id, token } = shared;
     const t0 = performance.now();
     const channels = Array.from({ length: shared.helperCount + 1 }, () => new MessageChannel());
     shared.coordinatorPorts = channels.map((c) => c.port1);
-    const coordinator = this.createCoordinator();
-    shared.coordinator = coordinator;
-    coordinator.onerror = (): void => this.failShare(shared, 'chunk coordinator crashed');
-    this.worker.postMessage({ type: 'chunkPort', id, port: channels[MAIN].port2 }, [channels[MAIN].port2]);
+    shared.coordinator.onerror = (): void => this.failShare(shared, 'chunk coordinator crashed');
+    this.worker.postMessage({ type: 'chunkPort', token, port: channels[MAIN].port2 }, [channels[MAIN].port2]);
     for (let key = 1; key <= shared.helperCount; key++) {
       let helper: WorkerLike;
       try {
@@ -393,14 +441,14 @@ export class WorkerIfcParser {
         continue;
       }
       shared.helpers.set(key, helper);
-      const reports = this.cacheReports.get(id);
+      const reports = this.cacheReports.get(token);
       if (reports) reports.expected++;
       helper.onmessage = (event): void => this.onHelperMessage(shared, key, event.data);
       helper.onerror = (): void => this.helperFailed(shared, key);
       // The file is copied to each helper, like to the main worker (see
       // `parseStreaming`); the port is transferred.
       const port = channels[key].port2;
-      const msg: ToWorker = { type: 'share', id, buffer: shared.buffer, port, worker: key };
+      const msg: ToWorker = { type: 'share', id, token, buffer: shared.buffer, port, worker: key };
       if (shared.cacheKey) msg.cacheKey = shared.cacheKey;
       helper.postMessage(msg, [port]);
     }
@@ -410,7 +458,7 @@ export class WorkerIfcParser {
   /** The main worker has listed the elements: the coordinator can hand them out. */
   private plan(shared: SharedParse, ids: number[]): void {
     const ports = shared.coordinatorPorts;
-    if (!shared.coordinator || !ports) return;
+    if (shared.cancelled || !ports) return;
     shared.coordinatorPorts = null;
     (shared.coordinator as unknown as { postMessage(m: ToCoordinator, t: Transferable[]): void }).postMessage(
       { type: 'plan', ids, ports },
@@ -420,11 +468,13 @@ export class WorkerIfcParser {
     // coordinator must not wait for them.
     for (const key of shared.failedEarly) this.tellCoordinator(shared, { type: 'fail', worker: key });
   }
+
   private onHelperMessage(shared: SharedParse, key: number, msg: FromWorker): void {
     if (!shared.helpers.has(key)) return;
+    if ('token' in msg && msg.token !== shared.token) return;
     switch (msg.type) {
       case 'batch':
-        this.onBatchMessage(msg);
+        this.onBatchMessage(key, msg);
         break;
       case 'shareStreamed':
         if (msg.timings) shared.timings.push(msg.timings);
@@ -434,7 +484,7 @@ export class WorkerIfcParser {
       case 'shareDone':
         shared.streamed.add(key);
         this.terminateHelper(shared, key);
-        this.addCacheReport(shared.id, msg.cache ?? FAILED_WRITE);
+        this.addCacheReport(shared.token, msg.cache ?? FAILED_WRITE);
         this.maybeFinish(shared);
         break;
       case 'error':
@@ -443,29 +493,35 @@ export class WorkerIfcParser {
     }
   }
 
-  /** A helper died or reported an error: its unfinished chunks go to the others. */
+  /**
+   * A helper died or reported an error. The coordinator hands out again every
+   * chunk of it whose geometry this thread has not received — and only those:
+   * it counts what arrived here, not what the helper said it finished.
+   */
   private helperFailed(shared: SharedParse, key: number): void {
     if (!shared.helpers.has(key)) return;
-    this.tellCoordinator(shared, { type: 'fail', worker: key });
+    if (!shared.streamed.has(key)) {
+      // Before the plan, the coordinator has nothing to take back yet; it
+      // hears about this helper together with the plan.
+      if (shared.coordinatorPorts) shared.failedEarly.push(key);
+      else this.tellCoordinator(shared, { type: 'fail', worker: key });
+    }
     shared.streamed.add(key);
     this.terminateHelper(shared, key);
-    this.addCacheReport(shared.id, FAILED_WRITE);
+    this.addCacheReport(shared.token, FAILED_WRITE);
     this.maybeFinish(shared);
   }
 
   /** The coordinator itself failed: nothing can be handed out any more. */
   private failShare(shared: SharedParse, message: string): void {
-    const p = this.pending.get(shared.id);
+    const p = this.pending.get(shared.token);
     if (!p || p.shared !== shared) return;
-    this.pending.delete(shared.id);
-    this.failLoad(shared.id, p);
+    this.pending.delete(shared.token);
+    // The main worker opened the model for this parse; nobody will use it.
+    this.endShare(shared);
+    this.settleCache(shared.token, FAILED_WRITE, true);
+    this.worker.postMessage({ type: 'disposeModel', id: shared.id });
     p.reject(new Error(message));
-  }
-
-  /** A load failed: end its sharing, and its cache write with it. */
-  private failLoad(id: string, p: PendingModel): void {
-    if (p.shared) this.endShare(p.shared);
-    this.settleCache(id, FAILED_WRITE, true);
   }
 
   private terminateHelper(shared: SharedParse, key: number): void {
@@ -476,15 +532,15 @@ export class WorkerIfcParser {
   }
 
   private tellCoordinator(shared: SharedParse, msg: ToCoordinator): void {
-    shared.coordinator?.postMessage(msg as unknown as ToWorker);
+    shared.coordinator.postMessage(msg as unknown as ToWorker);
   }
 
   /**
-   * Stop sharing a parse: helpers and coordinator terminated, and the main
-   * worker told there is nothing more, so it posts `parsed` with what it has
-   * and its queue moves on to whatever comes next (e.g. the model's close).
+   * Stop sharing a parse: helpers and coordinator terminated, and (unless
+   * the worker is gone) the main worker told there is nothing more, so it
+   * posts `parsed` with what it has and its queue moves on.
    */
-  private endShare(shared: SharedParse): void {
+  private endShare(shared: SharedParse, tellWorker = true): void {
     if (shared.cancelled) return;
     shared.cancelled = true;
     for (const key of [...shared.helpers.keys()]) {
@@ -492,9 +548,8 @@ export class WorkerIfcParser {
       this.terminateHelper(shared, key);
     }
     for (let key = 1; key <= shared.helperCount; key++) shared.streamed.add(key);
-    shared.coordinator?.terminate();
-    shared.coordinator = null;
-    this.worker.postMessage({ type: 'stopShare', id: shared.id });
+    shared.coordinator.terminate();
+    if (tellWorker) this.worker.postMessage({ type: 'stopShare', token: shared.token });
     this.forgetShareIfDone(shared);
     this.maybeFinish(shared);
   }
@@ -502,11 +557,10 @@ export class WorkerIfcParser {
   /** A shared parse resolves once the main worker and every helper have delivered. */
   private maybeFinish(shared: SharedParse): void {
     if (!shared.mainDone || shared.streamed.size < shared.helperCount) return;
-    const p = this.pending.get(shared.id);
+    const p = this.pending.get(shared.token);
     if (!p || p.shared !== shared) return;
-    this.pending.delete(shared.id);
-    shared.coordinator?.terminate();
-    shared.coordinator = null;
+    this.pending.delete(shared.token);
+    shared.coordinator.terminate();
     const timings = shared.timings.length ? shared.timings.reduce(mergeWorkerTimings) : undefined;
     if (timings) timings.spans['helpers'] = shared.helperCount;
     p.resolve({ id: shared.id, meshCount: p.meshCount, timings });
@@ -514,13 +568,14 @@ export class WorkerIfcParser {
   }
 
   private forgetShareIfDone(shared: SharedParse): void {
-    if (shared.helpers.size === 0 && !this.pending.has(shared.id) && this.shares.get(shared.id) === shared) {
-      this.shares.delete(shared.id);
-    }
+    if (shared.helpers.size > 0 || this.pending.has(shared.token)) return;
+    if (this.shares.get(shared.token) !== shared) return;
+    this.shares.delete(shared.token);
+    this.helperBytesInUse -= shared.helperBytes;
   }
 
-  private addCacheReport(id: string, report: CacheWriteReport): void {
-    const c = this.cacheReports.get(id);
+  private addCacheReport(token: number, report: CacheWriteReport): void {
+    const c = this.cacheReports.get(token);
     if (!c) return;
     c.reports.push(report);
     if (c.reports.length >= c.expected) {
@@ -532,15 +587,15 @@ export class WorkerIfcParser {
       };
       const error = c.reports.find((r) => r.error)?.error ?? (merged.ok ? undefined : 'a worker stopped before storing its parts');
       if (error) merged.error = error;
-      this.settleCache(id, merged);
+      this.settleCache(token, merged);
     }
   }
 
   /** Resolve a load's cache promise (a failure overrides whatever came in). */
-  private settleCache(id: string, report: CacheWriteReport, failed = false): void {
-    const c = this.cacheReports.get(id);
+  private settleCache(token: number, report: CacheWriteReport, failed = false): void {
+    const c = this.cacheReports.get(token);
     if (!c) return;
-    this.cacheReports.delete(id);
+    this.cacheReports.delete(token);
     c.resolve(failed ? { ...FAILED_WRITE, parts: c.reports.reduce((n, r) => n + r.parts, 0), error: 'the load ended first' } : report);
   }
 }
