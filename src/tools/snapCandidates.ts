@@ -154,10 +154,13 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
     });
   }
 
-  // The surface itself. Always offered, because the cursor is on it by
-  // definition — and snapping to it is what makes a measurement orthogonal.
-  if (allows('face')) {
-  const patch = growCoplanarPatch(geo, faceIndex);
+  // The surface itself. Offered whenever the cursor is on one — and snapping
+  // to it is what makes a measurement orthogonal. `faceIndex` counts the
+  // mesh's triangles, not the welded ones, so it is translated first; a hit
+  // on a triangle that welding collapsed has no plane to offer.
+  const triangle = faceIndex >= 0 && faceIndex < geo.triangleOfFace.length ? geo.triangleOfFace[faceIndex] : -1;
+  if (allows('face') && triangle >= 0) {
+  const patch = growCoplanarPatch(geo, triangle);
   const planeNormal = patch.normal
     .clone()
     .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(matrix))
