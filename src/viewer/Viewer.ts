@@ -666,7 +666,9 @@ export class Viewer {
         focus,
         scale,
         minDistance: this.camera.near * MIN_FOCUS_NEAR_PLANES,
-        maxDistance: maxViewDistance(this.sceneBounds.radius),
+        // From the scene centre, not the focus: how far out you can get should
+        // not depend on what the cursor happens to be over.
+        limit: new THREE.Sphere(this.sceneBounds.center, maxViewDistance(this.sceneBounds.radius)),
       }),
     );
   }

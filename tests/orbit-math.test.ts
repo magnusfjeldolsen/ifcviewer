@@ -261,13 +261,76 @@ describe('dollyTowardPoint', () => {
     expect(back.target.distanceTo(base.target)).toBeCloseTo(0, 8);
   });
 
-  it('honours a maximum distance when zooming out', () => {
+  it('stops zooming out at the limit sphere', () => {
     const focus = v(0, 0, 0);
+    const limit = new THREE.Sphere(v(0, 0, 0), 500);
     let pose = { position: base.position.clone(), target: base.target.clone() };
     for (let i = 0; i < 50; i += 1) {
-      pose = dollyTowardPoint({ ...pose, focus, scale: 2, minDistance: 0.01, maxDistance: 500 });
+      pose = dollyTowardPoint({ ...pose, focus, scale: 2, minDistance: 0.01, limit });
     }
     expect(pose.position.distanceTo(focus)).toBeCloseTo(500, 6);
+  });
+
+  it('measures the limit from the scene, whatever the cursor is over', () => {
+    // Zooming out over a point at the model's edge reaches the same distance
+    // from the model as zooming out over its middle.
+    const centre = v(0, 0, 0);
+    const limit = new THREE.Sphere(centre, 500);
+    const edge = v(40, 0, 0);
+    let pose = { position: v(40, 0, 10), target: v(40, 0, 0) };
+    for (let i = 0; i < 50; i += 1) {
+      pose = dollyTowardPoint({ ...pose, focus: edge, scale: 2, minDistance: 0.01, limit });
+    }
+    expect(pose.position.distanceTo(centre)).toBeCloseTo(500, 6);
+  });
+
+  /**
+   * Reproduced in the running app on Snowdon: zoom out to the limit, pan the
+   * model off to the side, zoom out once more — and the camera was pulled from
+   * 1576 m to 1032 m from the model, because the distance was clamped rather
+   * than the step.
+   */
+  it('never brings the camera closer on a zoom-out, even from beyond the limit', () => {
+    const limit = new THREE.Sphere(v(0, 0, 0), 1032);
+    const position = v(1576, 0, 0);
+    const pose = dollyTowardPoint({
+      position,
+      target: v(1500, 0, 0),
+      focus: v(0, 0, 0),
+      scale: 1 / 0.9,
+      minDistance: 0.01,
+      limit,
+    });
+    expect(pose.position.length()).toBeGreaterThanOrEqual(1576 - 1e-9);
+  });
+
+  it('never pushes the camera back on a zoom-in, even inside the guard', () => {
+    const focus = v(0, 0, 0);
+    const pose = dollyTowardPoint({
+      position: v(0, 0, 0.1),
+      target: v(0, 0, -1),
+      focus,
+      scale: 0.9,
+      minDistance: 0.25,
+    });
+    expect(pose.position.distanceTo(focus)).toBeLessThanOrEqual(0.1 + 1e-12);
+  });
+
+  it('never moves the camera the wrong way, swept across the limits', () => {
+    const limit = new THREE.Sphere(v(0, 0, 0), 100);
+    const focuses = [v(0, 0, 0), v(30, 10, -5), v(-90, 0, 0)];
+    const cameras = [v(0, 0, 5), v(150, 0, 0), v(0, 300, 40), v(-95, 1, 0), v(0.01, 0, 0)];
+    for (const focus of focuses) {
+      for (const position of cameras) {
+        const before = position.distanceTo(focus);
+        for (const scale of [0.5, 0.9, 1 / 0.9, 2]) {
+          const pose = dollyTowardPoint({ position, target: v(0, 0, 0), focus, scale, minDistance: 0.25, limit });
+          const after = pose.position.distanceTo(focus);
+          if (scale < 1) expect(after).toBeLessThanOrEqual(before + 1e-9);
+          else expect(after).toBeGreaterThanOrEqual(before - 1e-9);
+        }
+      }
+    }
   });
 
   it('does nothing when the focus coincides with the camera', () => {
