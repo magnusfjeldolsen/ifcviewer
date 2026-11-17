@@ -49,6 +49,14 @@ export interface SnapGeometry {
   neighbours: Int32Array;
   /** Unit normal per triangle, three floats each. */
   normals: Float32Array;
+  /**
+   * For each triangle of the source geometry — the numbering a raycast's
+   * `faceIndex` uses — its index in `triangles`, or -1 if welding collapsed
+   * it. The two numberings differ as soon as one sliver is dropped, and
+   * reading a `faceIndex` straight into `triangles` then takes every later
+   * triangle's neighbour instead (issue #93).
+   */
+  triangleOfFace: Int32Array;
 }
 
 export interface CoplanarPatch {
@@ -100,12 +108,14 @@ export function buildSnapGeometry(
 
   const rawTriCount = index ? index.count / 3 : posAttr.count / 3;
   const triangles: number[] = [];
+  const triangleOfFace = new Int32Array(rawTriCount).fill(-1);
   for (let t = 0; t < rawTriCount; t++) {
     const a = remap[index ? index.getX(t * 3) : t * 3];
     const b = remap[index ? index.getX(t * 3 + 1) : t * 3 + 1];
     const c = remap[index ? index.getX(t * 3 + 2) : t * 3 + 2];
     // A triangle whose corners welded together has no area and no normal.
     if (a === b || b === c || c === a) continue;
+    triangleOfFace[t] = triangles.length / 3;
     triangles.push(a, b, c);
   }
 
@@ -178,6 +188,7 @@ export function buildSnapGeometry(
     featureEdges: new Uint32Array(featureEdges),
     neighbours,
     normals,
+    triangleOfFace,
   };
 }
 

@@ -145,72 +145,96 @@ export type ResolvedMeasurement =
       distance: number;
       /**
        * Where the reference surface was actually clicked, when it differs
-       * from `from`.
+       * from the end the measurement lands on.
        *
-       * The measurement runs perpendicular from the plane, so it lands at the
+       * The measurement runs perpendicular to the plane, so it lands at the
        * foot — which is not where the user put the marker. Keeping the
        * clicked point means the surface marker can stay where it was put, the
        * way a plate held against a wall stays where you hold it, with the
        * beam striking it square from wherever the target happens to be.
        */
       anchor?: THREE.Vector3;
+      /**
+       * Which end `anchor` belongs to: `'start'` when the surface was picked
+       * first (it lands at `from`), `'end'` when it was picked second (at
+       * `to`). Present exactly when `anchor` is.
+       */
+      anchorAt?: 'start' | 'end';
     }
   | { ok: false; reason: string; angleDeg: number };
 
 /**
- * Turn two picked ends into a measurement. **The first pick is the reference.**
+ * Turn two picked ends into a measurement. **A surface at either end makes it
+ * perpendicular to that surface** (issue #93, restoring the rule from before
+ * 5557a20, at the owner's call).
  *
  * | first | second | result |
  * |---|---|---|
- * | vertex / edge / point | anything | straight-line distance |
- * | surface | vertex / edge / point | perpendicular from that surface |
- * | surface | surface | between the planes, refused if not parallel |
+ * | vertex / edge / point | vertex / edge / point | straight-line distance |
+ * | vertex / edge / point | surface | perpendicular to the second surface |
+ * | surface | vertex / edge / point | perpendicular to the first surface |
+ * | surface | surface | between the planes along the second one's normal, refused if not parallel |
  *
- * Order carries the intent, which is what removes the ambiguity: the same two
- * clicks in the other order ask a different question and get a different
- * answer. Nothing is hidden and nothing is guessed — but it does mean the
- * drawing has to show which reading happened, or the ambiguity simply moves
- * from the rule to the screen.
- *
- * `from` always belongs to the first pick. When that pick is a surface,
- * `from` is the point on it that the measurement actually runs to, which is
- * not necessarily where the cursor was: perpendicular means perpendicular.
+ * `from` always belongs to the first pick and `to` to the second, so each
+ * end keeps the snap glyph and colour it was placed with. The end that is a
+ * surface is the foot of the perpendicular — the point on the plane the
+ * measurement actually runs to, which is not necessarily where the cursor
+ * was: perpendicular means perpendicular. Where the surface was clicked is
+ * kept as `anchor`, with `anchorAt` naming its end.
  */
 export function resolveMeasurement(
   a: SnapPoint,
   b: SnapPoint,
   toleranceDeg: number = PARALLEL_TOLERANCE_DEG,
 ): ResolvedMeasurement {
-  // Only the first pick can make a measurement perpendicular. A surface
-  // picked second is just a point on a surface.
-  if (!a.planeNormal) {
+  if (b.planeNormal) {
+    const planeB = { point: b.position, normal: b.planeNormal };
+
+    if (a.planeNormal) {
+      // Two surfaces: from where the first was clicked, straight onto the
+      // second. The second one wins because that is the order the question
+      // is usually asked in — "this slab, off that one".
+      const result = measurePlaneToPlane({ point: a.position, normal: a.planeNormal }, planeB, toleranceDeg);
+      if (!result.ok) return result;
+      return { ok: true, mode: 'orthogonal', from: result.from, to: result.to, distance: result.distance };
+    }
+
+    // Drop the first point onto the second surface. The point stays where it
+    // was picked; the surface end lands at the foot beneath it.
+    const foot = footOnPlane(a.position, planeB);
     return {
       ok: true,
-      mode: 'direct',
+      mode: 'orthogonal',
       from: a.position.clone(),
-      to: b.position.clone(),
-      distance: a.position.distanceTo(b.position),
+      to: foot,
+      distance: a.position.distanceTo(foot),
+      anchor: b.position.clone(),
+      anchorAt: 'end',
     };
   }
 
-  const planeA = { point: a.position, normal: a.planeNormal };
-
-  if (b.planeNormal) {
-    const result = measurePlaneToPlane(planeA, { point: b.position, normal: b.planeNormal }, toleranceDeg);
-    if (!result.ok) return result;
-    return { ok: true, mode: 'orthogonal', from: result.from, to: result.to, distance: result.distance };
+  if (a.planeNormal) {
+    // Drop the second point onto the first surface. The segment that gets
+    // drawn is the perpendicular itself, so it explains the number without
+    // any extra geometry: it starts on the surface and ends at what was
+    // measured.
+    const foot = footOnPlane(b.position, { point: a.position, normal: a.planeNormal });
+    return {
+      ok: true,
+      mode: 'orthogonal',
+      from: foot,
+      to: b.position.clone(),
+      distance: foot.distanceTo(b.position),
+      anchor: a.position.clone(),
+      anchorAt: 'start',
+    };
   }
 
-  // Drop the second point onto the reference plane. The segment that gets
-  // drawn is the perpendicular itself, so it explains the number without any
-  // extra geometry: it starts on the surface and ends at what was measured.
-  const foot = footOnPlane(b.position, planeA);
   return {
     ok: true,
-    mode: 'orthogonal',
-    from: foot,
+    mode: 'direct',
+    from: a.position.clone(),
     to: b.position.clone(),
-    distance: foot.distanceTo(b.position),
-    anchor: a.position.clone(),
+    distance: a.position.distanceTo(b.position),
   };
 }

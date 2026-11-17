@@ -338,9 +338,9 @@ export class MeasurementTool implements Tool {
         return;
       }
 
-      // `from` always belongs to the first pick, so the ends map straight
-      // across — one of the things that fell out of making order carry the
-      // intent rather than trying to infer it.
+      // `from` always belongs to the first pick and `to` to the second, so
+      // the ends map straight across; `anchorAt` says which of them keeps
+      // its surface plate where it was clicked.
       const startSnapEnd = this.startEnd;
       const endSnapEnd = endFrom(snap);
 
@@ -350,6 +350,7 @@ export class MeasurementTool implements Tool {
         startSnap: startSnapEnd ?? undefined,
         endSnap: endSnapEnd ?? undefined,
         anchor: resolved.anchor,
+        anchorAt: resolved.anchorAt,
       });
       this.clearPendingStart();
       this.view.hidePreview();
@@ -403,18 +404,18 @@ export class MeasurementTool implements Tool {
     if (!this.pickingEnd || !this.startSnap) return;
 
     // Preview what will actually be recorded, not a line between the two
-    // clicks. With the first pick as the reference, a surface picked first
-    // means the measurement runs perpendicular from it and lands somewhere
-    // the cursor never was — so a straight line from click to cursor would
-    // show the wrong shape AND the wrong number, right up until the click
-    // replaced it with something else.
+    // clicks. A surface at either end means the measurement runs
+    // perpendicular to it and lands somewhere the cursor (or the first click)
+    // never was — so a straight line from click to cursor would show the
+    // wrong shape AND the wrong number, right up until the click replaced it
+    // with something else.
     const resolved = resolveMeasurement(this.startSnap, {
       position: point,
       planeNormal: snap?.planeNormal,
     });
 
     if (resolved.ok) {
-      this.view.showPreview(resolved.from, resolved.to, resolved.anchor);
+      this.view.showPreview(resolved.from, resolved.to, resolved.anchor, resolved.anchorAt);
     } else {
       // Two surfaces that are not parallel. Showing nothing says "this pick
       // will not work" before the click does; the reason follows on click.

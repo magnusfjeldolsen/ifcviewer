@@ -99,4 +99,15 @@ describe('measurementViews', () => {
     expect(view.endSnap.target).toBe('edge');
     expect(view.endSnap.direction?.x).toBeCloseTo(1, 6);
   });
+
+  it('carries the plate and which end it belongs to', () => {
+    const r = record('a');
+    r.anchor = new THREE.Vector3(4, 0, 4);
+    r.anchorAt = 'end';
+
+    const [view] = measurementViews([r], allVisible);
+
+    expect(view.anchor).toBe(r.anchor);
+    expect(view.anchorAt).toBe('end');
+  });
 });

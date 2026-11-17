@@ -136,6 +136,73 @@ describe('snapCandidatesAt', () => {
     expect(Math.abs((snapPayload(face!) as SnapPayload).planeNormal!.y)).toBeCloseTo(1, 5);
   });
 
+  // Issue #93. Snapping welds corners and drops the slivers that collapse, so
+  // its triangles are numbered differently from the mesh's. The hit's
+  // `faceIndex` counts the mesh's triangles; reading it as a snap triangle
+  // took the normal from whichever surface came next, and a measurement off
+  // a floor ran along a wall's normal instead.
+  it('takes the normal of the triangle that was hit, even after a sliver is dropped', () => {
+    const { camera } = scene();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(
+        [
+          // 0: a sliver whose corners weld together — no area once welded.
+          5, 5, 5, 5.000001, 5, 5, 6, 5, 5,
+          // 1: a wall in the x=2 plane, normal along x.
+          2, 0, 0, 2, 1, 0, 2, 0, 1,
+          // 2: a floor in the y=-1 plane, normal along y.
+          0, -1, 0, 0, -1, 1, 1, -1, 0,
+        ],
+        3,
+      ),
+    );
+    const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+    mesh.updateMatrixWorld(true);
+
+    const normalAt = (faceIndex: number) => {
+      const found = snapCandidatesAt({
+        mesh,
+        faceIndex,
+        hitPoint: new THREE.Vector3(0.2, -1, 0.2),
+        cursor: { x: 5, y: 5 },
+        camera,
+        canvas: CANVAS,
+      });
+      const face = found.find((c) => snapPayload(c)?.target === 'face');
+      return (snapPayload(face!) as SnapPayload).planeNormal!;
+    };
+
+    expect(Math.abs(normalAt(1).x)).toBeCloseTo(1, 5);
+    expect(Math.abs(normalAt(2).y)).toBeCloseTo(1, 5);
+  });
+
+  // A hit can only land on a triangle with area, but if it ever lands on one
+  // that welding collapsed there is no plane to offer — the raw point remains.
+  it('offers no surface when the hit triangle collapsed under welding', () => {
+    const { camera } = scene();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([5, 5, 5, 5.000001, 5, 5, 6, 5, 5, 0, -1, 0, 0, -1, 1, 1, -1, 0], 3),
+    );
+    const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+    mesh.updateMatrixWorld(true);
+
+    const found = snapCandidatesAt({
+      mesh,
+      faceIndex: 0,
+      hitPoint: new THREE.Vector3(5.5, 5, 5),
+      cursor: { x: 5, y: 5 },
+      camera,
+      canvas: CANVAS,
+    });
+
+    expect(found.some((c) => snapPayload(c)?.target === 'face')).toBe(false);
+    expect(found.some((c) => snapPayload(c)?.target === 'point')).toBe(true);
+  });
+
   it('puts an edge snap on the edge, not at the cursor', () => {
     // Cursor near the middle of the bottom edge, which runs (0,0,0)→(1,0,0).
     const { mesh, camera } = scene();

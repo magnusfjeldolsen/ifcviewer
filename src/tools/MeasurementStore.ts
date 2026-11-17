@@ -51,10 +51,16 @@ export interface MeasurementRecord {
   endSnap: MeasurementEnd;
   /**
    * Where the reference surface was clicked, when that is not where the
-   * measurement starts. Present only for a measurement taken perpendicular
-   * from a surface, and only when the two differ.
+   * measurement lands on it. Present only for a measurement taken
+   * perpendicular to a surface.
    */
   anchor?: THREE.Vector3;
+  /**
+   * Which end `anchor` belongs to: the start when the surface was picked
+   * first, the end when it was picked second (issue #93). Present exactly
+   * when `anchor` is; sessions from before #93 only had start plates.
+   */
+  anchorAt?: 'start' | 'end';
 }
 
 /** What `add` needs beyond the two points. All optional; a bare call is a plain point-to-point. */
@@ -63,6 +69,8 @@ export interface MeasurementOptions {
   startSnap?: MeasurementEnd;
   endSnap?: MeasurementEnd;
   anchor?: THREE.Vector3;
+  /** Which end `anchor` belongs to. Defaults to the start. */
+  anchorAt?: 'start' | 'end';
 }
 
 /** The wire form persisted in the session (D6). Plain JSON, no THREE types. */
@@ -76,6 +84,8 @@ export interface SerializedMeasurement {
   startSnap?: SerializedEnd;
   endSnap?: SerializedEnd;
   anchor?: [number, number, number];
+  /** Absent in sessions written before #93, whose plates were all at the start. */
+  anchorAt?: 'start' | 'end';
 }
 
 export interface SerializedEnd {
@@ -156,6 +166,7 @@ export class MeasurementStore {
       startSnap: cloneEnd(options.startSnap) ?? { ...PLAIN_END },
       endSnap: cloneEnd(options.endSnap) ?? { ...PLAIN_END },
       anchor: options.anchor?.clone(),
+      anchorAt: options.anchor ? (options.anchorAt ?? 'start') : undefined,
     };
     this.records.push(record);
     this.notify();
@@ -266,7 +277,12 @@ export class MeasurementStore {
       mode: r.mode,
       startSnap: serializeEnd(r.startSnap),
       endSnap: serializeEnd(r.endSnap),
-      ...(r.anchor ? { anchor: [r.anchor.x, r.anchor.y, r.anchor.z] as [number, number, number] } : {}),
+      ...(r.anchor
+        ? {
+            anchor: [r.anchor.x, r.anchor.y, r.anchor.z] as [number, number, number],
+            anchorAt: r.anchorAt ?? 'start',
+          }
+        : {}),
     }));
   }
 
@@ -295,6 +311,7 @@ export class MeasurementStore {
         startSnap: deserializeEnd(e.startSnap),
         endSnap: deserializeEnd(e.endSnap),
         anchor: e.anchor ? new THREE.Vector3(...e.anchor) : undefined,
+        anchorAt: e.anchor ? (e.anchorAt === 'end' ? 'end' : 'start') : undefined,
       }));
     this.selectedIds.clear();
     this.notify();

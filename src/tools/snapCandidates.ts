@@ -154,10 +154,13 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
     });
   }
 
-  // The surface itself. Always offered, because the cursor is on it by
-  // definition — and snapping to it is what makes a measurement orthogonal.
-  if (allows('face')) {
-  const patch = growCoplanarPatch(geo, faceIndex);
+  // The surface itself. Offered whenever the cursor is on one — and snapping
+  // to it is what makes a measurement orthogonal. `faceIndex` counts the
+  // mesh's triangles, not the welded ones, so it is translated first; a hit
+  // on a triangle that welding collapsed has no plane to offer.
+  const triangle = faceIndex >= 0 && faceIndex < geo.triangleOfFace.length ? geo.triangleOfFace[faceIndex] : -1;
+  if (allows('face') && triangle >= 0) {
+  const patch = growCoplanarPatch(geo, triangle);
   const planeNormal = patch.normal
     .clone()
     .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(matrix))
@@ -230,15 +233,17 @@ export function orderSnapCandidates(
       (a, b) => a.priority - b.priority || byDistance(a, b),
     );
     const winner = contenders[0];
-    const rest = features.filter((c) => c !== winner);
-    features.length = 0;
-    features.push(winner, ...rest);
+    // Moved to the front in place. Not `push(winner, ...rest)`: a dense piece
+    // can put hundreds of thousands of corners in range, and spreading that
+    // many arguments overflows the stack.
+    features.splice(features.indexOf(winner), 1);
+    features.unshift(winner);
   }
 
   // Surface before raw point: the escape hatch is always the last stop.
   fallbacks.sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : 1));
 
-  return [...features, ...fallbacks];
+  return features.concat(fallbacks);
 }
 
 /** The snap payload of a candidate, or null if it is not a snap. */
