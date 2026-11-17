@@ -24,9 +24,10 @@ export class StatsOverlay {
     this.el.className = 'stats-overlay';
     Object.assign(this.el.style, {
       position: 'fixed',
-      top: '8px',
-      left: '50%',
-      transform: 'translateX(-50%)',
+      // Bottom-left, above the cookie button: the toolbar, model tree,
+      // inspector and action tray hold the other corners.
+      bottom: '64px',
+      left: '12px',
       zIndex: '1000',
       padding: '6px 10px',
       background: 'rgba(17, 24, 39, 0.85)',
