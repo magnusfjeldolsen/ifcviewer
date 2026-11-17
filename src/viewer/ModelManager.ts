@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { ParsedMesh, ParsedModel } from '../parser/types';
-import { ModelBatch, type ElementDrawState, type ModelBatchOptions } from './ModelBatch';
+import { ModelBatch, SEE_THROUGH_SETTLE_MS, type ElementDrawState, type ModelBatchOptions } from './ModelBatch';
 
 export interface ModelEntry {
   id: string;
@@ -239,6 +239,28 @@ export class ModelManager {
     }
     return box;
   }
+
+  /**
+   * Order see-through drawing back to front for `camera`; call before each
+   * frame. Asks for one more frame once the view has rested, when the
+   * pieces inside the see-through draws get sorted too (see
+   * `ModelBatch.sortSeeThrough`).
+   */
+  sortSeeThrough(camera: THREE.Camera): void {
+    const now = performance.now();
+    let later = false;
+    for (const entry of this.models.values()) {
+      if (entry.visible && entry.batch.sortSeeThrough(camera, now)) later = true;
+    }
+    if (later && !this.seeThroughTimer) {
+      this.seeThroughTimer = setTimeout(() => {
+        this.seeThroughTimer = null;
+        this.requestRender?.();
+      }, SEE_THROUGH_SETTLE_MS + 10);
+    }
+  }
+
+  private seeThroughTimer: ReturnType<typeof setTimeout> | null = null;
 
   clear(): void {
     for (const id of Array.from(this.models.keys())) {

@@ -53,6 +53,12 @@ export const DEFAULT_CHUNK_VERTEX_CAP = 1 << 18;
  */
 export const ANCHOR_REACH = 1024;
 
+/** How long the view must rest before see-through pieces are re-sorted. */
+export const SEE_THROUGH_SETTLE_MS = 120;
+
+/** Depth bands the see-through pieces are drawn in, far to near. */
+export const SEE_THROUGH_BANDS = 32;
+
 /** Opacity below this counts as see-through. */
 const OPAQUE_ALPHA = 0.999;
 
@@ -113,6 +119,15 @@ interface Chunk {
   mesh: ChunkMesh;
   overlay: THREE.Mesh | null;
   overlayDirty: boolean;
+  /** The see-through pieces the overlay draws, in the order it draws them. */
+  overlayPieces: Int32Array;
+  /**
+   * Once sorted for a view: the overlay cut into depth bands, one draw each,
+   * sharing its buffers (see `sortSeeThrough`). Empty while unsorted.
+   */
+  bands: THREE.Mesh[];
+  /** A see-through chunk's triangles sorted for the view, drawn by its bands. */
+  sortedIndex: THREE.BufferAttribute | null;
   /** Set when a split found no axis to cut along; the chunk just grows. */
   unsplittable: boolean;
   /** One big piece, sized exactly, outside the k-d tree: never grown or split. */
@@ -272,6 +287,10 @@ function makePieceMaterial(pass: 'opaque' | 'transparent', uniforms: SharedUnifo
     // See-through pieces are not sorted among themselves inside a chunk, so
     // they must not hide each other.
     depthWrite: pass === 'opaque',
+    // A double-sided see-through material is otherwise drawn twice (back
+    // faces, then front) per object; its pieces are sorted instead, and
+    // one pass per depth band halves the draws (see `sortSeeThrough`).
+    forceSinglePass: true,
   });
   material.onBeforeCompile = (shader) => {
     shader.uniforms.pieceState = uniforms.pieceState;
@@ -950,6 +969,9 @@ export class ModelBatch {
       mesh,
       overlay: null,
       overlayDirty: false,
+      overlayPieces: new Int32Array(0),
+      bands: [],
+      sortedIndex: null,
       unsplittable: false,
       solo: false,
     };
@@ -1180,6 +1202,11 @@ export class ModelBatch {
   }
 
   private finishChunkSync(chunk: Chunk): void {
+    // A see-through chunk's sorted copy no longer covers what it holds.
+    if (chunk.transparent && chunk.bands.length) {
+      this.dropBands(chunk);
+      this.seeThroughSortedFor = null;
+    }
     const g = chunk.geometry!;
     g.setDrawRange(0, chunk.indexCount);
     // The geometry's bounds are in chunk space; `chunk.box` is in the world.
@@ -1192,6 +1219,7 @@ export class ModelBatch {
   private rebuildOverlay(chunk: Chunk): void {
     chunk.overlayDirty = false;
     if (chunk.transparent || !chunk.geometry) return;
+    this.dropBands(chunk);
     let total = 0;
     for (const p of chunk.pieces) {
       if (this.effectiveAlpha(p) < OPAQUE_ALPHA) total += this.pieceIndexCount[p];
@@ -1205,14 +1233,12 @@ export class ModelBatch {
       }
       return;
     }
+    const pieces = chunk.pieces.filter((p) => this.effectiveAlpha(p) < OPAQUE_ALPHA);
+    chunk.overlayPieces = Int32Array.from(pieces);
     const index = new Uint32Array(total);
-    let n = 0;
-    for (const p of chunk.pieces) {
-      if (this.effectiveAlpha(p) >= OPAQUE_ALPHA) continue;
-      const s = this.pieceIndexStart[p];
-      index.set(chunk.index.subarray(s, s + this.pieceIndexCount[p]), n);
-      n += this.pieceIndexCount[p];
-    }
+    this.writeOverlayIndex(chunk, index);
+    // Drawn in arrival order until the next settled view sorts it.
+    this.seeThroughSortedFor = null;
     const g = new THREE.BufferGeometry();
     const src = chunk.geometry;
     g.setAttribute('position', src.getAttribute('position'));
@@ -1225,6 +1251,7 @@ export class ModelBatch {
       // Only the index is the overlay's own; the attributes belong to the chunk.
       disposeIndexOnly(chunk.overlay.geometry);
       chunk.overlay.geometry = g;
+      chunk.overlay.visible = true;
     } else {
       const overlay = new THREE.Mesh(g, this.transparentMaterial);
       overlay.matrixAutoUpdate = false;
@@ -1238,7 +1265,177 @@ export class ModelBatch {
     }
   }
 
+  /** Write the overlay's pieces' triangles into `index`, in `overlayPieces` order. */
+  private writeOverlayIndex(chunk: Chunk, index: Uint32Array): void {
+    let n = 0;
+    for (const p of chunk.overlayPieces) {
+      const s = this.pieceIndexStart[p];
+      index.set(chunk.index.subarray(s, s + this.pieceIndexCount[p]), n);
+      n += this.pieceIndexCount[p];
+    }
+  }
+
+  // ── See-through order ────────────────────────────────────────
+
+  /** Camera pose (position, forward) seen on the last frame. */
+  private seeThroughLastView: number[] | null = null;
+  /** Pose the overlays' pieces were last sorted for, or null when unsorted. */
+  private seeThroughSortedFor: number[] | null = null;
+  /** When the view last moved (ms, caller's clock). */
+  private seeThroughMovedAt = 0;
+
+  /**
+   * Order what is drawn see-through back to front for this view, the way
+   * three sorts separate see-through objects: see-through layers blend over
+   * each other, so the nearest must be drawn last or what is behind it
+   * shows through too strongly.
+   *
+   * A chunk is a region of the model, and the see-through parts of
+   * neighbouring chunks overlap in depth, so ordering whole chunks is not
+   * enough. Once the view has rested for `SEE_THROUGH_SETTLE_MS`, every
+   * overlay's pieces are sorted far to near by their centres and the
+   * overlay is cut into `SEE_THROUGH_BANDS` depth bands shared by the whole
+   * model — one draw per band, all sharing the overlay's buffers — and the
+   * bands draw farthest first, across all chunks. While the view moves the
+   * last order is kept, so an orbit costs nothing extra; until a first sort,
+   * whole overlays and glass chunks are ordered by their bounds.
+   *
+   * Returns true when it is waiting for the view to settle: the caller
+   * should draw another frame after `SEE_THROUGH_SETTLE_MS`.
+   */
+  sortSeeThrough(camera: THREE.Camera, now: number): boolean {
+    camera.updateMatrixWorld();
+    const e = camera.matrixWorld.elements;
+    const view = [e[12], e[13], e[14], -e[8], -e[9], -e[10]];
+    const [px, py, pz, dx, dy, dz] = view;
+    const depthOf = (x: number, y: number, z: number) => (x - px) * dx + (y - py) * dy + (z - pz) * dz;
+    const boxDepth = (b: THREE.Box3) =>
+      depthOf((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2);
+
+    let overlays = false;
+    for (const chunk of this.chunks) if (chunk.overlay || chunk.transparent) overlays = true;
+    if (!this.seeThroughSortedFor) {
+      const drawn: Array<{ mesh: THREE.Mesh; depth: number }> = [];
+      for (const chunk of this.chunks) {
+        if (chunk.transparent) drawn.push({ mesh: chunk.mesh, depth: boxDepth(chunk.box) });
+        if (chunk.overlay) drawn.push({ mesh: chunk.overlay, depth: boxDepth(chunk.box) });
+      }
+      drawn.sort((a, b) => b.depth - a.depth);
+      // Negative, so everything else see-through (tools, markers) still draws after.
+      drawn.forEach((d, i) => (d.mesh.renderOrder = i - drawn.length));
+    }
+    if (!overlays) return false;
+
+    const last = this.seeThroughLastView;
+    this.seeThroughLastView = view;
+    if (!last || view.some((v, i) => v !== last[i])) {
+      this.seeThroughMovedAt = now;
+      return true;
+    }
+    const sorted = this.seeThroughSortedFor;
+    if (sorted && view.every((v, i) => v === sorted[i])) return false;
+    if (now - this.seeThroughMovedAt < SEE_THROUGH_SETTLE_MS) return true;
+
+    // Depth of every see-through piece, and the range they span.
+    const b = this.pieceBox;
+    const keysOf = new Map<Chunk, Float64Array>();
+    let near = Infinity;
+    let far = -Infinity;
+    for (const chunk of this.chunks) {
+      if (!chunk.overlay && !chunk.transparent) continue;
+      // A see-through chunk sorts all of its pieces, an opaque one its overlay's.
+      if (chunk.transparent && chunk.overlayPieces.length !== chunk.pieces.length) {
+        chunk.overlayPieces = Int32Array.from(chunk.pieces);
+      }
+      const pieces = chunk.overlayPieces;
+      const keys = new Float64Array(pieces.length);
+      for (let i = 0; i < pieces.length; i++) {
+        const o = pieces[i] * 6;
+        keys[i] = depthOf((b[o] + b[o + 3]) / 2, (b[o + 1] + b[o + 4]) / 2, (b[o + 2] + b[o + 5]) / 2);
+        if (keys[i] < near) near = keys[i];
+        if (keys[i] > far) far = keys[i];
+      }
+      keysOf.set(chunk, keys);
+    }
+    const bands = SEE_THROUGH_BANDS;
+    const span = Math.max(far - near, 1e-9);
+    /** 0 is the farthest band. */
+    const bandOf = (d: number) => Math.min(bands - 1, Math.max(0, Math.floor(((far - d) / span) * bands)));
+
+    for (const chunk of this.chunks) {
+      const keys = keysOf.get(chunk);
+      if (!keys) continue;
+      const pieces = chunk.overlayPieces;
+      const order = Array.from(pieces.keys()).sort((i, j) => keys[j] - keys[i]);
+      chunk.overlayPieces = Int32Array.from(order, (i) => pieces[i]);
+      let index: THREE.BufferAttribute;
+      if (chunk.transparent) {
+        if (!chunk.sortedIndex || chunk.sortedIndex.count !== chunk.indexCount) {
+          chunk.sortedIndex = new THREE.BufferAttribute(new Uint32Array(chunk.indexCount), 1);
+        }
+        index = chunk.sortedIndex;
+        // Its own draw would repeat what the bands draw.
+        chunk.geometry!.setDrawRange(0, 0);
+      } else {
+        index = chunk.overlay!.geometry.getIndex()!;
+      }
+      this.writeOverlayIndex(chunk, index.array as Uint32Array);
+      index.needsUpdate = true;
+
+      if (chunk.bands.length === 0) chunk.bands = Array.from({ length: bands }, () => this.newBand(chunk));
+      let start = 0;
+      let k = 0;
+      for (let band = 0; band < bands; band++) {
+        let count = 0;
+        while (k < order.length && bandOf(keys[order[k]]) === band) count += this.pieceIndexCount[pieces[order[k++]]];
+        const mesh = chunk.bands[band];
+        mesh.geometry.setDrawRange(start, count);
+        mesh.visible = count > 0;
+        mesh.renderOrder = band - bands;
+        start += count;
+      }
+      if (chunk.overlay) chunk.overlay.visible = false;
+    }
+    this.seeThroughSortedFor = view;
+    return false;
+  }
+
+  /** One depth band of a chunk's see-through draw: part of its sorted index. */
+  private newBand(chunk: Chunk): THREE.Mesh {
+    const src = chunk.geometry!;
+    const g = new THREE.BufferGeometry();
+    for (const name of ['position', 'normal', 'pieceIndex']) g.setAttribute(name, src.getAttribute(name));
+    g.setIndex(chunk.transparent ? chunk.sortedIndex : chunk.overlay!.geometry.getIndex());
+    g.boundingBox = src.boundingBox!.clone();
+    g.boundingSphere = src.boundingSphere!.clone();
+    const mesh = new THREE.Mesh(g, this.transparentMaterial);
+    mesh.matrixAutoUpdate = false;
+    mesh.position.copy(chunk.anchor);
+    mesh.updateMatrix();
+    mesh.raycast = noRaycast;
+    mesh.userData.isSeeThroughBand = true;
+    this.group.add(mesh);
+    mesh.updateMatrixWorld(true);
+    return mesh;
+  }
+
+  private dropBands(chunk: Chunk): void {
+    chunk.bands.forEach((mesh, i) => {
+      this.group.remove(mesh);
+      // Everything it lists is borrowed from the overlay and the chunk —
+      // except a see-through chunk's sorted index, which the first band
+      // takes with it, so its GPU copy is freed too.
+      if (!(chunk.transparent && i === 0)) mesh.geometry.setIndex(null);
+      disposeIndexOnly(mesh.geometry);
+    });
+    if (chunk.transparent) chunk.sortedIndex = null;
+    chunk.bands = [];
+    if (chunk.overlay) chunk.overlay.visible = true;
+    if (chunk.transparent && chunk.geometry) chunk.geometry.setDrawRange(0, chunk.indexCount);
+  }
+
   private disposeChunk(chunk: Chunk): void {
+    this.dropBands(chunk);
     this.group.remove(chunk.mesh);
     chunk.geometry?.dispose();
     chunk.geometry = null;

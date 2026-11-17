@@ -318,6 +318,9 @@ export class App {
     // arrives (see SceneBounds). Sizes the clipping planes, so neither a
     // streaming load nor unhiding can reveal a cut.
     this.viewer.setSceneBoundsProvider(() => this.sceneBounds.box());
+    // See-through elements blend in the right order only if drawn back to
+    // front; the batches sort themselves for the view before each frame.
+    this.viewer.onUpdate(() => this.modelManager.sortSeeThrough(this.viewer.getCamera()));
     this.sceneBounds.onChange(() => this.viewer.refreshSceneBounds());
 
     // Marquee selection (Alt-drag, window + crossing). Same dependency

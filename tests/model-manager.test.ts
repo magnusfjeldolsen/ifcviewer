@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import { ANCHOR_REACH, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
+import { ANCHOR_REACH, SEE_THROUGH_SETTLE_MS, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
 import { boxMesh, boxModel, cameraLookingAt, makeModelManager } from './helpers/models';
 
 /** Every chunk mesh of every model in the scene. */
@@ -729,6 +729,50 @@ describe('ModelBatch — see-through overlays', () => {
     // The renderer frees every attribute a disposed geometry lists.
     expect(freed).toEqual([[]]);
   });
+});
+
+describe('ModelBatch — see-through order', () => {
+  /** World z of the first corner each visible band draws, in draw order. */
+  function drawOrderZ(batch: ModelBatch): number[] {
+    const bands = batch.group.children.filter((o) => o.userData.isSeeThroughBand && o.visible) as THREE.Mesh[];
+    bands.sort((a, b) => a.renderOrder - b.renderOrder);
+    return bands.map((m) => {
+      const g = m.geometry;
+      const v = g.getIndex()!.getX(g.drawRange.start);
+      return g.getAttribute('position').getZ(v) + m.position.z;
+    });
+  }
+
+  for (const glass of [false, true]) {
+    it(`draws ${glass ? 'glass' : 'elements made see-through'} back to front once the view rests`, () => {
+      const color = glass ? { r: 0.6, g: 0.8, b: 1, a: 0.3 } : undefined;
+      // Three boxes in a row along z, far apart, arriving out of order.
+      const { modelManager } = makeModelManager([
+        { id: 'm', meshes: [boxMesh(1, { at: [0, 0, 20], color }), boxMesh(2, { at: [0, 0, -20], color }), boxMesh(3, { at: [0, 0, 0], color })] },
+      ]);
+      const batch = modelManager.getModel('m')!.batch;
+      if (!glass) modelManager.setOpacity('m', [1, 2, 3], 0.25);
+
+      const fromFront = cameraLookingAt([0, 0, 100], [0, 0, 0]);
+      expect(batch.sortSeeThrough(fromFront, 0)).toBe(true); // a new view: wait for it to rest
+      expect(batch.sortSeeThrough(fromFront, 50)).toBe(true);
+      expect(batch.sortSeeThrough(fromFront, 50 + SEE_THROUGH_SETTLE_MS)).toBe(false);
+      const front = drawOrderZ(batch);
+      expect(front).toHaveLength(3);
+      expect(front[0]).toBeLessThan(front[1]); // farthest (lowest z) first
+      expect(front[1]).toBeLessThan(front[2]);
+
+      const fromBehind = cameraLookingAt([0, 0, -100], [0, 0, 0]);
+      batch.sortSeeThrough(fromBehind, 1000);
+      // Moving keeps the last order…
+      expect(drawOrderZ(batch)).toEqual(front);
+      batch.sortSeeThrough(fromBehind, 1000 + SEE_THROUGH_SETTLE_MS);
+      // …and the rested view gets its own.
+      const behind = drawOrderZ(batch);
+      expect(behind[0]).toBeGreaterThan(behind[1]);
+      expect(behind[1]).toBeGreaterThan(behind[2]);
+    });
+  }
 });
 
 describe('ModelBatch — freeing memory', () => {
