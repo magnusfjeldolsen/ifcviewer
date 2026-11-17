@@ -1023,23 +1023,11 @@ export class ModelBatch {
     const v0 = chunk.uploadedVertexCount;
     const v1 = chunk.vertexCount;
     if (v1 > v0) {
-      const position = g.getAttribute('position') as THREE.BufferAttribute;
-      const normal = g.getAttribute('normal') as THREE.BufferAttribute;
-      const piece = g.getAttribute('pieceIndex') as THREE.BufferAttribute;
-      position.addUpdateRange(v0 * 3, (v1 - v0) * 3);
-      position.needsUpdate = true;
-      normal.addUpdateRange(v0 * 3, (v1 - v0) * 3);
-      normal.needsUpdate = true;
-      piece.addUpdateRange(v0, v1 - v0);
-      piece.needsUpdate = true;
+      for (const name of VERTEX_ATTRIBUTES) uploadTail(g.getAttribute(name) as THREE.BufferAttribute, v0, v1);
     }
     const i0 = chunk.uploadedIndexCount;
     const i1 = chunk.indexCount;
-    if (i1 > i0) {
-      const index = g.getIndex()!;
-      index.addUpdateRange(i0, i1 - i0);
-      index.needsUpdate = true;
-    }
+    if (i1 > i0) uploadTail(g.getIndex()!, i0, i1);
     chunk.uploadedVertexCount = v1;
     chunk.uploadedIndexCount = i1;
     this.finishChunkSync(chunk);
@@ -1052,6 +1040,10 @@ export class ModelBatch {
     g.setAttribute('normal', new THREE.BufferAttribute(chunk.normals, 4, true));
     g.setAttribute('pieceIndex', new THREE.BufferAttribute(chunk.pieceIndex, 1));
     g.setIndex(new THREE.BufferAttribute(chunk.index, 1));
+    // The first upload sends the whole array but leaves any ranges queued
+    // before it in place, to be sent again with the next tail.
+    for (const name of VERTEX_ATTRIBUTES) clearRangesOnUpload(g.getAttribute(name) as THREE.BufferAttribute);
+    clearRangesOnUpload(g.getIndex()!);
     chunk.geometry = g;
     chunk.mesh.geometry = g;
     chunk.uploadedVertexCount = chunk.vertexCount;
@@ -1127,6 +1119,25 @@ export class ModelBatch {
       chunk.overlay = null;
     }
   }
+}
+
+/** A chunk's per-vertex attributes; the index is handled on its own. */
+const VERTEX_ATTRIBUTES = ['position', 'normal', 'pieceIndex'] as const;
+
+/**
+ * Queue elements `[from, to)` — counted in vertices, or in indices for an
+ * index — for upload. Update ranges are in array elements, so the item size
+ * comes from the attribute itself: normals are four bytes per vertex, not
+ * three like positions.
+ */
+function uploadTail(attribute: THREE.BufferAttribute, from: number, to: number): void {
+  const n = attribute.itemSize;
+  attribute.addUpdateRange(from * n, (to - from) * n);
+  attribute.needsUpdate = true;
+}
+
+function clearRangesOnUpload(attribute: THREE.BufferAttribute): void {
+  attribute.onUpload(() => attribute.clearUpdateRanges());
 }
 
 function findLeaf(node: KdNode | null, chunk: Chunk): KdNode | null {

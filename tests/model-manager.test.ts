@@ -446,6 +446,100 @@ describe('ModelBatch — picking', () => {
   });
 });
 
+/**
+ * What a WebGL renderer would hold for each buffer, uploaded by three r183's
+ * rules (WebGLAttributes): the whole array the first time, then — on each
+ * version bump — the queued update ranges, or the whole array when none are
+ * queued. A new array object is a new buffer.
+ */
+class GpuMirror {
+  private held = new Map<THREE.BufferAttribute, { array: ArrayLike<number>; copy: number[]; version: number }>();
+
+  sync(batch: ModelBatch): void {
+    for (const mesh of batch.chunkMeshes()) {
+      const g = mesh.geometry;
+      for (const name of ['position', 'normal', 'pieceIndex']) this.upload(g.getAttribute(name) as THREE.BufferAttribute);
+      this.upload(g.getIndex()!);
+    }
+  }
+
+  /** Elements of `attribute` whose GPU copy differs from the CPU array. */
+  stale(attribute: THREE.BufferAttribute, count: number): number {
+    const h = this.held.get(attribute)!;
+    let n = 0;
+    for (let i = 0; i < count; i++) if (h.copy[i] !== attribute.array[i]) n++;
+    return n;
+  }
+
+  private upload(a: THREE.BufferAttribute): void {
+    const h = this.held.get(a);
+    if (!h || h.array !== a.array) {
+      this.held.set(a, { array: a.array, copy: Array.from(a.array), version: a.version });
+      a.onUploadCallback();
+      return;
+    }
+    if (h.version >= a.version) return;
+    if (a.updateRanges.length === 0) {
+      h.copy = Array.from(a.array);
+    } else {
+      for (const r of a.updateRanges) for (let i = r.start; i < r.start + r.count; i++) h.copy[i] = a.array[i];
+      a.clearUpdateRanges();
+    }
+    h.version = a.version;
+    a.onUploadCallback();
+  }
+}
+
+describe('ModelBatch — what reaches the GPU', () => {
+  it('an append that fits a chunk queues exactly the new vertices of every attribute', () => {
+    const batch = new ModelBatch('m');
+    batch.append([boxMesh(1)]);
+    const gpu = new GpuMirror();
+    gpu.sync(batch); // the first frame uploads everything
+    const [mesh] = batch.chunkMeshes();
+    const g = mesh.geometry;
+    for (const name of ['position', 'normal', 'pieceIndex']) expect((g.getAttribute(name) as THREE.BufferAttribute).updateRanges).toEqual([]);
+
+    batch.append([boxMesh(2, { at: [2, 0, 0] })]);
+    expect(batch.chunkMeshes()).toEqual([mesh]); // same chunk, same buffers
+    const v0 = 24, v1 = 48;
+    for (const name of ['position', 'normal', 'pieceIndex']) {
+      const a = g.getAttribute(name) as THREE.BufferAttribute;
+      expect(a.updateRanges, name).toEqual([{ start: v0 * a.itemSize, count: (v1 - v0) * a.itemSize }]);
+    }
+    expect(g.getIndex()!.updateRanges).toEqual([{ start: 36, count: 36 }]);
+  });
+
+  it('after a streamed load the GPU copy of every chunk matches its CPU arrays', () => {
+    // Small batches into chunks that keep room, so most appends are partial
+    // uploads; a cap low enough to split now and then.
+    const meshes = Array.from({ length: 300 }, (_, i) => boxMesh(i + 1, { at: [(i % 15) * 3, Math.floor(i / 15) * 3, 0] }));
+    const batch = new ModelBatch('m', { chunkVertexCap: 2400 });
+    const gpu = new GpuMirror();
+    const expectInSync = () => {
+      for (const mesh of batch.chunkMeshes()) {
+        const g = mesh.geometry;
+        const vertices = g.getAttribute('pieceIndex').count;
+        for (const name of ['position', 'normal', 'pieceIndex']) {
+          const a = g.getAttribute(name) as THREE.BufferAttribute;
+          expect(gpu.stale(a, vertices * a.itemSize), name).toBe(0);
+        }
+        expect(gpu.stale(g.getIndex()!, g.drawRange.count)).toBe(0);
+      }
+    };
+    for (let i = 0; i < meshes.length; i += 7) {
+      batch.append(meshes.slice(i, i + 7));
+      gpu.sync(batch);
+    }
+    // Before `finish` too: it rebuilds trimmed chunks whole, which would hide
+    // a partial upload that missed something.
+    expectInSync();
+    batch.finish();
+    gpu.sync(batch);
+    expectInSync();
+  });
+});
+
 describe('ModelBatch — freeing memory', () => {
   it('removeModel disposes every geometry and material', () => {
     const { modelManager } = makeModelManager([
