@@ -499,7 +499,7 @@ export class SelectionManager {
     );
   }
 
-  /** Drop all selection and restore materials. No-op if nothing selected. */
+  /** Drop all selection and its highlight. No-op if nothing selected. */
   clear(): void {
     if (this.selected.size === 0) return;
     const before = this.snapshotSelection();
@@ -666,9 +666,9 @@ export class SelectionManager {
   }
 
   private notifyChange(): void {
-    // Highlight + unhighlight only mutate `mesh.material` references — the
-    // camera doesn't move, so OrbitControls won't fire 'change' to wake
-    // the render loop. Trigger it here so the highlight is drawn.
+    // Highlight + unhighlight only change per-element state — the camera
+    // doesn't move, so OrbitControls won't fire 'change' to wake the render
+    // loop. Trigger it here so the highlight is drawn.
     this.deps.viewer.requestRender();
     const state = this.getState();
     for (const cb of this.changeListeners) cb(state);
