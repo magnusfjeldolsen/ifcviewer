@@ -51,14 +51,18 @@ import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
 import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 import { WorkerTimeline } from '../core/LoadTimeline';
+import { geometryProductIds } from './geometryProducts';
+import { StreamBatcher } from './streamBatcher';
 
 /**
- * Product-ID batch size for `parse`. Each batch is one `batch` message.
- * Kept moderate so the main thread builds geometry in reasonable chunks
- * without paying a `postMessage` round-trip per product. The worker never
- * yields, so this only governs message granularity, not parse speed.
+ * When `parse` sends a `batch`: after this many products, or after this many
+ * ms of streaming, whichever comes first (see `StreamBatcher`). The count
+ * keeps the message rate sane on a model of small elements; the clock puts
+ * the first geometry on screen within a fraction of a second, and keeps each
+ * batch small enough for the main thread to append without a long stall.
  */
 const STREAM_BATCH_SIZE = 200;
+const STREAM_BATCH_INTERVAL_MS = 200;
 
 // --- web-ifc instance + per-model state -------------------------------------
 
@@ -203,10 +207,9 @@ function batchTransferables(meshes: ParsedMesh[]): Transferable[] {
 
 /**
  * Parse a model: open it, then stream geometry. The worker is not the UI
- * thread, so it never has to yield — it runs ONE `StreamAllMeshes` pass,
- * extracts geometry inside the callback, and posts `batch` messages as
- * products accumulate. A single pass is faster than the reverted
- * main-thread two-pass streaming.
+ * thread, so it never has to yield — it lists the elements, runs ONE
+ * `StreamMeshes` pass over them, extracts geometry inside the callback, and
+ * posts `batch` messages as products accumulate.
  */
 async function handleParse(id: string, buffer: ArrayBuffer, timeline: WorkerTimeline): Promise<void> {
   timeline.mark('worker.started');
@@ -218,40 +221,33 @@ async function handleParse(id: string, buffer: ArrayBuffer, timeline: WorkerTime
   timeline.mark('worker.opened');
   modelIds.set(id, modelID);
 
-  // Pass 1 — count products so `total` is determinate from the first batch.
-  // Cheap: no GetGeometry, just visits each FlatMesh.
-  t0 = performance.now();
-  let total = 0;
-  ifc.StreamAllMeshes(modelID, () => {
-    total++;
-  });
-  timeline.add('worker.countPass', performance.now() - t0);
-  timeline.mark('worker.counted');
+  // The elements to stream, from the type index (milliseconds). Its length
+  // is the progress total: an upper bound, since a product without a body
+  // is listed but streams nothing. See `geometryProducts.ts`.
+  const ids = geometryProductIds(ifc, modelID);
+  const total = ids.length;
+  timeline.mark('worker.listed');
 
-  // Pass 2 — stream geometry, flushing a batch every STREAM_BATCH_SIZE
-  // products. `StreamAllMeshes` cannot be paused, so we accumulate inside
-  // the callback and post whenever the batch fills.
-  let pending: ParsedMesh[] = [];
-  let loaded = 0;
-  const flush = (): void => {
-    if (pending.length === 0) return;
-    const meshes = pending;
-    pending = [];
-    const progress: StreamProgress = { loaded, total };
-    const tp = performance.now();
-    post({ type: 'batch', id, meshes, progress }, batchTransferables(meshes));
-    timeline.add('worker.post', performance.now() - tp);
-    timeline.mark('worker.firstBatchPosted');
-  };
+  // One pass: geometry is extracted inside the callback (it is only valid
+  // there) and posted in batches as the batcher decides.
+  const batcher = new StreamBatcher<ParsedMesh>(
+    (meshes, loaded) => {
+      const progress: StreamProgress = { loaded, total };
+      const tp = performance.now();
+      post({ type: 'batch', id, meshes, progress }, batchTransferables(meshes));
+      timeline.add('worker.post', performance.now() - tp);
+      timeline.mark('worker.firstBatchPosted');
+    },
+    { maxProducts: STREAM_BATCH_SIZE, maxIntervalMs: STREAM_BATCH_INTERVAL_MS },
+  );
 
   t0 = performance.now();
-  ifc.StreamAllMeshes(modelID, (flatMesh: WebIFC.FlatMesh) => {
+  ifc.StreamMeshes(modelID, ids, (flatMesh: WebIFC.FlatMesh) => {
     timeline.mark('worker.firstMesh');
-    extractFlatMesh(ifc, flatMesh, modelID, pending, timeline);
-    loaded++;
-    if (loaded % STREAM_BATCH_SIZE === 0) flush();
+    extractFlatMesh(ifc, flatMesh, modelID, batcher.sink, timeline);
+    batcher.endProduct();
   });
-  flush();
+  batcher.flush();
   timeline.add('worker.stream', performance.now() - t0);
   timeline.mark('worker.streamed');
 

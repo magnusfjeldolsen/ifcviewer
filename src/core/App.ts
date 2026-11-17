@@ -26,6 +26,7 @@ import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
 import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { LoadTimeline, type LoadPhases } from './LoadTimeline';
+import { loadingStatus } from '../ui/loadingStatus';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { CandidateResolver } from '../inspector/CandidateResolver';
@@ -1115,11 +1116,8 @@ export class App {
         timeline.time('main.append', () => this.modelManager.appendMeshes(id, batch));
         timeline.time('main.bounds', () => this.sceneBounds.addMeshes(id, batch));
         forCache?.add(batch);
-        totalElements = progress.total;
-        this.setStatus(
-          `Loading ${file.name}… ` +
-          `(${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()} elements)`,
-        );
+        totalElements = progress.loaded;
+        this.setStatus(loadingStatus(file.name, progress));
         // Fit once, on the first batch, so the camera frames the model
         // early and the progressive fill is actually visible. We do NOT
         // re-fit at the end: the load is interactive now, and a late fit

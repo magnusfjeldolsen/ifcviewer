@@ -54,6 +54,7 @@
 //                        the fit distance)
 //   --timeout-min <n>    give up waiting for a load after n minutes (default 30)
 //   --no-warm      skip the reload-from-cache run
+//   --no-orbit     skip the orbits (load times and memory only)
 //   --profile      record a V8 CPU profile of the main thread during the fit
 //                  orbit, save it as .cpuprofile (open in DevTools) and print
 //                  the functions with the most self time. Function names are
@@ -90,6 +91,7 @@ function parseArgs(argv) {
     closeScale: 0.3,
     timeoutMin: 30,
     warm: true,
+    orbit: true,
     profile: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -112,6 +114,7 @@ function parseArgs(argv) {
       case '--close-scale': opts.closeScale = Number(next()); break;
       case '--timeout-min': opts.timeoutMin = Number(next()); break;
       case '--no-warm': opts.warm = false; break;
+      case '--no-orbit': opts.orbit = false; break;
       case '--profile': opts.profile = true; break;
       default:
         if (a.startsWith('--')) throw new Error(`Unknown option ${a}`);
@@ -483,6 +486,7 @@ async function main() {
         far: o.far,
       };
     };
+    if (opts.orbit) {
     if (opts.profile) {
       await cdp.send('Profiler.enable');
       await cdp.send('Profiler.setSamplingInterval', { interval: 250 });
@@ -509,6 +513,7 @@ async function main() {
     log(`Orbit (fit, GPU-synced):   ${result.orbitFitSynced.syncedFps} fps (frame ${result.orbitFitSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitFitSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitFitSynced.gpuWaitMedianMs} ms)`);
     result.orbitCloseSynced = await orbit(opts.closeScale, true);
     log(`Orbit (close, GPU-synced): ${result.orbitCloseSynced.syncedFps} fps (frame ${result.orbitCloseSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitCloseSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitCloseSynced.gpuWaitMedianMs} ms)`);
+    }
 
     // Private bytes per Chrome process: peak over the cold load and orbits,
     // and the level now that the model is loaded and has been drawn.

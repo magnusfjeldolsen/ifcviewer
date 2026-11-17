@@ -48,13 +48,14 @@ export interface StreamedModel {
 /**
  * Progress of a streamed parse, reported alongside each `batch` message.
  * Counted in products (≈ IFC elements with geometry), not meshes — one
- * product can yield several geometry meshes. `total` is known up front,
- * after web-ifc's `StreamAllMeshes` callback has visited every product,
- * so the count is determinate from the first batch onward.
+ * product can yield several geometry meshes. `total` is known from the first
+ * batch, read from the model's type index rather than by visiting every
+ * product, so it is an upper bound: products without a body are counted but
+ * deliver nothing. The last batch's `loaded` is the exact count.
  */
 export interface StreamProgress {
   /** Products whose geometry has been delivered so far. */
   loaded: number;
-  /** Total products with geometry in the model. */
+  /** Products listed for streaming; `loaded` ends at or a little below it. */
   total: number;
 }
