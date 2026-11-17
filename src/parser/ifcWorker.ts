@@ -49,6 +49,7 @@ import { elementMatches, type PropertySelector } from '../inspector/matchValue';
 import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
+import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 
 /**
  * Product-ID batch size for `parse`. Each batch is one `batch` message.
@@ -140,12 +141,17 @@ function extractFlatMesh(
       normals[j * 3 + 2] = verts[j * 6 + 5];
     }
 
+    // web-ifc gives nearly every triangle its own three vertices. Sharing the
+    // ones that are the same point with the same (8-bit, as drawn) normal cuts
+    // the vertex work and memory of a large model by about a fifth.
+    const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
+
     const color = placedGeom.color;
     sink.push({
       expressID: flatMesh.expressID,
-      vertices: positions,
-      normals,
-      indices: new Uint32Array(idxs),
+      vertices: welded.positions,
+      normals: welded.normals,
+      indices: welded.indices,
       transform: Array.from(placedGeom.flatTransformation),
       color: { r: color.x, g: color.y, b: color.z, a: color.w },
     });
