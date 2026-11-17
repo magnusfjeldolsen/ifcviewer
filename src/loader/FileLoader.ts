@@ -1,6 +1,13 @@
 export interface LoadedFile {
   name: string;
   buffer: ArrayBuffer;
+  /**
+   * `performance.now()` when reading the file began and ended, so a load's
+   * timeline can start at the user's pick rather than after the read.
+   * Absent for buffers that did not come from a local file.
+   */
+  readStartedAt?: number;
+  readEndedAt?: number;
 }
 
 export class FileLoader {
@@ -81,8 +88,9 @@ export class FileLoader {
   }
 
   private async readFile(file: File): Promise<void> {
+    const readStartedAt = performance.now();
     const buffer = await file.arrayBuffer();
-    this.onFileLoaded?.({ name: file.name, buffer });
+    this.onFileLoaded?.({ name: file.name, buffer, readStartedAt, readEndedAt: performance.now() });
   }
 
   dispose(): void {

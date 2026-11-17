@@ -43,6 +43,7 @@
 //                  http://localhost:5173/ifcviewer/) instead of building and
 //                  starting `vite preview`
 //   --no-build     serve the existing dist/ without rebuilding
+//   --port <n>     port for `vite preview` (default 4173)
 //   --label <name> name used in the result file (default: the file's basename).
 //                  Use a neutral label for models that must stay private.
 //   --viewport WxH CSS pixels (default 1280x720)
@@ -81,6 +82,7 @@ function parseArgs(argv) {
     vsync: 'off',
     url: null,
     build: true,
+    port: 4173,
     label: null,
     viewport: [1280, 720],
     dpr: 1.5,
@@ -102,6 +104,7 @@ function parseArgs(argv) {
       case '--vsync': opts.vsync = next(); break;
       case '--url': opts.url = next(); break;
       case '--no-build': opts.build = false; break;
+      case '--port': opts.port = Number(next()); break;
       case '--label': opts.label = next(); break;
       case '--viewport': opts.viewport = next().split('x').map(Number); break;
       case '--dpr': opts.dpr = Number(next()); break;
@@ -202,7 +205,34 @@ function loadTimes(rec) {
     firstGeometryMs: rec.firstGeometryAt === null ? null : round(rec.firstGeometryAt - rec.startedAt, 0),
     // Settled and drawn: a cache restore settles a frame before it is drawn.
     loadedMs: round(Math.max(rec.settledAt, rec.firstGeometryAt ?? 0) - rec.startedAt, 0),
+    phases: phaseTable(rec),
   };
+}
+
+/**
+ * The load's timeline (src/core/LoadTimeline.ts) on the same clock as
+ * `firstGeometryMs` / `loadedMs`: marks as ms from the load's start, in time
+ * order, and spans as total ms.
+ */
+function phaseTable(rec) {
+  const p = rec.phases;
+  if (!p) return null;
+  const offset = p.startedAt - rec.startedAt;
+  const marks = Object.entries(p.marks)
+    .map(([name, ms]) => [name, round(ms + offset, 0)])
+    .sort((a, b) => a[1] - b[1]);
+  if (rec.firstGeometryAt !== null) marks.push(['drawn.firstGeometry', round(rec.firstGeometryAt - rec.startedAt, 0)]);
+  marks.sort((a, b) => a[1] - b[1]);
+  const spans = Object.entries(p.spans).map(([name, ms]) => [name, round(ms, 0)]);
+  return { marks: Object.fromEntries(marks), spans: Object.fromEntries(spans) };
+}
+
+function logPhases(title, phases) {
+  if (!phases) return;
+  log(`${title} — marks (ms from start):`);
+  for (const [name, ms] of Object.entries(phases.marks)) log(`  ${String(ms).padStart(7)}  ${name}`);
+  log(`${title} — time spent (ms, summed):`);
+  for (const [name, ms] of Object.entries(phases.spans)) log(`  ${String(ms).padStart(7)}  ${name}`);
 }
 
 /** Aggregate a V8 CPU profile's self time by function, largest first. */
@@ -312,7 +342,7 @@ async function main() {
       log('Building…');
       build();
     }
-    server = await startPreview();
+    server = await startPreview(opts.port);
     baseUrl = server.url;
   }
   const appUrl = new URL(baseUrl);
@@ -399,6 +429,7 @@ async function main() {
     const [cold] = await page.evaluate(() => window.__ifcPerf.loads);
     result.cold = { ...loadTimes(cold), wallMs: Date.now() - wallStart };
     log(`Cold load: first geometry ${result.cold.firstGeometryMs} ms, loaded ${result.cold.loadedMs} ms, ${cold.meshCount} meshes${cold.ok ? '' : ` — FAILED: ${cold.error}`}`);
+    logPhases('Cold load', result.cold.phases);
     if (!cold.ok) throw new Error(`Load failed: ${cold.error}`);
 
     const forced = await page.evaluate(() => window.__ifcPerf.render());
@@ -509,6 +540,7 @@ async function main() {
       const [warm] = await page.evaluate(() => window.__ifcPerf.loads);
       result.warm = { ...loadTimes(warm), note: 'times from navigation start (session restore)' };
       log(`Warm load (${warm.fromCache ? 'geometry cache' : 'full parse'}): first geometry ${result.warm.firstGeometryMs} ms, loaded ${result.warm.loadedMs} ms`);
+      logPhases('Warm load', result.warm.phases);
       result.processMemoryRun = memSnapshot();
       log(`Process memory (whole run): peak total ${result.processMemoryRun.peakTotalMB} MB`);
     }

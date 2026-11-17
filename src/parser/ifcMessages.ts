@@ -20,6 +20,7 @@
 import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { PropertySelector } from '../inspector/matchValue';
 import type { ParsedMesh, StreamProgress } from './types';
+import type { WorkerTimings } from '../core/LoadTimeline';
 
 // ---------------------------------------------------------------------------
 // main → worker
@@ -97,8 +98,11 @@ export type ToWorker =
 export type FromWorker =
   /** A batch of streamed geometry. Mesh buffers transferred. */
   | { type: 'batch'; id: string; meshes: ParsedMesh[]; progress: StreamProgress }
-  /** A `parse` / `openForProps` completed successfully. */
-  | { type: 'parsed'; id: string }
+  /**
+   * A `parse` / `openForProps` completed successfully. A `parse` reply
+   * carries where the worker's time went (see `LoadTimeline`).
+   */
+  | { type: 'parsed'; id: string; timings?: WorkerTimings }
   /** A `getProps` completed successfully. */
   | { type: 'props'; reqId: number; props: ElementProperties }
   /**

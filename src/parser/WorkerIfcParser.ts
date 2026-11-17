@@ -13,6 +13,7 @@
 
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamedModel, StreamProgress } from './types';
+import type { LoadTimeline } from '../core/LoadTimeline';
 
 /**
  * Minimal `Worker` surface this proxy depends on. Lets unit tests inject
@@ -110,8 +111,10 @@ export class WorkerIfcParser {
     buffer: ArrayBuffer,
     id: string,
     onBatch: (meshes: ParsedMesh[], progress: StreamProgress) => void,
+    timeline?: LoadTimeline,
   ): Promise<StreamedModel> {
     return new Promise<StreamedModel>((resolve, reject) => {
+      const t0 = performance.now();
       this.pending.set(id, { resolve, reject, meshCount: 0, onBatch });
       // We intentionally do NOT transfer the buffer. The main thread still
       // needs the original alive after this call — for `sessionStore.saveModel`
@@ -121,6 +124,9 @@ export class WorkerIfcParser {
       // for every model. The worker gets a structured-clone copy; the cost is
       // one copy of the .ifc bytes, which is fine.
       this.worker.postMessage({ type: 'parse', id, buffer });
+      // postMessage clones the buffer before it returns.
+      timeline?.add('main.postParse', performance.now() - t0);
+      timeline?.mark('main.posted');
     });
   }
 
@@ -167,7 +173,7 @@ export class WorkerIfcParser {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
-        p.resolve({ id: msg.id, meshCount: p.meshCount });
+        p.resolve({ id: msg.id, meshCount: p.meshCount, timings: msg.timings });
         break;
       }
       case 'error': {

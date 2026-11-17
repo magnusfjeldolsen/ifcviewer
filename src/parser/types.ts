@@ -9,6 +9,8 @@
  * Transferables.
  */
 
+import type { WorkerTimings } from '../core/LoadTimeline';
+
 export interface ParsedMesh {
   expressID: number;
   vertices: Float32Array;
@@ -39,6 +41,8 @@ export interface ParsedModel {
 export interface StreamedModel {
   id: string;
   meshCount: number;
+  /** Where the worker's time went; absent if the worker did not report it. */
+  timings?: WorkerTimings;
 }
 
 /**

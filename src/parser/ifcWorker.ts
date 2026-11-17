@@ -50,6 +50,7 @@ import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromWorker, ToWorker } from './ifcMessages';
 import type { ParsedMesh, StreamProgress } from './types';
 import { weldVertices, WELD_NORMAL_STEPS } from './weld';
+import { WorkerTimeline } from '../core/LoadTimeline';
 
 /**
  * Product-ID batch size for `parse`. Each batch is one `batch` message.
@@ -120,9 +121,11 @@ function extractFlatMesh(
   flatMesh: WebIFC.FlatMesh,
   modelID: number,
   sink: ParsedMesh[],
+  timeline?: WorkerTimeline,
 ): void {
   for (let i = 0; i < flatMesh.geometries.size(); i++) {
     const placedGeom = flatMesh.geometries.get(i);
+    const t0 = performance.now();
     const geom = ifc.GetGeometry(modelID, placedGeom.geometryExpressID);
 
     const verts = ifc.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
@@ -157,7 +160,13 @@ function extractFlatMesh(
     // web-ifc gives nearly every triangle its own three vertices. Sharing the
     // ones that are the same point with the same (8-bit, as drawn) normal cuts
     // the vertex work and memory of a large model by about a fifth.
+    const t1 = performance.now();
     const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
+    if (timeline) {
+      const t2 = performance.now();
+      timeline.add('worker.extract', t1 - t0);
+      timeline.add('worker.weld', t2 - t1);
+    }
 
     const color = placedGeom.color;
     const mesh: ParsedMesh = {
@@ -199,17 +208,25 @@ function batchTransferables(meshes: ParsedMesh[]): Transferable[] {
  * products accumulate. A single pass is faster than the reverted
  * main-thread two-pass streaming.
  */
-async function handleParse(id: string, buffer: ArrayBuffer): Promise<void> {
+async function handleParse(id: string, buffer: ArrayBuffer, timeline: WorkerTimeline): Promise<void> {
+  timeline.mark('worker.started');
   const ifc = await getApi();
+  timeline.mark('worker.ready');
+  let t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  timeline.add('worker.open', performance.now() - t0);
+  timeline.mark('worker.opened');
   modelIds.set(id, modelID);
 
   // Pass 1 — count products so `total` is determinate from the first batch.
   // Cheap: no GetGeometry, just visits each FlatMesh.
+  t0 = performance.now();
   let total = 0;
   ifc.StreamAllMeshes(modelID, () => {
     total++;
   });
+  timeline.add('worker.countPass', performance.now() - t0);
+  timeline.mark('worker.counted');
 
   // Pass 2 — stream geometry, flushing a batch every STREAM_BATCH_SIZE
   // products. `StreamAllMeshes` cannot be paused, so we accumulate inside
@@ -221,19 +238,26 @@ async function handleParse(id: string, buffer: ArrayBuffer): Promise<void> {
     const meshes = pending;
     pending = [];
     const progress: StreamProgress = { loaded, total };
+    const tp = performance.now();
     post({ type: 'batch', id, meshes, progress }, batchTransferables(meshes));
+    timeline.add('worker.post', performance.now() - tp);
+    timeline.mark('worker.firstBatchPosted');
   };
 
+  t0 = performance.now();
   ifc.StreamAllMeshes(modelID, (flatMesh: WebIFC.FlatMesh) => {
-    extractFlatMesh(ifc, flatMesh, modelID, pending);
+    timeline.mark('worker.firstMesh');
+    extractFlatMesh(ifc, flatMesh, modelID, pending, timeline);
     loaded++;
     if (loaded % STREAM_BATCH_SIZE === 0) flush();
   });
   flush();
+  timeline.add('worker.stream', performance.now() - t0);
+  timeline.mark('worker.streamed');
 
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
-  post({ type: 'parsed', id });
+  post({ type: 'parsed', id, timings: timeline.toJSON() });
 }
 
 /**
@@ -641,15 +665,20 @@ function handleDispose(): void {
 self.onmessage = (event: MessageEvent<ToWorker>): void => {
   const msg = event.data;
   switch (msg.type) {
-    case 'parse':
+    case 'parse': {
+      // Stamped on arrival, before the queue: the gap to `worker.started` is
+      // time spent waiting behind other requests.
+      const timeline = new WorkerTimeline();
+      timeline.mark('worker.received');
       enqueue(async () => {
         try {
-          await handleParse(msg.id, msg.buffer);
+          await handleParse(msg.id, msg.buffer, timeline);
         } catch (err) {
           post({ type: 'error', id: msg.id, message: errorMessage(err) });
         }
       });
       break;
+    }
 
     case 'openForProps':
       enqueue(async () => {
