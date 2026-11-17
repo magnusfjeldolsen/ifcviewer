@@ -58,7 +58,7 @@ import { weldVertices, WELD_NORMAL_STEPS } from './weld';
 import { WorkerTimeline } from '../core/LoadTimeline';
 import { geometryProductIds } from './geometryProducts';
 import { StreamBatcher } from './streamBatcher';
-import { openPartFile, PartWriter } from '../services/geometryParts';
+import { openPartFile, PartWriter, type SyncFile } from '../services/geometryParts';
 
 /**
  * When `parse` sends a `batch`: after this many products, or after this many
@@ -228,6 +228,23 @@ async function handleParse(
   timeline.mark('worker.started');
   // Opened while the model opens; awaited once there is geometry to store.
   const file = cacheKey ? openPartFile(cacheKey, 0) : null;
+  try {
+    await parseInto(id, buffer, shared, file, timeline);
+  } catch (err) {
+    // The part file holds a lock for as long as it is open: let it go, so a
+    // later sweep can remove the half-written load.
+    closeQuietly(file);
+    throw err;
+  }
+}
+
+async function parseInto(
+  id: string,
+  buffer: ArrayBuffer,
+  shared: boolean,
+  file: Promise<SyncFile | null> | null,
+  timeline: WorkerTimeline,
+): Promise<void> {
   const ifc = await getApi();
   timeline.mark('worker.ready');
   const t0 = performance.now();
@@ -269,6 +286,17 @@ async function handleParse(
   if (writer) post({ type: 'cacheWritten', id, report: writer.finish() });
 }
 
+/** Close a part file whatever state the load got to (closing twice is harmless). */
+function closeQuietly(file: Promise<SyncFile | null> | null): void {
+  void file?.then((f) => {
+    try {
+      f?.close();
+    } catch {
+      // already closed
+    }
+  });
+}
+
 /**
  * Help another worker parse a model: open it, stream the chunks the
  * coordinator hands out over `port`, close it. A chunk's geometry goes out in
@@ -285,6 +313,22 @@ async function handleShare(
 ): Promise<void> {
   timeline.mark('helper.started');
   const file = cacheKey ? openPartFile(cacheKey, worker) : null;
+  try {
+    await shareInto(id, buffer, port, worker, file, timeline);
+  } catch (err) {
+    closeQuietly(file);
+    throw err;
+  }
+}
+
+async function shareInto(
+  id: string,
+  buffer: ArrayBuffer,
+  port: MessagePort,
+  worker: number,
+  file: Promise<SyncFile | null> | null,
+  timeline: WorkerTimeline,
+): Promise<void> {
   const ifc = await getApi();
   const t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
