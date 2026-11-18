@@ -326,6 +326,21 @@ function factorText(n: number): string {
   return String(Number(n.toPrecision(12)));
 }
 
+/**
+ * Read one line, or undefined when there is no reader or the line cannot be
+ * read. Every read of a unit goes through here, so one broken line costs only
+ * the unit it belongs to (which then reads as "not stated"), never the
+ * model's other units or the element that uses it.
+ */
+function safeRead(readLine: ReadLine | undefined, id: number): unknown {
+  if (!readLine) return undefined;
+  try {
+    return readLine(id);
+  } catch {
+    return undefined;
+  }
+}
+
 /** A unit as read from its line, with the unit type it declares and its dimensions when SI. */
 interface ReadUnit {
   ref: UnitRef;
@@ -344,14 +359,7 @@ function readUnitLine(raw: unknown, readLine: ReadLine | undefined, depth = 0): 
   if (depth > 4) return null;
   let line = raw;
   const id = refId(raw);
-  if (id !== undefined) {
-    if (!readLine) return null;
-    try {
-      line = readLine(id);
-    } catch {
-      return null;
-    }
-  }
+  if (id !== undefined) line = safeRead(readLine, id);
   if (!isObj(line)) return null;
   const unitType = text(line.UnitType);
 
@@ -387,7 +395,7 @@ function readUnitLine(raw: unknown, readLine: ReadLine | undefined, depth = 0): 
       let key = `conv:${n}`;
       let factorLine: unknown = line.ConversionFactor;
       const factorId = refId(factorLine);
-      if (factorId !== undefined && readLine) factorLine = readLine(factorId);
+      if (factorId !== undefined) factorLine = safeRead(readLine, factorId);
       const factor = isObj(factorLine) ? factorLine : undefined;
       const value = factor ? num(factor.ValueComponent) : undefined;
       if (value !== undefined) {
@@ -406,7 +414,7 @@ function readUnitLine(raw: unknown, readLine: ReadLine | undefined, depth = 0): 
         if (!isObj(e)) return null;
         let el: unknown = e;
         const eid = refId(e);
-        if (eid !== undefined && readLine) el = readLine(eid);
+        if (eid !== undefined) el = safeRead(readLine, eid);
         if (!isObj(el)) return null;
         const exp = num(el.Exponent);
         const unit = readUnitLine(el.Unit, readLine, depth + 1);
@@ -456,9 +464,18 @@ function derivedSymbol(unitType: string | undefined, parts: { ref: UnitRef; exp:
   return `${top}/${under.length === 1 ? under[0] : `(${under.join('·')})`}`;
 }
 
+/** `readUnitLine` that never throws: a malformed line (a getter that throws, say) is no unit. */
+function readUnitSafely(raw: unknown, readLine: ReadLine | undefined): ReadUnit | null {
+  try {
+    return readUnitLine(raw, readLine);
+  } catch {
+    return null;
+  }
+}
+
 /** Read a unit line on its own, for tests and for whatever shows a single unit. */
 export function readUnit(raw: unknown, readLine?: ReadLine): UnitRef | null {
-  return readUnitLine(raw, readLine)?.ref ?? null;
+  return readUnitSafely(raw, readLine)?.ref ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +509,7 @@ export class ModelUnits {
   static fromAssignment(units: readonly unknown[], readLine?: ReadLine): ModelUnits {
     const project = new Map<string, UnitRef>();
     for (const u of units) {
-      const read = readUnitLine(u, readLine);
+      const read = readUnitSafely(u, readLine);
       if (read?.unitType && !project.has(read.unitType)) project.set(read.unitType, read.ref);
     }
     return new ModelUnits(project, readLine);
@@ -533,7 +550,7 @@ export class ModelUnits {
       const cached = this.own.get(id);
       if (cached !== undefined) return cached;
     }
-    const ref = readUnitLine(own, this.readLine)?.ref ?? null;
+    const ref = readUnitSafely(own, this.readLine)?.ref ?? null;
     if (id !== undefined) this.own.set(id, ref);
     return ref;
   }

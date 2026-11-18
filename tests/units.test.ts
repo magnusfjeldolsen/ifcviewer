@@ -227,6 +227,50 @@ describe('ModelUnits', () => {
   });
 });
 
+describe('a unit line that cannot be read', () => {
+  const broken = (id: number): unknown => {
+    throw new Error(`line #${id} is damaged`);
+  };
+  const footByRef = {
+    type: IFCCONVERSIONBASEDUNIT,
+    UnitType: e('LENGTHUNIT'),
+    Name: label('FOOT'),
+    ConversionFactor: { type: 5, value: 77 },
+  };
+
+  it('costs only its own unit: the rest of the project units are intact', () => {
+    const units = ModelUnits.fromAssignment(
+      [
+        si('AREAUNIT', 'SQUARE_METRE'),
+        derived('PLANARFORCEUNIT', [[{ type: 5, value: 78 }, 1]]),
+        footByRef,
+        si('VOLUMEUNIT', 'CUBIC_METRE'),
+      ],
+      broken,
+    );
+    expect(units.forUnitType('AREAUNIT').symbol).toBe('m²');
+    expect(units.forUnitType('VOLUMEUNIT').symbol).toBe('m³');
+    // The derived unit's element could not be read: that unit is not stated.
+    expect(units.forMeasure('IFCPLANARFORCEMEASURE').key).toBe('?PLANARFORCEUNIT');
+    // The foot's factor could not be read, but its name could: still a foot.
+    expect(units.forMeasure('IFCLENGTHMEASURE').symbol).toBe('ft');
+  });
+
+  it('a unit set on a property that cannot be read is "not stated", and does not throw', () => {
+    const units = ModelUnits.fromAssignment([si('LENGTHUNIT', 'METRE', 'MILLI')], broken);
+    expect(() => units.forMeasure('IFCLENGTHMEASURE', { type: 5, value: 23 })).not.toThrow();
+    expect(units.forMeasure('IFCLENGTHMEASURE', { type: 5, value: 23 }).key).toBe('?LENGTHUNIT');
+    // The project unit is unaffected for values without their own unit.
+    expect(units.forMeasure('IFCLENGTHMEASURE').symbol).toBe('mm');
+  });
+
+  it('a unit line whose attributes throw when read is no unit', () => {
+    const hostile = { type: IFCSIUNIT, get UnitType(): never { throw new Error('bad'); } };
+    expect(readUnit(hostile)).toBeNull();
+    expect(ModelUnits.fromAssignment([hostile, si('AREAUNIT', 'SQUARE_METRE')]).forUnitType('AREAUNIT').symbol).toBe('m²');
+  });
+});
+
 describe('canSum', () => {
   const mm = { key: 'si:mm', symbol: 'mm' };
   const m = { key: 'si:m', symbol: 'm' };
