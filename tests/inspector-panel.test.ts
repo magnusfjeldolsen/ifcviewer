@@ -701,6 +701,32 @@ describe('InspectorPanel', () => {
       expect(valueEl.title).toContain(longValue);
     });
 
+    it('carries a resize handle that goes away with the panel', () => {
+      const { parent, panel } = mountPanel();
+      const container = panel.getContainer();
+      expect(container.querySelector('.inspector-resize-handle')).not.toBeNull();
+      panel.dispose();
+      expect(parent.querySelector('.inspector-resize-handle')).toBeNull();
+    });
+
+    it('shows the full property name in a tooltip, since a long one is cut short', async () => {
+      const longName = 'AVeryLongPropertyNameThatWillNotFitInTheNameColumn';
+      const props = makeProperties({
+        direct: [],
+        qtos: [],
+        psets: [{ name: 'Pset_Long', source: 'pset', properties: [leafNode(longName, 'v')] }],
+      });
+      const { parent, repo, selection } = mountPanel({ kind: 'none' }, {}, props);
+      selection.emit({ kind: 'single', identities: [identity()] });
+      repo.resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const nameEl = parent.querySelector('.inspector-row .inspector-row-name') as HTMLElement;
+      expect(nameEl.textContent).toBe(longName);
+      expect(nameEl.title).toBe(longName);
+    });
+
     it('copies value to clipboard on click', async () => {
       const { parent, repo, selection } = mountPanel();
       selection.emit({ kind: 'single', identities: [identity()] });
@@ -1460,6 +1486,23 @@ describe('InspectorPanel', () => {
       expect(q.ifcClass).toBe('IfcWall');
       if (q.kind === 'value') {
         expect(q.selector.path.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('sits at the end of its row in both views, on the same row as the value', async () => {
+      // One line per row: the button is the row's last child, a sibling of
+      // the value — never on a row of its own.
+      const { parent, panel } = await mountWithElement(() => undefined);
+      for (const view of ['tree', 'flat'] as const) {
+        panel.setView(view);
+        const btns = parent.querySelectorAll<HTMLButtonElement>('.inspector-similar-btn');
+        expect(btns.length).toBeGreaterThan(0);
+        for (const btn of btns) {
+          const row = btn.parentElement!;
+          expect(row.classList.contains(view === 'tree' ? 'inspector-row' : 'inspector-flat-row')).toBe(true);
+          expect(row.lastElementChild).toBe(btn);
+          expect(row.querySelector(view === 'tree' ? '.inspector-row-value' : '.inspector-flat-value')).not.toBeNull();
+        }
       }
     });
 

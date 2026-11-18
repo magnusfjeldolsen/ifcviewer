@@ -310,7 +310,9 @@ function buildPropertyRow(
   const name = document.createElement('span');
   name.className = 'inspector-row-name';
   name.textContent = node.key;
-  if (node.description) name.title = node.description;
+  // The row stays one line, so a long name is cut with an ellipsis; the
+  // tooltip carries it in full (and the description, when there is one).
+  name.title = node.description ? `${node.key}\n${node.description}` : node.key;
 
   const eq = document.createElement('span');
   eq.className = 'inspector-row-eq';

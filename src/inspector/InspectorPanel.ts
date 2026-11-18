@@ -46,6 +46,7 @@ import {
 } from './panel/renderHeader';
 import { renderTree as renderTreeInto, type TreeRenderContext } from './panel/renderTree';
 import { renderFlat as renderFlatInto, type FlatRenderContext } from './panel/renderFlat';
+import { attachResizeHandle, type ResizeHandle } from './panel/resizeHandle';
 
 /** Persistence key for the user's last-used view (Tree vs Flat). */
 const VIEW_STORAGE_KEY = 'ifcviewer:inspectorView';
@@ -188,6 +189,8 @@ export class InspectorPanel {
   private toggleTree: HTMLButtonElement;
   private toggleFlat: HTMLButtonElement;
   private body: HTMLElement;
+  /** Drag handle on the right edge; owns the panel's width. */
+  private resizeHandle: ResizeHandle;
 
   private repository: ElementPropertyRepository;
   private deps: InspectorPanelDeps;
@@ -321,6 +324,9 @@ export class InspectorPanel {
     this.body.className = 'inspector-body';
     this.container.appendChild(this.body);
 
+    // ── Resize handle (right edge, facing the canvas) ──
+    this.resizeHandle = attachResizeHandle(this.container);
+
     // Subscribe to selection changes.
     this.unsubscribeSelection = selection.onChange((s) => this.onSelectionChange(s));
     // Drive initial state.
@@ -363,6 +369,7 @@ export class InspectorPanel {
     this.unsubscribeSelection();
     if (this.spinnerTimer) clearTimeout(this.spinnerTimer);
     if (this.filterDebounce) clearTimeout(this.filterDebounce);
+    this.resizeHandle.dispose();
     this.container.remove();
   }
 

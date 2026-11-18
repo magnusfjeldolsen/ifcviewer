@@ -152,6 +152,8 @@ function buildFlatRow(r: PropertyFlatRow, ctx: FlatRenderContext): HTMLElement {
   const unitCell = document.createElement('span');
   unitCell.className = 'inspector-flat-cell inspector-flat-unit';
   unitCell.textContent = r.unit ?? '';
+  // The unit column is narrow and cuts a long unit short; the tooltip has it whole.
+  if (r.unit) unitCell.title = r.unit;
 
   row.appendChild(nameCell);
   row.appendChild(valueCell);

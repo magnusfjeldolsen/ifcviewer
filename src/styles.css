@@ -344,8 +344,11 @@ html, body {
   position: absolute;
   left: 12px;
   bottom: 48px;
-  width: 280px;
+  /* Set by the resize handle (panel/resizeHandle.ts); 300px is the default. */
+  width: var(--inspector-width, 300px);
   max-height: min(50vh, calc(100% - 60px - 48px - 12px));
+  /* Room for the resize handle, so the body's scrollbar sits just left of it. */
+  padding-right: 6px;
   background: rgba(255, 255, 255, 0.95);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -361,8 +364,56 @@ html, body {
   display: none;
 }
 
+/* While dragging, the width follows the pointer — no easing behind it. */
+.inspector-panel.resizing {
+  transition: none;
+  user-select: none;
+}
+
 .inspector-panel.collapsed {
   width: 36px;
+  padding-right: 0;
+}
+
+/* Right edge, the one facing the canvas. Inside the panel (which clips its
+   overflow), over the padding reserved for it above. */
+.inspector-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.inspector-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 2px;
+  height: 32px;
+  margin-top: -16px;
+  border-radius: 1px;
+  background: #d1d5db;
+  transition: background 0.15s;
+}
+
+.inspector-resize-handle:hover::after,
+.inspector-panel.resizing .inspector-resize-handle::after,
+.inspector-resize-handle:focus-visible::after {
+  background: #3b82f6;
+}
+
+.inspector-resize-handle:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+
+.inspector-panel.collapsed .inspector-resize-handle {
+  display: none;
 }
 
 .inspector-panel.collapsed .inspector-title,
@@ -569,16 +620,33 @@ html, body {
 
 .inspector-empty,
 .inspector-spinner,
-.inspector-multi-placeholder,
+.inspector-multi-placeholder {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: #9ca3af;
+  text-align: center;
+}
+
 /* "Select similar" — per-row affordance, revealed on row hover so it doesn't
    add permanent visual noise to every property. Kept focusable-visible so
-   keyboard users aren't locked out of a hover-only control. */
+   keyboard users aren't locked out of a hover-only control.
+
+   It sits at the end of the row, right-aligned, on the value's line. The
+   target is 22×20 px, but the negative block margin means it only claims
+   14px of line height — less than the row's text — so a row with the button
+   is exactly as tall as one without. */
 .inspector-similar-btn {
   flex: 0 0 auto;
-  margin-left: 6px;
-  padding: 0 4px;
-  font-size: 11px;
-  line-height: 1.4;
+  justify-self: end;
+  width: 22px;
+  height: 20px;
+  margin: -3px 0 -3px auto;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
   font-family: inherit;
   color: #3b82f6;
   background: transparent;
@@ -737,35 +805,51 @@ html, body {
   display: block;
 }
 
+/* One line per property: name and value cut with an ellipsis (their tooltips
+   carry the full text) rather than wrapping, so the ⌕ button never drops to
+   a line of its own. */
 .inspector-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   padding: 3px 10px;
   font-size: 12px;
   color: #374151;
   gap: 2px;
+  white-space: nowrap;
 }
 
 .inspector-row:hover {
   background: rgba(0, 0, 0, 0.02);
 }
 
+/* The name keeps its natural width up to 55% of the row; the value takes
+   what is left. */
 .inspector-row-name {
   color: #6b7280;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  max-width: 55%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .inspector-row-eq {
   color: #d1d5db;
+  flex-shrink: 0;
+}
+
+.inspector-row .inspector-badge {
+  flex-shrink: 0;
 }
 
 .inspector-row-value {
   color: #1f2937;
   cursor: pointer;
-  word-break: break-word;
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .inspector-row-value:hover {
@@ -796,8 +880,17 @@ html, body {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+}
+
+/* Inside the value+unit pair the value shrinks, the unit pill never does. */
+.inspector-value-with-unit .inspector-row-value {
+  flex: 0 1 auto;
+}
+
+.inspector-value-with-unit .inspector-unit-pill {
+  flex-shrink: 0;
 }
 
 .inspector-badge {
@@ -845,7 +938,10 @@ html, body {
 
 .inspector-flat-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+  /* Name · Value · Unit · ⌕. Each row is its own grid, so every track after
+     the two shares has a fixed width — an empty unit or a missing button then
+     leaves its track in place and the columns line up with the header. */
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 40px 22px;
   align-items: center;
   gap: 4px;
   padding: 3px 4px;
