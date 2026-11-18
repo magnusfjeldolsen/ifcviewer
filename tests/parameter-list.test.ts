@@ -4,6 +4,7 @@ import {
   ParameterList,
   countText,
   spreadText,
+  unitNoteText,
   unitText,
   visibleParameters,
 } from '../src/ui/ParameterList';
@@ -51,6 +52,29 @@ describe('parameter row text', () => {
   it('says mixed units rather than show one that is not true of all', () => {
     expect(unitText(param('A', { unit: 'mm', unitsDiffer: true }))).toBe('mixed units');
     expect(unitText(DATA.parameters[2])).toBe('mm');
+  });
+
+  it('says when the model does not state the unit, and shows nothing for plain numbers or text', () => {
+    expect(unitText(param('A', { kind: 'numeric', units: [{ key: '?TIMEUNIT', symbol: '', count: 3 }] }))).toBe('unit not stated');
+    expect(unitText(param('A', { kind: 'numeric', units: [{ key: '', symbol: '', count: 3 }] }))).toBe('');
+    expect(unitText(param('A'))).toBe('');
+  });
+
+  it('explains a mixed-unit or unstated-unit parameter when opened, and nothing otherwise', () => {
+    const mixed = param('A', {
+      kind: 'numeric',
+      unitsDiffer: true,
+      units: [
+        { key: 'si:mm', symbol: 'mm', count: 40 },
+        { key: 'si:m', symbol: 'm', count: 2 },
+      ],
+    });
+    expect(unitNoteText(mixed)).toBe('Values are in different units (mm on 40, m on 2), so they are not added up');
+    expect(unitNoteText(param('A', { kind: 'numeric', units: [{ key: '?LENGTHUNIT', symbol: '', count: 3 }] }))).toBe(
+      'The model does not state the unit of these values',
+    );
+    expect(unitNoteText(param('A', { kind: 'numeric', unit: 'mm', units: [{ key: 'si:mm', symbol: 'mm', count: 3 }] }))).toBe('');
+    expect(unitNoteText(param('A'))).toBe('');
   });
 
   it('filters case-insensitively and sorts by name or by count', () => {
@@ -175,6 +199,52 @@ describe('opening a parameter', () => {
     head('P.LoadBearing').click();
     expect(values('P.LoadBearing')).toEqual(['true · 12', 'false · 8']);
     expect(text('P.LoadBearing', 'param-values-without')).toBeNull();
+  });
+
+  it('says why a mixed-unit parameter is not added up, and shows its values without a unit', () => {
+    const parent = document.createElement('div');
+    const list = new ParameterList(parent);
+    list.setData({
+      modelId: 'm',
+      scopeSize: 3,
+      parameters: [
+        param('P.Width', {
+          count: 3,
+          kind: 'numeric',
+          unitsDiffer: true,
+          units: [
+            { key: 'si:mm', symbol: 'mm', count: 2 },
+            { key: 'si:m', symbol: 'm', count: 1 },
+          ],
+          numeric: { min: 0.3, max: 250, sum: 450.3 },
+          distinct: 3,
+          values: [
+            { value: 0.3, count: 1 },
+            { value: 200, count: 1 },
+            { value: 250, count: 1 },
+          ],
+        }),
+      ],
+    });
+    const meta = [...parent.querySelectorAll('[data-key="P.Width"] .param-meta > span')].map((x) => x.textContent);
+    expect(meta).toContain('mixed units');
+    parent.querySelector<HTMLButtonElement>('[data-key="P.Width"] .param-head')!.click();
+    expect(parent.querySelector('[data-key="P.Width"] .param-range')!.textContent).toBe('min 0.3 · max 250');
+    expect(parent.querySelector('[data-key="P.Width"] .param-units-note')!.textContent).toBe(
+      'Values are in different units (mm on 2, m on 1), so they are not added up',
+    );
+    expect([...parent.querySelectorAll('[data-key="P.Width"] .param-value-text')].map((x) => x.textContent)).toEqual(['0.3', '200', '250']);
+  });
+
+  it('tells whoever listens when a row is opened, so picking can get ready', () => {
+    const onOpen = vi.fn();
+    const { head } = listWith({ onOpen });
+    head('P.Profile').click();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen.mock.calls[0][0].key).toBe('P.Profile');
+    // Closing is not opening.
+    head('P.Profile').click();
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
   it('shows min and max for numbers, then the values with their unit', () => {
@@ -320,6 +390,22 @@ describe('ParametersPanel', () => {
     expect(status()).toBe('Waiting for the load to finish…');
     started();
     expect(status()).toBe('Reading parameters…');
+  });
+
+  it('opening a parameter asks for it to be got ready, for the model shown', async () => {
+    const prepare = vi.fn();
+    const parent = document.createElement('div');
+    const panel = new ParametersPanel(parent, {
+      getModels: () => [{ id: 'm', name: 'A.ifc' }],
+      describe: async () => DATA,
+      prepare,
+    });
+    panel.open('m');
+    await flush();
+    parent.querySelector<HTMLButtonElement>('[data-key="Pset_BeamCommon.LoadBearing"] .param-head')!.click();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0][0]).toBe('m');
+    expect(prepare.mock.calls[0][1].key).toBe('Pset_BeamCommon.LoadBearing');
   });
 
   it('keeps clear of the contextual tray by its height', () => {

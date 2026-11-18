@@ -35,6 +35,11 @@ export interface ParametersPanelDeps {
   ): Promise<ValueCount[]>;
   /** Select the model's elements that have `value` at this parameter. */
   selectValue?(modelId: string, parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
+  /**
+   * A parameter was opened: get ready to list and select its values (the
+   * viewer builds its value column in the background).
+   */
+  prepare?(modelId: string, parameter: ParameterSummary): void;
 }
 
 const counts = new Intl.NumberFormat('en-US');
@@ -110,6 +115,11 @@ export class ParametersPanel {
       onPickValue: deps.selectValue
         ? (parameter, value, additive) => {
             if (this.modelId !== null) deps.selectValue!(this.modelId, parameter, value, additive);
+          }
+        : undefined,
+      onOpen: deps.prepare
+        ? (parameter) => {
+            if (this.modelId !== null) deps.prepare!(this.modelId, parameter);
           }
         : undefined,
     });

@@ -10,6 +10,9 @@
  * Each row says what the parameter is (its path), how many of the scope's
  * elements carry it ("412 of 1,235"), what kind of values it holds, its
  * unit, and either its numeric range or how many distinct values it has.
+ * The unit is the one the model states, "unit not stated" when it states
+ * none, or "mixed units" when the values are in more than one: an opened
+ * row then says which units and that the values are not added up.
  * Opening a row lists its values with element counts, most common first;
  * picking a value hands it to `onPickValue`.
  *
@@ -18,6 +21,7 @@
  */
 
 import { formatNumber } from '../inspector/format';
+import { canSum, isNotStated, sumVerdictText } from '../inspector/units';
 import type { ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 
@@ -40,6 +44,11 @@ export interface ParameterListOptions {
   loadValues?(key: string, onProgress: (done: number, total: number) => void): Promise<ValueCount[]>;
   /** A value was picked. `additive` when Ctrl, Shift or Cmd was held. */
   onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
+  /**
+   * A row was opened: a value is likely to be picked next, so whatever
+   * picking needs can start getting ready.
+   */
+  onOpen?(parameter: ParameterSummary): void;
 }
 
 /** "412 of 1,235". */
@@ -58,9 +67,15 @@ export function kindText(p: ParameterSummary): string {
   return KIND_TEXT[p.kind];
 }
 
-/** The unit as the inspector shows it, or "mixed units" when elements differ. */
+/**
+ * The unit of a parameter's numbers: its symbol, "unit not stated" when the
+ * model gives none, "mixed units" when they are in more than one, and
+ * nothing for text or plain numbers.
+ */
 export function unitText(p: ParameterSummary): string {
   if (p.unitsDiffer) return 'mixed units';
+  const only = p.units?.length === 1 ? p.units[0] : undefined;
+  if (only && isNotStated(only.key)) return 'unit not stated';
   return p.unit ?? '';
 }
 
@@ -225,7 +240,11 @@ export class ParameterList {
     this.valueFilter = '';
     this.refreshOpen = null;
     if (previous !== null) this.rebuildRow(previous);
-    if (key !== null) this.rebuildRow(key);
+    if (key !== null) {
+      this.rebuildRow(key);
+      const p = this.data?.parameters.find((x) => x.key === key);
+      if (p) this.options.onOpen?.(p);
+    }
   }
 
   openRow(): string | null {
@@ -347,6 +366,14 @@ export class ParameterList {
       const unit = p.unit && !p.unitsDiffer ? ` ${p.unit}` : '';
       range.textContent = `min ${formatNumber(p.numeric.min)}${unit} · max ${formatNumber(p.numeric.max)}${unit}`;
       body.appendChild(range);
+    }
+
+    const unitNote = unitNoteText(p);
+    if (unitNote) {
+      const note = document.createElement('div');
+      note.className = 'param-units-note';
+      note.textContent = unitNote;
+      body.appendChild(note);
     }
 
     if (p.uniquePerElement) {
@@ -486,4 +513,17 @@ export class ParameterList {
       );
     return s;
   }
+}
+
+/**
+ * What an opened numeric row says about its unit, when there is something
+ * to say: that the values are in different units and are not added up
+ * (with which units), or that the model does not state their unit.
+ */
+export function unitNoteText(p: ParameterSummary): string {
+  if (!p.units || p.units.length === 0) return '';
+  const verdict = canSum(p);
+  if (!verdict.ok && verdict.reason === 'mixed-units') return sumVerdictText(verdict);
+  if (verdict.ok && !verdict.unitStated) return 'The model does not state the unit of these values';
+  return '';
 }

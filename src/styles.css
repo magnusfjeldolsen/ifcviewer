@@ -1951,12 +1951,18 @@ html, body {
 
 .param-range,
 .param-values-note,
+.param-units-note,
 .param-values-status,
 .param-values-without {
   color: #6b7280;
   font-size: 11px;
   padding: 2px 0;
   overflow-wrap: anywhere;
+}
+
+/* A mixed-unit or unstated-unit parameter: worth noticing before anyone adds it up. */
+.param-units-note {
+  color: #92400e;
 }
 
 .param-values-without {
