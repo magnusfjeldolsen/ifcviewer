@@ -42,6 +42,19 @@ describe('parameter row text', () => {
   it('shows a numeric range, a shared value, a distinct count or uniqueness', () => {
     expect(spreadText(DATA.parameters[2])).toBe('250 – 12500.5');
     expect(spreadText(param('A', { kind: 'numeric', numeric: { min: 3, max: 3, sum: 6 } }))).toBe('all 3');
+    expect(
+      spreadText(
+        param('A', {
+          kind: 'numeric',
+          numeric: { min: 3, max: 3, sum: 9 },
+          unitsDiffer: true,
+          units: [
+            { key: 'si:mm', symbol: 'mm', count: 2 },
+            { key: 'si:m', symbol: 'm', count: 1 },
+          ],
+        }),
+      ),
+    ).toBe('3 in 2 units');
     expect(spreadText(param('A', { values: [{ value: 'Steel', count: 4 }] }))).toBe('all "Steel"');
     expect(spreadText(param('A', { kind: 'boolean', values: [{ value: false, count: 4 }] }))).toBe('all false');
     expect(spreadText(DATA.parameters[1])).toBe('2 values');

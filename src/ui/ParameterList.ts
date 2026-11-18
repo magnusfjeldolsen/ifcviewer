@@ -104,6 +104,8 @@ export function spreadText(p: ParameterSummary): string {
   if (p.uniquePerElement) return 'unique per element';
   if (p.kind === 'numeric' && p.numeric) {
     const { min, max } = p.numeric;
+    // The same number in different units is not one value.
+    if (min === max && p.unitsDiffer) return `${formatNumber(min)} in ${p.units?.length ?? 2} units`;
     return min === max ? `all ${formatNumber(min)}` : `${formatNumber(min)} – ${formatNumber(max)}`;
   }
   if (p.distinct === null) return 'more than 200 values';
