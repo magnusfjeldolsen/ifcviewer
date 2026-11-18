@@ -681,3 +681,40 @@ describe('WorkerIfcParser — helper budget across loads', () => {
     expect(seen).toEqual([0, 3000]);
   });
 });
+
+describe('WorkerIfcParser — running out of memory', () => {
+  it('a batch the page cannot take fails the load, closes the model, and ignores the rest', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const onBatch = vi.fn(() => {
+      throw new RangeError('Array buffer allocation failed');
+    });
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', onBatch);
+    const t = T(worker, 'm');
+    worker.reply({ type: 'batch', token: t, meshes: [mesh(1)], products: 1 });
+    await expect(done).rejects.toThrow('Array buffer allocation failed');
+    expect(worker.posted).toContainEqual({ type: 'disposeModel', id: 'm' });
+    worker.reply({ type: 'batch', token: t, meshes: [mesh(2)], products: 1 });
+    worker.reply({ type: 'parsed', token: t });
+    expect(onBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a worker crash says what the browser said, so out of memory can be told apart', async () => {
+    const worker = new MockWorker();
+    const parser = new WorkerIfcParser(worker);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    worker.onerror?.({ message: 'Uncaught RangeError: Array buffer allocation failed' });
+    await expect(done).rejects.toThrow('IFC worker crashed: Uncaught RangeError: Array buffer allocation failed');
+  });
+
+  it('a helper running out of memory is not the load failing: its chunks go to the others', async () => {
+    const { main, helpers, coordinators, parser } = sharedSetup(1);
+    const done = parser.parseStreaming(new ArrayBuffer(8), 'm', () => {});
+    const t = T(main, 'm');
+    main.reply({ type: 'listed', token: t, total: 3, ids: [1, 2, 3] });
+    helpers[0].reply({ type: 'error', token: t, message: 'Aborted(OOM). Build with -sASSERTIONS for more info.' });
+    expect(posted(coordinators[0])).toContainEqual({ type: 'fail', worker: 1 });
+    main.reply({ type: 'parsed', token: t });
+    await expect(done).resolves.toMatchObject({ id: 'm' });
+  });
+});

@@ -189,11 +189,13 @@ export class WorkerIfcParser {
     this.createCoordinator = options.createCoordinator ?? createCoordinatorWorker;
     this.helpersFor = options.helpersFor ?? (worker ? () => 0 : defaultHelpersFor);
     this.worker.onmessage = (event): void => this.onMessage(event.data);
-    this.worker.onerror = (): void => {
+    this.worker.onerror = (event: unknown): void => {
       // A worker-level error (not a posted `error` message) would leave
       // every in-flight request hanging. Reject them all and notify
       // listeners (WorkerPropertyRepository) so they can do the same.
-      const err = new Error('IFC worker crashed');
+      // The event's message, when it has one, says why (often memory).
+      const detail = (event as { message?: unknown } | null)?.message;
+      const err = new Error(typeof detail === 'string' && detail ? `IFC worker crashed: ${detail}` : 'IFC worker crashed');
       for (const [token, p] of this.pending) {
         if (p.shared) this.endShare(p.shared, false);
         this.settleCache(token, FAILED_WRITE, true);
@@ -411,7 +413,15 @@ export class WorkerIfcParser {
     p.meshCount += msg.meshes.length;
     p.loaded += msg.products;
     if (msg.meshes.length > 0 || msg.products > 0) {
-      p.onBatch?.(msg.meshes, { loaded: p.loaded, total: Math.max(p.total, p.loaded) });
+      try {
+        p.onBatch?.(msg.meshes, { loaded: p.loaded, total: Math.max(p.total, p.loaded) });
+      } catch (err) {
+        // The page could not take the geometry (typically out of memory
+        // appending it). Thrown here, in a message handler, it would reach
+        // nobody and the load would carry on half-built: fail it instead.
+        this.abortLoad(msg.token, p, err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
     }
     // The chunk's geometry is here: only now does it count as delivered.
     if (msg.chunk !== undefined && p.shared && !p.shared.cancelled) {
@@ -510,6 +520,19 @@ export class WorkerIfcParser {
     this.terminateHelper(shared, key);
     this.addCacheReport(shared.token, FAILED_WRITE);
     this.maybeFinish(shared);
+  }
+
+  /**
+   * Fail a load from this side: stop its helpers, spoil its cache write,
+   * close the model the main worker opened for it (after its parse, which
+   * runs to the end and is ignored), and reject.
+   */
+  private abortLoad(token: number, p: PendingModel, err: Error): void {
+    this.pending.delete(token);
+    if (p.shared) this.endShare(p.shared);
+    this.settleCache(token, FAILED_WRITE, true);
+    this.worker.postMessage({ type: 'disposeModel', id: p.id });
+    p.reject(err);
   }
 
   /** The coordinator itself failed: nothing can be handed out any more. */

@@ -28,6 +28,7 @@ import { GeometryCache, sha256Hex } from '../services/GeometryCache';
 import { LoadTimeline, type LoadPhases } from './LoadTimeline';
 import { partFilesSupported, type CacheWriteReport } from '../services/geometryParts';
 import { loadingStatus } from '../ui/loadingStatus';
+import { loadErrorStatus } from './loadErrors';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { CandidateResolver } from '../inspector/CandidateResolver';
@@ -1219,7 +1220,8 @@ export class App {
         this.sceneBounds.removeModel(streamId);
       }
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      this.setStatus(`Error: ${msg}`);
+      // Out of memory, in whatever shape, becomes one plain sentence.
+      this.setStatus(loadErrorStatus(err));
       this.emitLoadSettled({
         name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false, error: msg,
       });
