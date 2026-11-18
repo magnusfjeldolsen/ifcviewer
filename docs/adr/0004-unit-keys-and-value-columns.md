@@ -103,6 +103,14 @@ are the counts the list shows.
   thread in about 2 ms, and the worker is left free. Measured in the app, a
   click on the model while parameter work runs now waits 3 ms at the median
   (12.8 ms at worst), down from 22.5 ms (69 ms at worst).
+- A build started because a parameter was opened is given up when it is
+  closed again, so browsing the list never leaves scans running. A pick makes
+  its build urgent: other background work stands aside until it is done.
+  This keeps the worst wait for a pick to one scan, about 2 s at 50,000
+  elements.
+- In a parameter whose numbers are in more than one unit, a value is a
+  number *and* a unit: 3 mm and 3 m are listed and picked apart, and
+  select-similar and the combined inspector view tell them apart too.
 - A column is valid only for the scope it was built over. That scope is fixed
   per model when its parameters are first described, and both are dropped
   together when the model is closed.
