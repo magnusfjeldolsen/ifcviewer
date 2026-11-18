@@ -184,9 +184,89 @@ describe('WorkerPropertyRepository — lifecycle', () => {
     await expect(pb).rejects.toThrow(/crashed/);
   });
 
-  it('describeSchema still throws not-implemented', async () => {
-    const { repo } = setup();
-    await expect(repo.describeSchema('m')).rejects.toThrow(/not implemented/);
+  describe('describeParameters', () => {
+    const result = { modelId: 'm', scopeSize: 2, parameters: [] };
+
+    it('posts one request per model, reports progress, and keeps the result', async () => {
+      const { repo, worker } = setup();
+      const seen: [number, number][] = [];
+      const p = repo.describeParameters('m', [1, 2], (d, t) => seen.push([d, t]));
+      const msg = lastOfType(worker, 'describeParameters');
+      expect(msg).toMatchObject({ id: 'm', expressIds: [1, 2] });
+
+      // A second ask while it runs joins the same request.
+      const again = repo.describeParameters('m', [1, 2]);
+      expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(1);
+
+      worker.reply({ type: 'progress', reqId: msg.reqId, done: 1, total: 2 });
+      worker.reply({ type: 'parameters', reqId: msg.reqId, result });
+      await expect(p).resolves.toEqual(result);
+      await expect(again).resolves.toEqual(result);
+      expect(seen).toEqual([[1, 2]]);
+
+      // Kept: asking later does not go back to the worker.
+      await expect(repo.describeParameters('m', [1, 2])).resolves.toEqual(result);
+      expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(1);
+    });
+
+    it('is not cancelled by cancelBulk (that belongs to select-similar)', async () => {
+      const { repo, worker } = setup();
+      const p = repo.describeParameters('m', [1]);
+      repo.cancelBulk();
+      expect(worker.posted.some((m) => m.type === 'cancel')).toBe(false);
+      const { reqId } = lastOfType(worker, 'describeParameters');
+      worker.reply({ type: 'parameters', reqId, result });
+      await expect(p).resolves.toEqual(result);
+    });
+
+    it('rejects on a worker error and asks again next time', async () => {
+      const { repo, worker } = setup();
+      const p = repo.describeParameters('m', [1]);
+      worker.reply({ type: 'error', reqId: lastOfType(worker, 'describeParameters').reqId, message: 'boom' });
+      await expect(p).rejects.toThrow('boom');
+      void repo.describeParameters('m', [1]).catch(() => {});
+      expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(2);
+    });
+
+    it('fetches one parameter\'s values once per model and path, and drops them on dispose', async () => {
+      const { repo, worker } = setup();
+      const seen: number[] = [];
+      const p = repo.parameterValues('m', [1, 2], 'P.X', (d) => seen.push(d));
+      const again = repo.parameterValues('m', [1, 2], 'P.X');
+      const msg = lastOfType(worker, 'parameterValues');
+      expect(msg).toMatchObject({ id: 'm', expressIds: [1, 2], path: 'P.X' });
+      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(1);
+      worker.reply({ type: 'progress', reqId: msg.reqId, done: 2, total: 2 });
+      const values = [{ value: 'a', count: 2 }];
+      worker.reply({ type: 'parameterValues', reqId: msg.reqId, values });
+      await expect(p).resolves.toEqual(values);
+      await expect(again).resolves.toEqual(values);
+      expect(seen).toEqual([2]);
+
+      const pending = repo.parameterValues('m', [1, 2], 'P.Y');
+      repo.disposeModel('m');
+      await expect(pending).rejects.toThrow(/closed/);
+      void repo.parameterValues('m', [1, 2], 'P.X').catch(() => {});
+      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(3);
+    });
+
+    it('findMatching passes an explicit candidate set and a parameter-value target', () => {
+      const { repo, worker } = setup();
+      void repo.findMatching('m', null, { path: 'P.X' }, { kind: 'parameter-value', value: 3 }, undefined, [5, 6]);
+      expect(lastOfType(worker, 'findMatching')).toMatchObject({
+        candidates: [5, 6],
+        value: { kind: 'parameter-value', value: 3 },
+      });
+    });
+
+    it('rejects when the model is disposed, and forgets the result', async () => {
+      const { repo, worker } = setup();
+      const p = repo.describeParameters('m', [1]);
+      repo.disposeModel('m');
+      await expect(p).rejects.toThrow(/closed/);
+      void repo.describeParameters('m', [1]).catch(() => {});
+      expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(2);
+    });
   });
 
   it('cancel is a no-op', () => {

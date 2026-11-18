@@ -39,6 +39,10 @@ import { Settings } from '../services/Settings';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
+import { ParametersPanel } from '../ui/ParametersPanel';
+import { valueText } from '../ui/ParameterList';
+import type { ParameterValue } from '../inspector/types';
+import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
 import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
@@ -132,6 +136,8 @@ export class App {
   // writes). The web-ifc parse itself is serialized inside the worker;
   // this chain only orders the App-level work around it.
   private loadChain = Promise.resolve();
+  /** Whether a model is loading: parameter discovery waits until none is. */
+  private loadGate = new LoadGate();
   private statusEl: HTMLElement | null;
   // Element selection (Phase 2 of the Inspector). Owns canvas pointer
   // listeners; defers to active tools and pivot picking via deps.
@@ -173,6 +179,7 @@ export class App {
   // bridge the basket to the SelectionManager. Persisted in the session.
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
+  private parametersPanel!: ParametersPanel;
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -419,6 +426,8 @@ export class App {
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
         this.modelRecords.delete(id);
+        // After the record is gone, so the panel can move on to another model.
+        this.parametersPanel?.onModelRemoved(id);
         this.bufferCache.delete(id);
         if (record) this.sessionStore.removeModel(record.id);
         this.scheduleSave();
@@ -431,6 +440,7 @@ export class App {
         const url = window.prompt('Enter URL to a remote .ifc file:');
         if (url) this.loadFromUrl(url);
       },
+      onShowParameters: (id) => this.parametersPanel?.open(id),
     });
 
     // Session persistence
@@ -626,6 +636,37 @@ export class App {
       onClear: () => this.selectionBasket.clear(),
     });
 
+    // Parameters panel (#67): which parameters a model has, opened from the
+    // model's row in the Models panel. Discovery runs in the worker, never
+    // during a load, over the elements the viewer draws — so its counts are
+    // of what can be selected and coloured.
+    this.parametersPanel = new ParametersPanel(appEl, {
+      getModels: () => [...this.modelRecords.values()]
+        .filter((r) => this.modelManager.getModel(r.id))
+        .map((r) => ({ id: r.id, name: r.name })),
+      describe: async (modelId, onProgress, onStarted) => {
+        await this.loadGate.idle();
+        onStarted?.();
+        return this.propertyRepository.describeParameters(
+          modelId,
+          this.modelManager.elementIds(modelId),
+          onProgress,
+        );
+      },
+      isLoading: () => this.loadGate.busy,
+      loadValues: async (modelId, key, onProgress) => {
+        await this.loadGate.idle();
+        return this.propertyRepository.parameterValues(
+          modelId,
+          this.modelManager.elementIds(modelId),
+          key,
+          onProgress,
+        );
+      },
+      selectValue: (modelId, parameter, value, additive) =>
+        void this.selectParameterValue(modelId, parameter.key, value, additive),
+    });
+
     // Persist the basket on every content change (debounced via the same
     // scheduleSave path the camera/models use; honours the memory toggle).
     this.selectionBasket.onChange(() => this.scheduleSave());
@@ -639,6 +680,10 @@ export class App {
     // App.dispose so the tray unsubscribes from a still-live event source.
     const contextualParent = document.getElementById('app')!;
     this.contextualActions = new ContextualActions(contextualParent);
+    // The tray shares the right edge with the Parameters panel and grows
+    // upward; the panel stays clear of it.
+    const tray = contextualParent.querySelector<HTMLElement>('.contextual-actions');
+    if (tray) this.parametersPanel.keepClearOf(tray);
     this.contextualActions.register({
       id: 'remove-clipping',
       label: 'Remove clipping',
@@ -753,7 +798,12 @@ export class App {
 
     // Restore session if memory is enabled
     if (this.sessionStore.isMemoryEnabled()) {
-      await this.restoreSession();
+      const endLoad = this.loadGate.begin();
+      try {
+        await this.restoreSession();
+      } finally {
+        endLoad();
+      }
     }
 
     // Auto-save camera state on changes (throttled to 1s)
@@ -1103,6 +1153,15 @@ export class App {
   }
 
   private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
+    const endLoad = this.loadGate.begin();
+    try {
+      await this.loadFile(file, source);
+    } finally {
+      endLoad();
+    }
+  }
+
+  private async loadFile(file: LoadedFile, source?: ModelSource): Promise<void> {
     // Tracks an in-progress streamed load so the catch block can drop a
     // partially-built model if the parse fails. Null before the stream
     // starts and once it completes.
@@ -1309,6 +1368,52 @@ export class App {
     }
   }
 
+  /**
+   * The Parameters list's "select the elements with this value": the same
+   * worker predicate and bulk read as select-similar (`findMatching`), with
+   * the value compared the way the list counted it and the elements the
+   * viewer draws as candidates — so the count shown next to the value is the
+   * number selected. Like select-similar, hidden elements are selected too.
+   *
+   * `additive` (Ctrl/Shift) adds to the selection through the ordinary
+   * `applyMany('add')`, which keeps the single-model lock; otherwise the
+   * result replaces the selection through `selectExactly`, one undo step.
+   */
+  private async selectParameterValue(
+    modelId: string,
+    key: string,
+    value: ParameterValue,
+    additive: boolean,
+  ): Promise<void> {
+    this.propertyRepository.cancelBulk();
+    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}` };
+    this.setStatus(`Finding ${query.label}…`);
+    try {
+      const ids = await this.propertyRepository.findMatching(
+        modelId,
+        null,
+        { path: key },
+        { kind: 'parameter-value', value },
+        (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+        this.modelManager.elementIds(modelId),
+      );
+      // The class of each match is not known here: the inspector fills it in,
+      // as it does for an all-products select-similar.
+      const identities = ids.map((expressId) => ({ modelId, expressId, ifcClass: '', ifcTypeCode: 0 }));
+      if (identities.length > 0) {
+        if (additive) this.selectionManager.applyMany('add', identities);
+        else this.selectionManager.selectExactly(identities);
+      }
+      this.setStatus(describeSimilarResult(query, identities.length));
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    } catch (err) {
+      if (err instanceof BulkRequestCancelled) return;
+      console.error('App: select parameter value failed', err);
+      this.setStatus('Could not complete the search');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    }
+  }
+
   // ── Context menu (C) ───────────────────────────────────────
   //
   // The menu acts ONLY on the current selection (CM2): it reads
@@ -1500,6 +1605,11 @@ export class App {
     // command it pushed, which is what we want for a full reset.)
     this.history.clear();
 
+    // Every model is closed and parsed again below: what the panel shows
+    // would be of models that no longer exist.
+    this.parametersPanel?.close();
+    const endLoad = this.loadGate.begin();
+
     // Remove all models and UI rows. propertyRepository.disposeModel posts
     // the `disposeModel` worker message, so we do not also call
     // parser.disposeModel here.
@@ -1535,6 +1645,8 @@ export class App {
         this.sceneBounds.removeModel(id);
       }
     }
+
+    endLoad();
 
     const box = this.modelManager.getBoundingBox();
     this.viewer.fitToBox(box);
@@ -1667,6 +1779,7 @@ export class App {
     this.modelTreePanel.dispose();
     if (this.inspectorPanel) this.inspectorPanel.dispose();
     if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
+    if (this.parametersPanel) this.parametersPanel.dispose();
     this.marqueeSelector.dispose();
     // Before toolManager.dispose (which disposes the measurement tool), so the
     // resolver's providers still point at live objects while they unhook.

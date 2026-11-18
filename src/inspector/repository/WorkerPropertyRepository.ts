@@ -21,8 +21,9 @@
 import type { WorkerIfcParser } from '../../parser/WorkerIfcParser';
 import type { FromWorker } from '../../parser/ifcMessages';
 import { intersectProperties as combineIntersections } from '../intersection';
-import type { PropertySelector } from '../matchValue';
-import type { ElementIdentity, ElementProperties, ModelSchema, PropertyValue } from '../types';
+import type { MatchTarget, PropertySelector } from '../matchValue';
+import type { ValueCount } from '../parameterFold';
+import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 import { BulkRequestCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
 
 /** Resolve/reject pair for one in-flight `getProps` request. */
@@ -51,6 +52,14 @@ interface PendingIds {
   onProgress?: (done: number, total: number) => void;
 }
 
+/** An in-flight background request, shared by everyone who asked the same question. */
+interface PendingBackground<T> {
+  modelId: string;
+  resolve: (result: T) => void;
+  reject: (err: Error) => void;
+  listeners: Set<(done: number, total: number) => void>;
+}
+
 export class WorkerPropertyRepository implements ElementPropertyRepository {
   /** Per-model memo: modelId → (expressId → in-flight-or-settled promise). */
   private memo = new Map<string, Map<number, Promise<ElementProperties>>>();
@@ -62,6 +71,17 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   private idsInflight = new Map<number, PendingIds>();
   /** In-flight `getLengthUnit` requests, correlated by reqId. */
   private unitInflight = new Map<number, PendingUnit>();
+  /** In-flight `describeParameters` requests, correlated by reqId. */
+  private paramInflight = new Map<number, PendingBackground<ModelParameters>>();
+  /** In-flight `parameterValues` requests, correlated by reqId. */
+  private valuesInflight = new Map<number, PendingBackground<ValueCount[]>>();
+  /** Values per model and parameter path; same lifetime as `paramMemo`. */
+  private valuesMemo = new Map<string, Map<string, { promise: Promise<ValueCount[]>; reqId: number }>>();
+  /**
+   * Parameters per model: one request per model for its lifetime. Dropped on
+   * `disposeModel`, and on failure so a later ask retries.
+   */
+  private paramMemo = new Map<string, { promise: Promise<ModelParameters>; reqId: number }>();
   /** Length unit per model. A model's units never change, so asked once. */
   private lengthUnits = new Map<string, Promise<string>>();
   /** Monotonic request id for all property messages (getProps + intersect). */
@@ -84,6 +104,12 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       this.idsInflight.clear();
       for (const p of this.unitInflight.values()) p.reject(err);
       this.unitInflight.clear();
+      for (const p of this.paramInflight.values()) p.reject(err);
+      this.paramInflight.clear();
+      this.paramMemo.clear();
+      for (const p of this.valuesInflight.values()) p.reject(err);
+      this.valuesInflight.clear();
+      this.valuesMemo.clear();
       this.lengthUnits.clear();
       // Drop the memo too: its promises may be unsettled and the worker
       // state behind them is gone.
@@ -237,6 +263,28 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   disposeModel(modelId: string): void {
     this.memo.delete(modelId);
     this.lengthUnits.delete(modelId);
+    // The worker stops the model's discovery and forgets its result with the
+    // model; whoever waits here hears now rather than from a late error.
+    const params = this.paramMemo.get(modelId);
+    if (params) {
+      this.paramMemo.delete(modelId);
+      const pending = this.paramInflight.get(params.reqId);
+      if (pending) {
+        this.paramInflight.delete(params.reqId);
+        pending.reject(new Error('The model was closed'));
+      }
+    }
+    const values = this.valuesMemo.get(modelId);
+    if (values) {
+      this.valuesMemo.delete(modelId);
+      for (const { reqId } of values.values()) {
+        const pending = this.valuesInflight.get(reqId);
+        if (pending) {
+          this.valuesInflight.delete(reqId);
+          pending.reject(new Error('The model was closed'));
+        }
+      }
+    }
     // Tell the worker to close the model and free its unit-table cache.
     this.parser.disposeModel(modelId);
   }
@@ -252,8 +300,9 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     modelId: string,
     ifcType: number | null,
     selector: PropertySelector,
-    value: PropertyValue,
+    value: MatchTarget,
     onProgress?: (done: number, total: number) => void,
+    candidates?: readonly number[],
   ): Promise<number[]> {
     const reqId = this.nextReqId++;
     const reply = this.trackIds(reqId, onProgress);
@@ -264,8 +313,47 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       ifcType,
       selector,
       value,
+      ...(candidates ? { candidates: [...candidates] } : {}),
     });
     return reply;
+  }
+
+  parameterValues(
+    modelId: string,
+    expressIds: readonly number[],
+    path: string,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ValueCount[]> {
+    let perModel = this.valuesMemo.get(modelId);
+    const memo = perModel?.get(path);
+    if (memo) {
+      if (onProgress) this.valuesInflight.get(memo.reqId)?.listeners.add(onProgress);
+      return memo.promise;
+    }
+    const reqId = this.nextReqId++;
+    const listeners = new Set<(done: number, total: number) => void>();
+    if (onProgress) listeners.add(onProgress);
+    const promise = new Promise<ValueCount[]>((resolve, reject) => {
+      this.valuesInflight.set(reqId, { modelId, resolve, reject, listeners });
+    });
+    const entry = { promise, reqId };
+    if (!perModel) {
+      perModel = new Map();
+      this.valuesMemo.set(modelId, perModel);
+    }
+    perModel.set(path, entry);
+    promise.catch(() => {
+      const m = this.valuesMemo.get(modelId);
+      if (m?.get(path) === entry) m.delete(path);
+    });
+    this.parser.getWorker().postMessage({
+      type: 'parameterValues',
+      reqId,
+      id: modelId,
+      expressIds: [...expressIds],
+      path,
+    });
+    return promise;
   }
 
   /**
@@ -287,9 +375,35 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     return reply;
   }
 
-  async describeSchema(modelId: string): Promise<ModelSchema> {
-    void modelId;
-    throw new Error('describeSchema: not implemented yet');
+  describeParameters(
+    modelId: string,
+    expressIds: readonly number[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ModelParameters> {
+    const memo = this.paramMemo.get(modelId);
+    if (memo) {
+      if (onProgress) this.paramInflight.get(memo.reqId)?.listeners.add(onProgress);
+      return memo.promise;
+    }
+    const reqId = this.nextReqId++;
+    const listeners = new Set<(done: number, total: number) => void>();
+    if (onProgress) listeners.add(onProgress);
+    const promise = new Promise<ModelParameters>((resolve, reject) => {
+      this.paramInflight.set(reqId, { modelId, resolve, reject, listeners });
+    });
+    const entry = { promise, reqId };
+    this.paramMemo.set(modelId, entry);
+    // A failure must not stick for the life of the model.
+    promise.catch(() => {
+      if (this.paramMemo.get(modelId) === entry) this.paramMemo.delete(modelId);
+    });
+    this.parser.getWorker().postMessage({
+      type: 'describeParameters',
+      reqId,
+      id: modelId,
+      expressIds: [...expressIds],
+    });
+    return promise;
   }
 
   // --- internals -------------------------------------------------------------
@@ -391,7 +505,26 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       pending.resolve(msg.symbol);
       return;
     }
+    if (msg.type === 'parameters') {
+      const pending = this.paramInflight.get(msg.reqId);
+      if (!pending) return;
+      this.paramInflight.delete(msg.reqId);
+      pending.resolve(msg.result);
+      return;
+    }
+    if (msg.type === 'parameterValues') {
+      const pending = this.valuesInflight.get(msg.reqId);
+      if (!pending) return;
+      this.valuesInflight.delete(msg.reqId);
+      pending.resolve(msg.values);
+      return;
+    }
     if (msg.type === 'progress') {
+      const params = this.paramInflight.get(msg.reqId) ?? this.valuesInflight.get(msg.reqId);
+      if (params) {
+        for (const listener of params.listeners) listener(msg.done, msg.total);
+        return;
+      }
       // One generic progress message serves every bulk primitive, so look
       // in both in-flight maps.
       const pending = this.intersectInflight.get(msg.reqId) ?? this.idsInflight.get(msg.reqId);
@@ -422,6 +555,18 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (pendingUnit) {
         this.unitInflight.delete(msg.reqId);
         pendingUnit.reject(new Error(msg.message));
+        return;
+      }
+      const pendingParams = this.paramInflight.get(msg.reqId);
+      if (pendingParams) {
+        this.paramInflight.delete(msg.reqId);
+        pendingParams.reject(new Error(msg.message));
+        return;
+      }
+      const pendingValues = this.valuesInflight.get(msg.reqId);
+      if (pendingValues) {
+        this.valuesInflight.delete(msg.reqId);
+        pendingValues.reject(new Error(msg.message));
       }
     }
   }

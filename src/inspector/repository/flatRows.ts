@@ -80,6 +80,27 @@ export function buildFlatRows(
   return rows;
 }
 
+/**
+ * One row per path: the first row at each path wins.
+ *
+ * An element can carry the same path twice — a property set attached to the
+ * instance and a same-named one inherited from its type. `buildFlatRows`
+ * places instance groups before type groups and sorts stably, so the first
+ * row at a path is the instance's value, which is the one that applies.
+ *
+ * This is THE rule for "the value of property X on this element". Matching
+ * (`elementMatches`) and parameter discovery both go through it, so a value
+ * that selects an element is the value discovery counts, and a path present
+ * on both instance and type counts the element once.
+ */
+export function firstRowPerPath(rows: readonly PropertyFlatRow[]): Map<string, PropertyFlatRow> {
+  const out = new Map<string, PropertyFlatRow>();
+  for (const row of rows) {
+    if (!out.has(row.path)) out.set(row.path, row);
+  }
+  return out;
+}
+
 export function displayStringForValue(v: PropertyValue): string {
   switch (v.kind) {
     case 'single':

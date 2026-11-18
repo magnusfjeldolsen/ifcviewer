@@ -3,6 +3,8 @@ export interface ModelTreeCallbacks {
   onRemoveModel: (id: string) => void;
   onAddModel: () => void;
   onAddRemoteModel?: () => void;
+  /** Open the Parameters list for this model. No button is shown without it. */
+  onShowParameters?: (id: string) => void;
 }
 
 interface ModelRow {
@@ -12,6 +14,7 @@ interface ModelRow {
   visible: boolean;
   element: HTMLElement;
   checkbox: HTMLInputElement;
+  paramsBtn: HTMLButtonElement | null;
 }
 
 interface LoadingRow {
@@ -145,12 +148,32 @@ export class ModelTreePanel {
       }
     });
 
+    // What parameters this model has (#67). On the model's own row because
+    // the list is about one model, and it needs no room of its own here.
+    let paramsBtn: HTMLButtonElement | null = null;
+    if (this.callbacks.onShowParameters) {
+      paramsBtn = document.createElement('button');
+      paramsBtn.type = 'button';
+      paramsBtn.className = 'model-row-params';
+      paramsBtn.title = 'Parameters in this model';
+      paramsBtn.setAttribute('aria-label', 'Parameters in this model');
+      paramsBtn.textContent = '☰'; // ☰
+      paramsBtn.addEventListener('click', () => {
+        try {
+          this.callbacks.onShowParameters?.(id);
+        } catch (err) {
+          console.warn('ModelTreePanel: show parameters failed', err);
+        }
+      });
+    }
+
     el.appendChild(checkbox);
     el.appendChild(info);
+    if (paramsBtn) el.appendChild(paramsBtn);
     el.appendChild(removeBtn);
     this.list.appendChild(el);
 
-    const row: ModelRow = { id, name, objectCount, visible: true, element: el, checkbox };
+    const row: ModelRow = { id, name, objectCount, visible: true, element: el, checkbox, paramsBtn };
     this.rows.set(id, row);
 
     // Auto-expand when a model is added
@@ -163,6 +186,8 @@ export class ModelTreePanel {
     row.element.classList.add('model-row-warning');
     row.checkbox.disabled = true;
     row.checkbox.checked = false;
+    // Nothing is open in the worker to describe.
+    if (row.paramsBtn) row.paramsBtn.disabled = true;
     const countEl = row.element.querySelector('.model-row-count');
     if (countEl) {
       countEl.textContent = message;

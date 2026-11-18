@@ -19,8 +19,9 @@
  * a buffer is transferred it is neutered; the sender must not touch it.
  */
 
-import type { ElementProperties, PropertyValue } from '../inspector/types';
-import type { PropertySelector } from '../inspector/matchValue';
+import type { ElementProperties, ModelParameters } from '../inspector/types';
+import type { MatchTarget, PropertySelector } from '../inspector/matchValue';
+import type { ValueCount } from '../inspector/parameterFold';
 import type { ParsedMesh } from './types';
 import type { WorkerTimings } from '../core/LoadTimeline';
 import type { CacheWriteReport } from '../services/geometryParts';
@@ -86,7 +87,9 @@ export type ToWorker =
    * Run a value-match predicate over a candidate set in the worker and
    * reply with the matching expressIds only. `ifcType` null means "all
    * products". The predicate is present-and-equal: a candidate lacking
-   * the selector's path is not a match.
+   * the selector's path is not a match. `candidates`, when given, is the
+   * candidate set instead (the Parameters list passes the elements the
+   * viewer draws, so a value selects exactly what the list counted).
    */
   | {
       type: 'findMatching';
@@ -94,7 +97,8 @@ export type ToWorker =
       id: string;
       ifcType: number | null;
       selector: PropertySelector;
-      value: PropertyValue;
+      value: MatchTarget;
+      candidates?: number[];
     }
   /**
    * Abandon an in-flight bulk job. NEVER enqueued — the worker's
@@ -111,6 +115,22 @@ export type ToWorker =
    * was authored in.
    */
   | { type: 'getLengthUnit'; reqId: number; id: string }
+  /**
+   * Which parameters exist across `expressIds` (the elements the viewer
+   * draws), with counts, kinds, ranges and distinct values. Runs in the
+   * background: in short steps that let every other request go first.
+   * Kept per model until the model is closed. Replies with `progress`
+   * messages and one `parameters`. NOT cancelled by `cancel`, which belongs
+   * to the bulk reads; it stops when its model is closed or replaced.
+   */
+  | { type: 'describeParameters'; reqId: number; id: string; expressIds: number[] }
+  /**
+   * Every distinct value of one parameter (`path`) across `expressIds`, with
+   * counts, for a parameter with more values than the description keeps.
+   * Background steps like `describeParameters`; replies with `progress` and
+   * one `parameterValues`.
+   */
+  | { type: 'parameterValues'; reqId: number; id: string; expressIds: number[]; path: string }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -168,6 +188,10 @@ export type FromWorker =
   | { type: 'ids'; reqId: number; ids: number[] }
   /** A `getLengthUnit` completed. `symbol` is `"m"` when the model names none. */
   | { type: 'lengthUnit'; reqId: number; symbol: string }
+  /** A `describeParameters` completed. */
+  | { type: 'parameters'; reqId: number; result: ModelParameters }
+  /** A `parameterValues` completed: most common first. */
+  | { type: 'parameterValues'; reqId: number; values: ValueCount[] }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.

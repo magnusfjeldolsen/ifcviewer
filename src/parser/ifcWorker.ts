@@ -18,7 +18,9 @@
  *  - `intersect`    — fold N elements' properties into one synthetic result.
  *  - `enumerateIds` — list the expressIds of a class (or of every product).
  *  - `findMatching` — run a value-match predicate, reply with ids only.
- *  - `cancel`       — abandon an in-flight bulk job (NOT queued — see below).
+ *  - `describeParameters` — which parameters exist across a model, in
+ *                     background steps (see `parameterDiscovery.ts`).
+ *  - `cancel`      — abandon an in-flight bulk job (NOT queued — see below).
  *  - `disposeModel` — close a model and free its per-model caches.
  *  - `dispose`      — tear down the whole web-ifc instance.
  *
@@ -50,8 +52,8 @@ import {
   intersectFinalize,
   type RunningIntersection,
 } from '../inspector/intersection';
-import { elementMatches, type PropertySelector } from '../inspector/matchValue';
-import type { ElementProperties, PropertyValue } from '../inspector/types';
+import { elementMatches, type MatchTarget, type PropertySelector } from '../inspector/matchValue';
+import type { ElementProperties } from '../inspector/types';
 import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
 import type { ParsedMesh } from './types';
 import { weldForTransfer, WeldScratch } from './weld';
@@ -64,6 +66,8 @@ import { geometryProductIds } from './geometryProducts';
 import { StreamBatcher } from './streamBatcher';
 import { openPartFile, PartWriter, type SyncFile } from '../services/geometryParts';
 import { ShareRegistry } from './shareRegistry';
+import { SerialQueue } from './serialQueue';
+import { ParameterDiscoveries } from './parameterDiscovery';
 
 /**
  * When `parse` sends a `batch`: after this many products, or after this many
@@ -92,15 +96,36 @@ const unitTables = new Map<string, UnitTable>();
 const propertyCaches = new ModelPropertyCaches();
 
 /**
- * Serial request queue. Each message handler is appended to this chain so
- * one request fully settles before the next begins — web-ifc is single-
- * threaded and not re-entrant.
+ * Serial request queue. Each message handler is appended to it so one
+ * request fully settles before the next begins — web-ifc is single-
+ * threaded and not re-entrant. See `serialQueue.ts`.
  */
-let queue: Promise<void> = Promise.resolve();
+const queue = new SerialQueue();
 
 function enqueue(work: () => Promise<void>): void {
-  queue = queue.then(work, work);
+  queue.enqueue(work);
 }
+
+/**
+ * Parameter discovery per model (#67), in background steps on the same
+ * queue. Reads through the same cached per-element path as the bulk reads,
+ * and is dropped with the model's property cache.
+ */
+const discoveries = new ParameterDiscoveries({
+  queue,
+  openId: (id) => modelIds.get(id),
+  read: async (id, modelID, expressId) => {
+    const ifc = await getApi();
+    const unitTable = await ensureUnitTable(ifc, id, modelID);
+    return getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.for(id, ifc, modelID));
+  },
+  prepare: async (id, modelID) => {
+    const ifc = await getApi();
+    await ensureUnitTable(ifc, id, modelID);
+    propertyCaches.for(id, ifc, modelID).usable();
+  },
+  post: (msg) => post(msg),
+});
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(msg, transfer);
@@ -274,6 +299,9 @@ async function parseInto(
   opened.modelID = modelID;
   timeline.add('worker.open', performance.now() - t0);
   timeline.mark('worker.opened');
+  // A model opened again under the same id is a new model: whatever was
+  // discovered about the old one no longer applies.
+  discoveries.drop(id);
   modelIds.set(id, modelID);
 
   // The elements to stream, from the type index (milliseconds). Its length
@@ -321,6 +349,7 @@ function closeModel(id: string, modelID: number): void {
     modelIds.delete(id);
     unitTables.delete(id);
     propertyCaches.drop(id);
+    discoveries.drop(id);
   }
   try {
     api?.CloseModel(modelID);
@@ -491,6 +520,7 @@ function postBatch(
 async function handleOpenForProps(id: string, token: number, buffer: ArrayBuffer): Promise<void> {
   const ifc = await getApi();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  discoveries.drop(id);
   modelIds.set(id, modelID);
   post({ type: 'parsed', token });
 }
@@ -812,7 +842,8 @@ async function handleFindMatching(
   id: string,
   ifcType: number | null,
   selector: PropertySelector,
-  value: PropertyValue,
+  value: MatchTarget,
+  scope?: number[],
 ): Promise<void> {
   const ifc = await getApi();
   const modelID = modelIds.get(id);
@@ -820,7 +851,7 @@ async function handleFindMatching(
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
 
-  const candidates = candidateIds(ifc, modelID, ifcType);
+  const candidates = scope ?? candidateIds(ifc, modelID, ifcType);
   if (candidates.length === 0) {
     post({ type: 'progress', reqId, done: 0, total: 0 });
     post({ type: 'ids', reqId, ids: [] });
@@ -865,6 +896,7 @@ function handleDisposeModel(id: string): void {
   modelIds.delete(id);
   unitTables.delete(id);
   propertyCaches.drop(id);
+  discoveries.drop(id);
   if (modelID !== undefined && api) {
     try {
       api.CloseModel(modelID);
@@ -888,6 +920,7 @@ function handleDispose(): void {
   modelIds.clear();
   unitTables.clear();
   propertyCaches.clear();
+  discoveries.clear();
 }
 
 // --- message dispatch --------------------------------------------------------
@@ -979,7 +1012,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       enqueue(async () => {
         try {
           await runBulk(msg.reqId, () =>
-            handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value),
+            handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value, msg.candidates),
           );
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
@@ -995,6 +1028,15 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
         }
       });
+      break;
+
+    // Queues its own background steps (see `parameterDiscovery.ts`).
+    case 'describeParameters':
+      discoveries.request(msg.reqId, msg.id, msg.expressIds);
+      break;
+
+    case 'parameterValues':
+      discoveries.requestValues(msg.reqId, msg.id, msg.expressIds, msg.path);
       break;
 
     // NOT enqueued — deliberately. The job being cancelled is at the head
