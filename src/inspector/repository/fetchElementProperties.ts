@@ -103,6 +103,10 @@ export interface PropertyApi {
  * @param expressId  IFC line id of the element.
  * @param unitTable  The model's effective unit table (computed once by
  *                   the caller and reused across elements).
+ * @param cache      Per-model relationship cache, when the caller has one.
+ * @param className  Type code → IFC class name (`IfcSlab`). The worker passes
+ *                   one built on web-ifc's `GetNameFromTypeCode`; see
+ *                   `src/parser/ifcClassNames.ts`.
  */
 export async function fetchElementProperties(
   api: PropertyApi,
@@ -111,6 +115,7 @@ export async function fetchElementProperties(
   expressId: number,
   unitTable: UnitTable,
   cache?: ModelPropertyCache,
+  className?: (typeCode: number) => string,
 ): Promise<ElementProperties> {
   const [item, groups, materialsRaw] =
     cache && cache.webIfcId === webIfcId && cache.usable()
@@ -124,7 +129,7 @@ export async function fetchElementProperties(
 
   // The type object is resolved for its psets anyway; carrying its name onto
   // the identity costs nothing and is what "select all of this type" matches.
-  const identity = { ...buildIdentity(modelId, expressId, item), typeName };
+  const identity = { ...buildIdentity(modelId, expressId, item, className), typeName };
   const direct = buildDirect(identity, item);
 
   const { psets, qtos } = buildPsetAndQtoGroups(rawGroups, unitTable);

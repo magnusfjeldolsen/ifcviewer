@@ -35,6 +35,7 @@ import type { ElementProperties } from '../src/inspector/types';
 import { computeUnitTable } from '../src/inspector/repository/unitTable';
 import { elementMatches } from '../src/inspector/matchValue';
 import { typeQuery } from '../src/inspector/selectSimilar';
+import { createIfcClassNamer } from '../src/parser/ifcClassNames';
 
 // @ts-expect-error -- `process` is a Node global, no bundled types in this project
 const IFC_PATH = path.resolve(process.cwd(), 'assets/ifcs/RIB.ifc');
@@ -64,8 +65,11 @@ describe.skipIf(!FILE_PRESENT)('RIB.ifc end-to-end', () => {
     const ids: number[] = [];
     for (let i = 0; i < vec.size(); i++) ids.push(vec.get(i));
     all = [];
+    const className = createIfcClassNamer(api);
     for (const id of ids) {
-      all.push(await fetchElementProperties(propApi, modelID, MODEL_UUID, id, unitTable));
+      all.push(
+        await fetchElementProperties(propApi, modelID, MODEL_UUID, id, unitTable, undefined, className),
+      );
     }
   }, 180_000);
 
@@ -87,6 +91,16 @@ describe.skipIf(!FILE_PRESENT)('RIB.ifc end-to-end', () => {
   it('reads the file at all — a fixture with no products makes every other assertion vacuous', () => {
     expect(all.length).toBeGreaterThan(0);
     expect(api.GetLineIDsWithType(modelID, IFCCOLUMN, false).size()).toBeGreaterThan(0);
+  });
+
+  it('names every element the class the dev build showed (issue #90)', () => {
+    // Unminified, the line object's constructor name is what the inspector
+    // used to show. The type-code name must agree with it on every element.
+    for (const p of all) {
+      const line = api.GetLine(modelID, p.identity.expressId) as object;
+      expect(p.identity.ifcClass).toBe(line.constructor.name);
+    }
+    expect(new Set(all.map((p) => p.identity.ifcClass)).size).toBeGreaterThan(2);
   });
 
   it('keeps BOTH instance-level and type-level psets on elements that have both', () => {
