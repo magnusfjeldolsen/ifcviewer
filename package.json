@@ -12,6 +12,7 @@
     "lint": "eslint src/ tests/",
     "typecheck": "tsc --noEmit",
     "bench": "node bench/run.mjs",
+    "compare": "node bench/compare.mjs",
     "lighthouse": "node bench/lighthouse.mjs",
     "postinstall": "node -e \"const fs=require('fs');const p='public';if(!fs.existsSync(p))fs.mkdirSync(p);['web-ifc.wasm','web-ifc-mt.wasm'].forEach(f=>fs.copyFileSync('node_modules/web-ifc/'+f,p+'/'+f))\""
   },

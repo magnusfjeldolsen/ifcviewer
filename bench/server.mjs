@@ -5,11 +5,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const VITE = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
+const viteOf = (root) => path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
 
-/** Production build into dist/. Throws if it fails. */
-export function build() {
-  const r = spawnSync(process.execPath, [VITE, 'build'], { cwd: ROOT, stdio: 'inherit' });
+/** Production build into dist/ of `root` (default: this repo). Throws if it fails. */
+export function build(root = ROOT) {
+  const r = spawnSync(process.execPath, [viteOf(root), 'build'], { cwd: root, stdio: 'inherit' });
   if (r.status !== 0) throw new Error(`vite build failed (exit ${r.status})`);
 }
 
@@ -23,16 +23,17 @@ async function reachable(url) {
 }
 
 /**
- * Serve dist/ on `port` and resolve once it answers. Returns { url, stop }.
+ * Serve dist/ of `root` (default: this repo) on `port` and resolve once it
+ * answers. Returns { url, stop }.
  * `url` is the app's root (vite.config.ts sets base '/ifcviewer/').
  */
-export async function startPreview(port = 4173) {
+export async function startPreview(port = 4173, root = ROOT) {
   const url = `http://localhost:${port}/ifcviewer/`;
   if (await reachable(url)) {
     throw new Error(`Something is already serving ${url}; stop it or pass --url to attach to it`);
   }
-  const child = spawn(process.execPath, [VITE, 'preview', '--port', String(port), '--strictPort'], {
-    cwd: ROOT,
+  const child = spawn(process.execPath, [viteOf(root), 'preview', '--port', String(port), '--strictPort'], {
+    cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
