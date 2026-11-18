@@ -38,6 +38,12 @@ export interface DiscoveryHost {
   /** One element's properties through the cached per-element path. Called inside a queued step. */
   read(modelId: string, webIfcId: number, expressId: number): Promise<ElementProperties>;
   post(msg: FromWorker): void;
+  /**
+   * One-off work before the first element is read (building the model's
+   * relationship index). Given a step of its own, so a request that arrives
+   * meanwhile waits behind it or behind a chunk, never both.
+   */
+  prepare?(modelId: string, webIfcId: number): Promise<void>;
   /** Clock for progress throttling (tests). */
   now?: () => number;
 }
@@ -152,6 +158,10 @@ export class ParameterDiscoveries {
       if (kept && kept.webIfcId === open && kept.scope === job.scope) {
         this.finish(job, kept.result);
         return false;
+      }
+      if (this.host.prepare && job.ids.length > 0) {
+        await this.host.prepare(job.modelId, open);
+        return true;
       }
     } else if (open !== job.webIfcId) {
       this.fail(job, 'The model was closed');

@@ -119,6 +119,11 @@ const discoveries = new ParameterDiscoveries({
     const unitTable = await ensureUnitTable(ifc, id, modelID);
     return getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.for(id, ifc, modelID));
   },
+  prepare: async (id, modelID) => {
+    const ifc = await getApi();
+    await ensureUnitTable(ifc, id, modelID);
+    propertyCaches.for(id, ifc, modelID).usable();
+  },
   post: (msg) => post(msg),
 });
 

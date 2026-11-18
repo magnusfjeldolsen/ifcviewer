@@ -97,6 +97,32 @@ describe('parameter discovery scheduling', () => {
     expect(h.log).toEqual(['read 1', 'read 2', 'getProps', 'read 3', 'read 4', 'read 5', 'read 6']);
   });
 
+  it('prepares the model in a step of its own, ahead of the first chunk', async () => {
+    const queue = new SerialQueue();
+    const log: string[] = [];
+    const posted: FromWorker[] = [];
+    const d = new ParameterDiscoveries(
+      {
+        queue,
+        openId: () => 7,
+        prepare: async () => {
+          log.push('prepare');
+          // A click arrives while the index is being built.
+          setTimeout(() => queue.enqueue(async () => void log.push('getProps')), 0);
+        },
+        read: async (_m, _w, id) => {
+          log.push(`read ${id}`);
+          return element(id);
+        },
+        post: (m) => posted.push(m),
+      },
+      2,
+    );
+    d.request(1, 'm', [1, 2]);
+    while (!posted.some((m) => m.type === 'parameters')) await new Promise((r) => setTimeout(r, 1));
+    expect(log).toEqual(['prepare', 'getProps', 'read 1', 'read 2']);
+  });
+
   it('work queued during a step also runs before the next step', async () => {
     const h = harness(2);
     h.duringRead = () => h.queue.enqueue(async () => void h.log.push('select-similar'));
