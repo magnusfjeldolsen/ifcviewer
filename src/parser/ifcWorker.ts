@@ -20,6 +20,8 @@
  *  - `findMatching` — run a value-match predicate, reply with ids only.
  *  - `describeParameters` — which parameters exist across a model, in
  *                     background steps (see `parameterDiscovery.ts`).
+ *  - `parameterColumn` — one parameter's value for every element, as typed
+ *                     arrays, in the same background steps.
  *  - `cancel`      — abandon an in-flight bulk job (NOT queued — see below).
  *  - `disposeModel` — close a model and free its per-model caches.
  *  - `dispose`      — tear down the whole web-ifc instance.
@@ -124,7 +126,7 @@ const discoveries = new ParameterDiscoveries({
     await ensureUnits(ifc, id, modelID);
     propertyCaches.for(id, ifc, modelID).usable();
   },
-  post: (msg) => post(msg),
+  post: (msg, transfer) => post(msg, transfer),
 });
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
@@ -1034,8 +1036,8 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       discoveries.request(msg.reqId, msg.id, msg.expressIds);
       break;
 
-    case 'parameterValues':
-      discoveries.requestValues(msg.reqId, msg.id, msg.expressIds, msg.path);
+    case 'parameterColumn':
+      discoveries.requestColumn(msg.reqId, msg.id, msg.expressIds, msg.path);
       break;
 
     // NOT enqueued — deliberately. The job being cancelled is at the head

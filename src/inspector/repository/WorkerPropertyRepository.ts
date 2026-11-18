@@ -22,7 +22,7 @@ import type { WorkerIfcParser } from '../../parser/WorkerIfcParser';
 import type { FromWorker } from '../../parser/ifcMessages';
 import { intersectProperties as combineIntersections } from '../intersection';
 import type { MatchTarget, PropertySelector } from '../matchValue';
-import type { ValueCount } from '../parameterFold';
+import { columnBytes, type ColumnData, type ParameterColumn } from '../parameterColumn';
 import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 import { BulkRequestCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
 
@@ -52,6 +52,14 @@ interface PendingIds {
   onProgress?: (done: number, total: number) => void;
 }
 
+/** A value column, asked for or built. */
+interface ColumnEntry {
+  promise: Promise<ParameterColumn>;
+  reqId: number;
+  /** Set once built: what `columnMemory` counts. */
+  column?: ParameterColumn;
+}
+
 /** An in-flight background request, shared by everyone who asked the same question. */
 interface PendingBackground<T> {
   modelId: string;
@@ -73,10 +81,15 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   private unitInflight = new Map<number, PendingUnit>();
   /** In-flight `describeParameters` requests, correlated by reqId. */
   private paramInflight = new Map<number, PendingBackground<ModelParameters>>();
-  /** In-flight `parameterValues` requests, correlated by reqId. */
-  private valuesInflight = new Map<number, PendingBackground<ValueCount[]>>();
-  /** Values per model and parameter path; same lifetime as `paramMemo`. */
-  private valuesMemo = new Map<string, Map<string, { promise: Promise<ValueCount[]>; reqId: number }>>();
+  /** In-flight `parameterColumn` requests, correlated by reqId. */
+  private columnInflight = new Map<number, PendingBackground<ColumnData>>();
+  /**
+   * Value columns per model and parameter path, built on first ask and kept
+   * until `disposeModel` (or dropped on failure, so a later ask retries).
+   */
+  private columns = new Map<string, Map<string, ColumnEntry>>();
+  /** Each model's scope as `describeParameters` was given it: the rows of its columns. */
+  private scopes = new Map<string, Int32Array>();
   /**
    * Parameters per model: one request per model for its lifetime. Dropped on
    * `disposeModel`, and on failure so a later ask retries.
@@ -107,9 +120,10 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       for (const p of this.paramInflight.values()) p.reject(err);
       this.paramInflight.clear();
       this.paramMemo.clear();
-      for (const p of this.valuesInflight.values()) p.reject(err);
-      this.valuesInflight.clear();
-      this.valuesMemo.clear();
+      for (const p of this.columnInflight.values()) p.reject(err);
+      this.columnInflight.clear();
+      this.columns.clear();
+      this.scopes.clear();
       this.lengthUnits.clear();
       // Drop the memo too: its promises may be unsettled and the worker
       // state behind them is gone.
@@ -274,13 +288,15 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
         pending.reject(new Error('The model was closed'));
       }
     }
-    const values = this.valuesMemo.get(modelId);
-    if (values) {
-      this.valuesMemo.delete(modelId);
-      for (const { reqId } of values.values()) {
-        const pending = this.valuesInflight.get(reqId);
+    // Its columns go with it: this is what releases their memory.
+    this.scopes.delete(modelId);
+    const columns = this.columns.get(modelId);
+    if (columns) {
+      this.columns.delete(modelId);
+      for (const { reqId } of columns.values()) {
+        const pending = this.columnInflight.get(reqId);
         if (pending) {
-          this.valuesInflight.delete(reqId);
+          this.columnInflight.delete(reqId);
           pending.reject(new Error('The model was closed'));
         }
       }
@@ -318,42 +334,66 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     return reply;
   }
 
-  parameterValues(
+  /**
+   * The value column of one parameter of a model: its value for every
+   * element `describeParameters` was asked about, as typed arrays (see
+   * `parameterColumn.ts`). Built in the worker on first ask, in the same
+   * background steps as discovery, and kept until `disposeModel`; asking
+   * again returns the same promise. Rejects when the model's parameters have
+   * not been asked for, since their scope is the column's rows.
+   */
+  getColumn(
     modelId: string,
-    expressIds: readonly number[],
     path: string,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<ValueCount[]> {
-    let perModel = this.valuesMemo.get(modelId);
+  ): Promise<ParameterColumn> {
+    let perModel = this.columns.get(modelId);
     const memo = perModel?.get(path);
     if (memo) {
-      if (onProgress) this.valuesInflight.get(memo.reqId)?.listeners.add(onProgress);
+      if (onProgress) this.columnInflight.get(memo.reqId)?.listeners.add(onProgress);
       return memo.promise;
     }
+    const ids = this.scopes.get(modelId);
+    if (!ids) return Promise.reject(new Error(`No parameters described for model "${modelId}"`));
     const reqId = this.nextReqId++;
     const listeners = new Set<(done: number, total: number) => void>();
     if (onProgress) listeners.add(onProgress);
-    const promise = new Promise<ValueCount[]>((resolve, reject) => {
-      this.valuesInflight.set(reqId, { modelId, resolve, reject, listeners });
+    const data = new Promise<ColumnData>((resolve, reject) => {
+      this.columnInflight.set(reqId, { modelId, resolve, reject, listeners });
     });
-    const entry = { promise, reqId };
+    const entry: ColumnEntry = {
+      reqId,
+      promise: data.then((c) => {
+        const column: ParameterColumn = { ...c, modelId, ids };
+        entry.column = column;
+        return column;
+      }),
+    };
     if (!perModel) {
       perModel = new Map();
-      this.valuesMemo.set(modelId, perModel);
+      this.columns.set(modelId, perModel);
     }
     perModel.set(path, entry);
-    promise.catch(() => {
-      const m = this.valuesMemo.get(modelId);
+    entry.promise.catch(() => {
+      const m = this.columns.get(modelId);
       if (m?.get(path) === entry) m.delete(path);
     });
-    this.parser.getWorker().postMessage({
-      type: 'parameterValues',
-      reqId,
-      id: modelId,
-      expressIds: [...expressIds],
-      path,
-    });
-    return promise;
+    // The scope is copied, not transferred: every column of the model shares it.
+    this.parser.getWorker().postMessage({ type: 'parameterColumn', reqId, id: modelId, expressIds: ids, path });
+    return entry.promise;
+  }
+
+  /** Bytes held by a model's built columns, plus their shared scope once there is one. */
+  columnMemory(modelId: string): { columns: number; bytes: number } {
+    let bytes = 0;
+    let columns = 0;
+    for (const entry of this.columns.get(modelId)?.values() ?? []) {
+      if (!entry.column) continue;
+      columns++;
+      bytes += columnBytes(entry.column);
+    }
+    if (columns > 0) bytes += this.scopes.get(modelId)?.byteLength ?? 0;
+    return { columns, bytes };
   }
 
   /**
@@ -385,6 +425,8 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (onProgress) this.paramInflight.get(memo.reqId)?.listeners.add(onProgress);
       return memo.promise;
     }
+    // The rows of the model's value columns.
+    this.scopes.set(modelId, Int32Array.from(expressIds));
     const reqId = this.nextReqId++;
     const listeners = new Set<(done: number, total: number) => void>();
     if (onProgress) listeners.add(onProgress);
@@ -512,15 +554,15 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       pending.resolve(msg.result);
       return;
     }
-    if (msg.type === 'parameterValues') {
-      const pending = this.valuesInflight.get(msg.reqId);
+    if (msg.type === 'column') {
+      const pending = this.columnInflight.get(msg.reqId);
       if (!pending) return;
-      this.valuesInflight.delete(msg.reqId);
-      pending.resolve(msg.values);
+      this.columnInflight.delete(msg.reqId);
+      pending.resolve(msg.column);
       return;
     }
     if (msg.type === 'progress') {
-      const params = this.paramInflight.get(msg.reqId) ?? this.valuesInflight.get(msg.reqId);
+      const params = this.paramInflight.get(msg.reqId) ?? this.columnInflight.get(msg.reqId);
       if (params) {
         for (const listener of params.listeners) listener(msg.done, msg.total);
         return;
@@ -563,10 +605,10 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
         pendingParams.reject(new Error(msg.message));
         return;
       }
-      const pendingValues = this.valuesInflight.get(msg.reqId);
-      if (pendingValues) {
-        this.valuesInflight.delete(msg.reqId);
-        pendingValues.reject(new Error(msg.message));
+      const pendingColumn = this.columnInflight.get(msg.reqId);
+      if (pendingColumn) {
+        this.columnInflight.delete(msg.reqId);
+        pendingColumn.reject(new Error(msg.message));
       }
     }
   }

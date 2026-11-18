@@ -41,7 +41,8 @@ import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
-import type { ParameterValue } from '../inspector/types';
+import type { ParameterSummary, ParameterValue } from '../inspector/types';
+import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
@@ -654,17 +655,22 @@ export class App {
         );
       },
       isLoading: () => this.loadGate.busy,
+      // Values and selection both read the parameter's value column: built
+      // once in the worker (in the background, when the row is opened) and
+      // then answered on this thread without asking the worker again.
       loadValues: async (modelId, key, onProgress) => {
         await this.loadGate.idle();
-        return this.propertyRepository.parameterValues(
-          modelId,
-          this.modelManager.elementIds(modelId),
-          key,
-          onProgress,
-        );
+        return columnValueCounts(await this.propertyRepository.getColumn(modelId, key, onProgress));
       },
       selectValue: (modelId, parameter, value, additive) =>
-        void this.selectParameterValue(modelId, parameter.key, value, additive),
+        void this.selectParameterValue(modelId, parameter, value, additive),
+      prepare: (modelId, parameter) => {
+        void this.loadGate
+          .idle()
+          .then(() => this.propertyRepository.getColumn(modelId, parameter.key))
+          // Picking a value asks again and reports a failure then.
+          .catch(() => {});
+      },
     });
 
     // Persist the basket on every content change (debounced via the same
@@ -1369,11 +1375,13 @@ export class App {
   }
 
   /**
-   * The Parameters list's "select the elements with this value": the same
-   * worker predicate and bulk read as select-similar (`findMatching`), with
-   * the value compared the way the list counted it and the elements the
-   * viewer draws as candidates — so the count shown next to the value is the
-   * number selected. Like select-similar, hidden elements are selected too.
+   * The Parameters list's "select the elements with this value", read from
+   * the parameter's value column: the elements of the scope the list
+   * counted whose value is `value`, compared the way the list counted it —
+   * so the count shown next to the value is the number selected. The column
+   * is built once (usually already, when the row was opened); every later
+   * pick is a scan of a typed array on this thread, with the worker free.
+   * Like select-similar, hidden elements are selected too.
    *
    * `additive` (Ctrl/Shift) adds to the selection through the ordinary
    * `applyMany('add')`, which keeps the single-model lock; otherwise the
@@ -1381,22 +1389,22 @@ export class App {
    */
   private async selectParameterValue(
     modelId: string,
-    key: string,
+    parameter: ParameterSummary,
     value: ParameterValue,
     additive: boolean,
   ): Promise<void> {
+    const key = parameter.key;
+    // An inspector reduction for the previous selection would only hold up
+    // the column behind it in the worker's queue.
     this.propertyRepository.cancelBulk();
-    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}` };
+    const unit = typeof value === 'number' && parameter.unit ? ` ${parameter.unit}` : '';
+    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}` };
     this.setStatus(`Finding ${query.label}…`);
     try {
-      const ids = await this.propertyRepository.findMatching(
-        modelId,
-        null,
-        { path: key },
-        { kind: 'parameter-value', value },
-        (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
-        this.modelManager.elementIds(modelId),
+      const column = await this.propertyRepository.getColumn(modelId, key, (done, total) =>
+        this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
       );
+      const ids = columnIdsWithValue(column, value);
       // The class of each match is not known here: the inspector fills it in,
       // as it does for an all-products select-similar.
       const identities = ids.map((expressId) => ({ modelId, expressId, ifcClass: '', ifcTypeCode: 0 }));

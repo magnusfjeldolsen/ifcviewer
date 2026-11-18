@@ -177,31 +177,7 @@ export interface ValueCount {
   count: number;
 }
 
-/**
- * Every distinct value of ONE parameter, with counts and no cap: what a
- * parameter with more values than the description keeps is fetched with.
- * Same rule as the fold (first row per path, same value derivation), so its
- * counts are the counts the description would have shown.
- */
-export class ValueTally {
-  private values = new Map<ParameterValue, number>();
-
-  constructor(private readonly path: string) {}
-
-  add(props: ElementProperties): void {
-    const row = firstRowPerPath(props.flat).get(this.path);
-    if (!row) return;
-    const value = parameterValueOf(row.rawValue, row.displayValue);
-    if (value === null) return;
-    this.values.set(value, (this.values.get(value) ?? 0) + 1);
-  }
-
-  /** Most common first; ties in a stable value order. */
-  result(): ValueCount[] {
-    return sortValueCounts([...this.values.entries()].map(([value, count]) => ({ value, count })));
-  }
-}
-
+/** Most common first; ties in a stable value order (numbers, then yes/no, then text). */
 export function sortValueCounts(values: ValueCount[]): ValueCount[] {
   return values.sort((a, b) => b.count - a.count || compareValues(a.value, b.value));
 }

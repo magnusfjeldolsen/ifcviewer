@@ -7,7 +7,7 @@
  */
 
 import type { MatchTarget, PropertySelector } from '../matchValue';
-import type { ValueCount } from '../parameterFold';
+import type { ParameterColumn } from '../parameterColumn';
 import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 
 /**
@@ -121,15 +121,16 @@ export interface ElementPropertyRepository {
   ): Promise<ModelParameters>;
 
   /**
-   * Every distinct value of one parameter across `expressIds`, with counts,
-   * most common first: for a parameter with more distinct values than the
-   * description keeps. Background steps like `describeParameters`; kept per
-   * model and parameter until `disposeModel`.
+   * One parameter's value for every element `describeParameters` was asked
+   * about (the model's scope), as typed arrays: what colouring and totals
+   * read, and what the Parameters list counts and selects values with.
+   * Built in the worker on first ask, in background steps like
+   * `describeParameters`; kept per model and parameter until
+   * `disposeModel`. See `parameterColumn.ts`.
    */
-  parameterValues(
+  getColumn(
     modelId: string,
-    expressIds: readonly number[],
     path: string,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<ValueCount[]>;
+  ): Promise<ParameterColumn>;
 }

@@ -15,12 +15,17 @@
  *    model's web-ifc id. Before every step the model must still be open with
  *    that id; if it was closed or replaced, the job stops and its callers get
  *    an error. `drop` stops it straight away.
- *  - **Lazy and cached.** Nothing runs until asked. The result is kept per
- *    model and dropped with the model, together with its property cache.
+ *  - **Lazy and cached.** Nothing runs until asked. The description is kept
+ *    per model and dropped with the model, together with its property cache.
  *    Asking again while a job runs joins that job.
+ *
+ * The same steps build a value column (`requestColumn`): one parameter's
+ * value for every element of the scope, sent back in typed arrays that are
+ * transferred, not copied. Columns are kept on the main thread, not here.
  */
 
-import { ParameterFold, ValueTally } from '../inspector/parameterFold';
+import { ParameterFold } from '../inspector/parameterFold';
+import { ColumnBuilder, columnTransferables, type ColumnData } from '../inspector/parameterColumn';
 import type { ElementProperties, ModelParameters } from '../inspector/types';
 import type { FromWorker } from './ifcMessages';
 import type { SerialQueue } from './serialQueue';
@@ -37,7 +42,8 @@ export interface DiscoveryHost {
   openId(modelId: string): number | undefined;
   /** One element's properties through the cached per-element path. Called inside a queued step. */
   read(modelId: string, webIfcId: number, expressId: number): Promise<ElementProperties>;
-  post(msg: FromWorker): void;
+  /** Post a reply; `transfer` lists buffers to hand over rather than copy. */
+  post(msg: FromWorker, transfer?: Transferable[]): void;
   /**
    * One-off work before the first element is read (building the model's
    * relationship index). Given a step of its own, so a request that arrives
@@ -52,10 +58,10 @@ export interface DiscoveryHost {
  * Identifies a scope cheaply: its length and an FNV-1a hash of its ids, in
  * order. Two requests with the same fingerprint describe the same elements.
  */
-export function scopeFingerprint(ids: readonly number[]): string {
+export function scopeFingerprint(ids: ArrayLike<number>): string {
   let h = 0x811c9dc5;
-  for (const id of ids) {
-    h ^= id;
+  for (let i = 0; i < ids.length; i++) {
+    h ^= ids[i];
     h = Math.imul(h, 0x01000193);
   }
   return `${ids.length}:${(h >>> 0).toString(16)}`;
@@ -63,7 +69,8 @@ export function scopeFingerprint(ids: readonly number[]): string {
 
 /** What a job does with each element read, and how it answers when done. */
 interface JobFold {
-  add(props: ElementProperties): void;
+  /** Element `props` is the scope's element at `index`. */
+  add(props: ElementProperties, index: number): void;
   /** Post the answer to `reqId`. */
   reply(reqId: number, job: Job): void;
 }
@@ -72,7 +79,7 @@ interface Job {
   /** Jobs with the same key are the same question: a second ask joins. */
   key: string;
   modelId: string;
-  ids: readonly number[];
+  ids: ArrayLike<number>;
   scope: string;
   /** Bound by the first step. */
   webIfcId: number | undefined;
@@ -107,7 +114,7 @@ export class ParameterDiscoveries {
    * `parameters` message for `reqId` (or an `error`). Called straight from
    * the worker's message handler: it queues its own steps.
    */
-  request(reqId: number, modelId: string, expressIds: readonly number[]): void {
+  request(reqId: number, modelId: string, expressIds: ArrayLike<number>): void {
     const fold = new ParameterFold();
     let result: ModelParameters | null = null;
     this.start(reqId, modelId, expressIds, modelId, {
@@ -128,16 +135,23 @@ export class ParameterDiscoveries {
   }
 
   /**
-   * Every distinct value of one parameter (`path`) across `expressIds`, with
-   * counts, most common first — for a parameter with too many values for the
-   * description to keep. Same chunked, cancellable background steps as
-   * `request`; the answer is not kept here (the caller keeps it).
+   * The value column of one parameter (`path`) over `expressIds`: row i is
+   * `expressIds[i]`. Same background steps as `request`; replies with one
+   * `column` message whose arrays are transferred. Not kept here: the main
+   * thread keeps it, so asking twice (after the first answer) reads twice.
    */
-  requestValues(reqId: number, modelId: string, expressIds: readonly number[], path: string): void {
-    const tally = new ValueTally(path);
-    this.start(reqId, modelId, expressIds, `${modelId}|${path}`, {
-      add: (props) => tally.add(props),
-      reply: (r) => this.host.post({ type: 'parameterValues', reqId: r, values: tally.result() }),
+  requestColumn(reqId: number, modelId: string, expressIds: ArrayLike<number>, path: string): void {
+    const builder = new ColumnBuilder(path, expressIds.length);
+    let column: ColumnData | null = null;
+    this.start(reqId, modelId, expressIds, `${modelId}|column|${path}`, {
+      add: (props, index) => builder.add(index, props),
+      reply: (r, job) => {
+        column ??= builder.finish();
+        // The last waiter is handed the arrays; any before it (rare: the main
+        // thread asks once per column) get a copy, sent while they still exist.
+        const last = job.waiters[job.waiters.length - 1] === r;
+        this.host.post({ type: 'column', reqId: r, column }, last ? columnTransferables(column) : []);
+      },
     });
   }
 
@@ -163,7 +177,7 @@ export class ParameterDiscoveries {
   private start(
     reqId: number,
     modelId: string,
-    expressIds: readonly number[],
+    expressIds: ArrayLike<number>,
     key: string,
     fold: JobFold,
     kept?: (job: Job) => ((reqId: number) => void) | null,
@@ -227,7 +241,8 @@ export class ParameterDiscoveries {
     const total = job.ids.length;
     const end = Math.min(job.pos + this.chunkSize, total);
     while (job.pos < end) {
-      const expressId = job.ids[job.pos++];
+      const index = job.pos++;
+      const expressId = job.ids[index];
       let props: ElementProperties;
       try {
         props = await this.host.read(job.modelId, job.webIfcId, expressId);
@@ -237,7 +252,7 @@ export class ParameterDiscoveries {
         job.unreadable++;
         continue;
       }
-      job.fold.add(props);
+      job.fold.add(props, index);
     }
 
     const now = (this.host.now ?? Date.now)();

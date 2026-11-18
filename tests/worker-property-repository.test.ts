@@ -228,26 +228,75 @@ describe('WorkerPropertyRepository — lifecycle', () => {
       expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(2);
     });
 
-    it('fetches one parameter\'s values once per model and path, and drops them on dispose', async () => {
+    it('builds a value column once per model and path, over the described scope, and keeps it', async () => {
       const { repo, worker } = setup();
+      void repo.describeParameters('m', [7, 8]);
       const seen: number[] = [];
-      const p = repo.parameterValues('m', [1, 2], 'P.X', (d) => seen.push(d));
-      const again = repo.parameterValues('m', [1, 2], 'P.X');
-      const msg = lastOfType(worker, 'parameterValues');
-      expect(msg).toMatchObject({ id: 'm', expressIds: [1, 2], path: 'P.X' });
-      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(1);
+      const p = repo.getColumn('m', 'P.X', (d) => seen.push(d));
+      const again = repo.getColumn('m', 'P.X');
+      const msg = lastOfType(worker, 'parameterColumn');
+      expect(msg).toMatchObject({ id: 'm', path: 'P.X' });
+      expect([...msg.expressIds]).toEqual([7, 8]);
+      expect(worker.posted.filter((m) => m.type === 'parameterColumn')).toHaveLength(1);
+
       worker.reply({ type: 'progress', reqId: msg.reqId, done: 2, total: 2 });
-      const values = [{ value: 'a', count: 2 }];
-      worker.reply({ type: 'parameterValues', reqId: msg.reqId, values });
-      await expect(p).resolves.toEqual(values);
-      await expect(again).resolves.toEqual(values);
+      const codes = Int32Array.from([0, -1]);
+      worker.reply({ type: 'column', reqId: msg.reqId, column: { type: 'discrete', key: 'P.X', count: 1, codes, dictionary: ['a'] } });
+      const column = await p;
+      expect(column).toMatchObject({ type: 'discrete', modelId: 'm', dictionary: ['a'] });
+      expect([...column.ids]).toEqual([7, 8]);
+      expect(await again).toBe(column);
       expect(seen).toEqual([2]);
 
-      const pending = repo.parameterValues('m', [1, 2], 'P.Y');
+      // Kept: asking later does not go back to the worker.
+      expect(await repo.getColumn('m', 'P.X')).toBe(column);
+      expect(worker.posted.filter((m) => m.type === 'parameterColumn')).toHaveLength(1);
+      // Its arrays plus the shared scope.
+      expect(repo.columnMemory('m')).toEqual({ columns: 1, bytes: 8 + 8 });
+    });
+
+    it('every column of a model shares one scope array', async () => {
+      const { repo, worker } = setup();
+      void repo.describeParameters('m', [1, 2]);
+      const a = repo.getColumn('m', 'P.A');
+      const b = repo.getColumn('m', 'P.B');
+      const [ma, mb] = worker.posted.filter((m) => m.type === 'parameterColumn') as { reqId: number }[];
+      const values = (): Float64Array => Float64Array.from([1, 2]);
+      worker.reply({ type: 'column', reqId: ma.reqId, column: { type: 'numeric', key: 'P.A', count: 2, values: values(), units: [], unitIndex: null } });
+      worker.reply({ type: 'column', reqId: mb.reqId, column: { type: 'numeric', key: 'P.B', count: 2, values: values(), units: [], unitIndex: null } });
+      expect((await a).ids).toBe((await b).ids);
+      expect(repo.columnMemory('m')).toEqual({ columns: 2, bytes: 16 + 16 + 8 });
+    });
+
+    it('cannot build a column before the model\'s parameters were asked for', async () => {
+      const { repo, worker } = setup();
+      await expect(repo.getColumn('m', 'P.X')).rejects.toThrow(/No parameters described/);
+      expect(worker.posted.some((m) => m.type === 'parameterColumn')).toBe(false);
+    });
+
+    it('releases columns with the model, and rejects one still being built', async () => {
+      const { repo, worker } = setup();
+      void repo.describeParameters('m', [1]).catch(() => {});
+      const built = repo.getColumn('m', 'P.X');
+      const { reqId } = lastOfType(worker, 'parameterColumn');
+      worker.reply({ type: 'column', reqId, column: { type: 'discrete', key: 'P.X', count: 0, codes: Int32Array.from([-1]), dictionary: [] } });
+      await built;
+      const pending = repo.getColumn('m', 'P.Y');
       repo.disposeModel('m');
       await expect(pending).rejects.toThrow(/closed/);
-      void repo.parameterValues('m', [1, 2], 'P.X').catch(() => {});
-      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(3);
+      expect(repo.columnMemory('m')).toEqual({ columns: 0, bytes: 0 });
+      // Gone with the model: no scope until it is described again.
+      await expect(repo.getColumn('m', 'P.X')).rejects.toThrow(/No parameters described/);
+    });
+
+    it('a failed column is not kept: asking again builds it again', async () => {
+      const { repo, worker } = setup();
+      void repo.describeParameters('m', [1]);
+      const p = repo.getColumn('m', 'P.X');
+      worker.reply({ type: 'error', reqId: lastOfType(worker, 'parameterColumn').reqId, message: 'boom' });
+      await expect(p).rejects.toThrow('boom');
+      void repo.getColumn('m', 'P.X').catch(() => {});
+      expect(worker.posted.filter((m) => m.type === 'parameterColumn')).toHaveLength(2);
     });
 
     it('findMatching passes an explicit candidate set and a parameter-value target', () => {

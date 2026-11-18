@@ -15,13 +15,14 @@
  *
  * Transferables: the sender transfers (not copies) the backing
  * `ArrayBuffer` of every typed array — the `.ifc` bytes in `parse` /
- * `openForProps`, and the vertices / normals / indices in `batch`. After
- * a buffer is transferred it is neutered; the sender must not touch it.
+ * `openForProps`, the vertices / normals / indices in `batch`, and a value
+ * column's arrays in `column`. After a buffer is transferred it is neutered;
+ * the sender must not touch it.
  */
 
 import type { ElementProperties, ModelParameters } from '../inspector/types';
 import type { MatchTarget, PropertySelector } from '../inspector/matchValue';
-import type { ValueCount } from '../inspector/parameterFold';
+import type { ColumnData } from '../inspector/parameterColumn';
 import type { ParsedMesh } from './types';
 import type { WorkerTimings } from '../core/LoadTimeline';
 import type { CacheWriteReport } from '../services/geometryParts';
@@ -125,12 +126,13 @@ export type ToWorker =
    */
   | { type: 'describeParameters'; reqId: number; id: string; expressIds: number[] }
   /**
-   * Every distinct value of one parameter (`path`) across `expressIds`, with
-   * counts, for a parameter with more values than the description keeps.
-   * Background steps like `describeParameters`; replies with `progress` and
-   * one `parameterValues`.
+   * The value column of one parameter (`path`): its value for each of
+   * `expressIds`, in typed arrays (see `parameterColumn.ts`). Row i is
+   * `expressIds[i]`; the main thread keeps the ids, so they are not sent
+   * back. Background steps like `describeParameters`; replies with
+   * `progress` and one `column`.
    */
-  | { type: 'parameterValues'; reqId: number; id: string; expressIds: number[]; path: string }
+  | { type: 'parameterColumn'; reqId: number; id: string; expressIds: Int32Array; path: string }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -190,8 +192,8 @@ export type FromWorker =
   | { type: 'lengthUnit'; reqId: number; symbol: string }
   /** A `describeParameters` completed. */
   | { type: 'parameters'; reqId: number; result: ModelParameters }
-  /** A `parameterValues` completed: most common first. */
-  | { type: 'parameterValues'; reqId: number; values: ValueCount[] }
+  /** A `parameterColumn` completed. Its typed arrays are transferred. */
+  | { type: 'column'; reqId: number; column: ColumnData }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.
