@@ -30,6 +30,7 @@
  */
 
 import type { ElementProperties, PropertyValue } from './types';
+import { firstRowPerPath } from './repository/flatRows';
 
 /** Identifies one property by its flat-row path. */
 export interface PropertySelector {
@@ -85,7 +86,7 @@ export function elementMatches(
   selector: PropertySelector,
   value: PropertyValue,
 ): boolean {
-  const row = props.flat.find((r) => r.path === selector.path);
+  const row = firstRowPerPath(props.flat).get(selector.path);
   if (!row) return false;
   return valuesMatch(row.rawValue, value);
 }

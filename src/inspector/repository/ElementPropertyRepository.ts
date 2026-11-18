@@ -7,7 +7,7 @@
  */
 
 import type { PropertySelector } from '../matchValue';
-import type { ElementIdentity, ElementProperties, ModelSchema, PropertyValue } from '../types';
+import type { ElementIdentity, ElementProperties, ModelParameters, PropertyValue } from '../types';
 
 /**
  * Rejection reason for a bulk request the caller abandoned via
@@ -99,11 +99,19 @@ export interface ElementPropertyRepository {
     onProgress?: (done: number, total: number) => void,
   ): Promise<number[]>;
 
-  // -------------------------------------------------------------------------
-  // Future hooks. Stubbed — concrete impls may throw `not yet implemented`
-  // until the downstream consumers (filter UI, aggregation) land.
-  // -------------------------------------------------------------------------
-
-  /** Summarize the schema of a loaded model (class counts, etc.). */
-  describeSchema(modelId: string): Promise<ModelSchema>;
+  /**
+   * Which parameters exist across `expressIds` of one model — the elements
+   * the viewer draws — with element counts, kinds, ranges and distinct
+   * values (#67).
+   *
+   * Runs in the worker in short background steps, so property clicks and
+   * select-similar issued meanwhile are not held up behind it. The result is
+   * kept per model until `disposeModel`; asking again returns the same
+   * promise. `onProgress` reports `done` / `total` elements read.
+   */
+  describeParameters(
+    modelId: string,
+    expressIds: readonly number[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ModelParameters>;
 }

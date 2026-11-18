@@ -167,11 +167,46 @@ export interface PropertyFlatRow {
 }
 
 // ---------------------------------------------------------------------------
-// Schema discovery (stubbed in Phase 1; full impl deferred)
+// Parameter discovery: which parameters exist across a model (#67)
 // ---------------------------------------------------------------------------
 
-export interface ModelSchema {
+/**
+ * What kind of values a parameter holds, decided from the normalised value's
+ * JavaScript type. `mixed` when elements disagree (a number on some, text on
+ * others) — rare, and worth showing rather than hiding.
+ */
+export type ParameterKind = 'numeric' | 'text' | 'boolean' | 'mixed';
+
+/** One value as discovery counts it. Enumerations are joined, as the inspector shows them. */
+export type ParameterValue = string | number | boolean;
+
+export interface ParameterSummary {
+  /** The flat-row path, e.g. "Pset_BeamCommon.LoadBearing" or "Identity.Name". */
+  key: string;
+  /** Elements in the scope that have a value at this path. */
+  count: number;
+  kind: ParameterKind;
+  /** Unit suffix as the inspector shows it, from the first element that has one. */
+  unit?: string;
+  /** True when elements in the scope show different units for this path. */
+  unitsDiffer?: boolean;
+  /** Over the numeric values only; absent when there are none. */
+  numeric?: { min: number; max: number; sum: number };
+  /** Number of distinct values, or null when there are more than the cap. */
+  distinct: number | null;
+  /** The distinct values with their counts, most common first. Absent over the cap. */
+  values?: { value: ParameterValue; count: number }[];
+  /** No value repeats across two or more elements (GlobalId, Tag, …). */
+  uniquePerElement: boolean;
+}
+
+/** The parameters of one model over one scope of elements. */
+export interface ModelParameters {
   modelId: string;
-  /** Map from IfcClass name → element count in the model. */
-  classCounts: Map<string, number>;
+  /** Elements in the scope: those with geometry in the viewer. */
+  scopeSize: number;
+  /** Elements whose properties could not be read; absent when every one could. */
+  unreadable?: number;
+  /** Sorted by key. */
+  parameters: ParameterSummary[];
 }

@@ -19,7 +19,7 @@
  * a buffer is transferred it is neutered; the sender must not touch it.
  */
 
-import type { ElementProperties, PropertyValue } from '../inspector/types';
+import type { ElementProperties, ModelParameters, PropertyValue } from '../inspector/types';
 import type { PropertySelector } from '../inspector/matchValue';
 import type { ParsedMesh } from './types';
 import type { WorkerTimings } from '../core/LoadTimeline';
@@ -111,6 +111,15 @@ export type ToWorker =
    * was authored in.
    */
   | { type: 'getLengthUnit'; reqId: number; id: string }
+  /**
+   * Which parameters exist across `expressIds` (the elements the viewer
+   * draws), with counts, kinds, ranges and distinct values. Runs in the
+   * background: in short steps that let every other request go first.
+   * Kept per model until the model is closed. Replies with `progress`
+   * messages and one `parameters`. NOT cancelled by `cancel`, which belongs
+   * to the bulk reads; it stops when its model is closed or replaced.
+   */
+  | { type: 'describeParameters'; reqId: number; id: string; expressIds: number[] }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */
@@ -168,6 +177,8 @@ export type FromWorker =
   | { type: 'ids'; reqId: number; ids: number[] }
   /** A `getLengthUnit` completed. `symbol` is `"m"` when the model names none. */
   | { type: 'lengthUnit'; reqId: number; symbol: string }
+  /** A `describeParameters` completed. */
+  | { type: 'parameters'; reqId: number; result: ModelParameters }
   /**
    * A request failed. Exactly one correlation key is set: `id` for a
    * model-scoped op, `reqId` for a property query.
