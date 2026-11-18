@@ -182,6 +182,9 @@ export class App {
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
   private parametersPanel!: ParametersPanel;
+  /** Columns asked for because their parameter is open: `${modelId}
+${key}`. */
+  private preparedColumns = new Set<string>();
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -665,12 +668,27 @@ export class App {
       },
       selectValue: (modelId, parameter, value, additive, unit) =>
         void this.selectParameterValue(modelId, parameter, value, additive, unit),
+      // Opening a parameter builds its column in case a value is picked;
+      // closing it again (or opening another) gives that build up, so
+      // browsing the list never leaves scans running that nobody needs.
       prepare: (modelId, parameter) => {
+        const wanted = `${modelId}
+${parameter.key}`;
+        this.preparedColumns.add(wanted);
         void this.loadGate
           .idle()
-          .then(() => this.propertyRepository.getColumn(modelId, parameter.key))
-          // Picking a value asks again and reports a failure then.
+          .then(() => {
+            // Closed again while a load was running: never started.
+            if (!this.preparedColumns.has(wanted)) return;
+            return this.propertyRepository.getColumn(modelId, parameter.key);
+          })
+          // Given up, or failed: picking a value asks again and reports a failure then.
           .catch(() => {});
+      },
+      release: (modelId, parameter) => {
+        this.preparedColumns.delete(`${modelId}
+${parameter.key}`);
+        this.propertyRepository.releaseColumn(modelId, parameter.key);
       },
     });
 
@@ -1405,8 +1423,13 @@ export class App {
     const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}` };
     this.setStatus(`Finding ${query.label}…`);
     try {
-      const column = await this.propertyRepository.getColumn(modelId, key, (done, total) =>
-        this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+      // Urgent: a column built in case goes ahead of any other background
+      // work now that someone is waiting on it, and is no longer given up.
+      const column = await this.propertyRepository.getColumn(
+        modelId,
+        key,
+        (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+        { urgent: true },
       );
       const ids = columnIdsWithValue(column, value, valueUnit?.key);
       // The class of each match is not known here: the inspector fills it in,

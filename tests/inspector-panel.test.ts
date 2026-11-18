@@ -226,6 +226,9 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
     getColumn() {
       throw new Error('not implemented');
     },
+    releaseColumn() {
+      /* no-op */
+    },
     describeParameters() {
       throw new Error('not implemented');
     },
@@ -1060,6 +1063,7 @@ describe('InspectorPanel', () => {
         getColumn: () => {
           throw new Error('not implemented');
         },
+        releaseColumn: () => {},
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1220,6 +1224,7 @@ describe('InspectorPanel', () => {
         getColumn: () => {
           throw new Error('not implemented');
         },
+        releaseColumn: () => {},
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1323,6 +1328,7 @@ describe('InspectorPanel', () => {
         getColumn: () => {
           throw new Error('not implemented');
         },
+        releaseColumn: () => {},
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1377,6 +1383,7 @@ describe('InspectorPanel', () => {
         getColumn: () => {
           throw new Error('not implemented');
         },
+        releaseColumn: () => {},
         describeParameters: () => {
           throw new Error('not implemented');
         },

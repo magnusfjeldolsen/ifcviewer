@@ -254,6 +254,20 @@ describe('opening a parameter', () => {
     expect(onPickValue.mock.calls[0][3]).toEqual(m);
   });
 
+  it('tells whoever listens when the open row closes: second click, another row, or other data', () => {
+    const onClose = vi.fn();
+    const { head, list } = listWith({ onClose });
+    const closed = (): string[] => onClose.mock.calls.map((c) => `${c[1]}:${c[0].key}`);
+    head('P.Profile').click();
+    head('P.Profile').click();
+    expect(closed()).toEqual(['m:P.Profile']);
+    head('P.Profile').click();
+    head('P.LoadBearing').click();
+    expect(closed()).toEqual(['m:P.Profile', 'm:P.Profile']);
+    list.setData({ ...scope, modelId: 'other' });
+    expect(closed()).toEqual(['m:P.Profile', 'm:P.Profile', 'm:P.LoadBearing']);
+  });
+
   it('tells whoever listens when a row is opened, so picking can get ready', () => {
     const onOpen = vi.fn();
     const { head } = listWith({ onOpen });
@@ -424,6 +438,28 @@ describe('ParametersPanel', () => {
     expect(prepare).toHaveBeenCalledTimes(1);
     expect(prepare.mock.calls[0][0]).toBe('m');
     expect(prepare.mock.calls[0][1].key).toBe('Pset_BeamCommon.LoadBearing');
+  });
+
+  it('closing a parameter, or the panel, releases what opening it got ready', async () => {
+    const release = vi.fn();
+    const parent = document.createElement('div');
+    const panel = new ParametersPanel(parent, {
+      getModels: () => [{ id: 'm', name: 'A.ifc' }],
+      describe: async () => DATA,
+      prepare: () => {},
+      release,
+    });
+    panel.open('m');
+    await flush();
+    const head = (k: string) => parent.querySelector<HTMLButtonElement>(`[data-key="${k}"] .param-head`)!;
+    head('Pset_BeamCommon.LoadBearing').click();
+    head('Identity.GlobalId').click();
+    expect(release.mock.calls.map((c) => `${c[0]}:${c[1].key}`)).toEqual(['m:Pset_BeamCommon.LoadBearing']);
+    panel.close();
+    expect(release.mock.calls.map((c) => `${c[0]}:${c[1].key}`)).toEqual([
+      'm:Pset_BeamCommon.LoadBearing',
+      'm:Identity.GlobalId',
+    ]);
   });
 
   it('keeps clear of the contextual tray by its height', () => {

@@ -24,7 +24,7 @@ import { intersectProperties as combineIntersections } from '../intersection';
 import type { MatchTarget, PropertySelector } from '../matchValue';
 import { columnBytes, type ColumnData, type ParameterColumn } from '../parameterColumn';
 import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
-import { BulkRequestCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
+import { BulkRequestCancelled, ColumnBuildCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
 
 /** Resolve/reject pair for one in-flight `getProps` request. */
 interface PendingProps {
@@ -52,10 +52,22 @@ interface PendingIds {
   onProgress?: (done: number, total: number) => void;
 }
 
+/** Two scopes are the same elements in the same order. */
+function sameIds(a: Int32Array, b: Int32Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /** A value column, asked for or built. */
 interface ColumnEntry {
   promise: Promise<ParameterColumn>;
   reqId: number;
+  /**
+   * Someone is waiting on it (a value was picked): it is not given up when
+   * its parameter closes, and it goes first in the worker.
+   */
+  urgent: boolean;
   /** Set once built: what `columnMemory` counts. */
   column?: ParameterColumn;
 }
@@ -346,11 +358,18 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     modelId: string,
     path: string,
     onProgress?: (done: number, total: number) => void,
+    options: { urgent?: boolean } = {},
   ): Promise<ParameterColumn> {
+    const urgent = options.urgent === true;
     let perModel = this.columns.get(modelId);
     const memo = perModel?.get(path);
     if (memo) {
       if (onProgress) this.columnInflight.get(memo.reqId)?.listeners.add(onProgress);
+      // A pick now waits on a build that was started in case: it goes first.
+      if (urgent && !memo.urgent && !memo.column) {
+        memo.urgent = true;
+        this.parser.getWorker().postMessage({ type: 'hurryColumn', reqId: memo.reqId });
+      }
       return memo.promise;
     }
     const ids = this.scopes.get(modelId);
@@ -363,6 +382,7 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     });
     const entry: ColumnEntry = {
       reqId,
+      urgent,
       promise: data.then((c) => {
         const column: ParameterColumn = { ...c, modelId, ids };
         entry.column = column;
@@ -379,8 +399,32 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (m?.get(path) === entry) m.delete(path);
     });
     // The scope is copied, not transferred: every column of the model shares it.
-    this.parser.getWorker().postMessage({ type: 'parameterColumn', reqId, id: modelId, expressIds: ids, path });
+    this.parser.getWorker().postMessage({ type: 'parameterColumn', reqId, id: modelId, expressIds: ids, path, urgent });
     return entry.promise;
+  }
+
+  /**
+   * The column of `path` is no longer about to be needed (its parameter was
+   * closed). A build still running is given up, in the worker too, so it
+   * does not hold up the next one; whoever awaited it gets
+   * `ColumnBuildCancelled`, and asking again starts afresh. A build someone
+   * picked a value from (urgent) is kept, and a finished column stays.
+   */
+  releaseColumn(modelId: string, path: string): void {
+    const perModel = this.columns.get(modelId);
+    const entry = perModel?.get(path);
+    if (!entry || entry.column || entry.urgent) return;
+    perModel!.delete(path);
+    this.cancelColumnBuild(entry.reqId, new ColumnBuildCancelled());
+  }
+
+  /** Reject a column build that is in flight and tell the worker to stop it. */
+  private cancelColumnBuild(reqId: number, err: Error): void {
+    const pending = this.columnInflight.get(reqId);
+    if (!pending) return;
+    this.columnInflight.delete(reqId);
+    pending.reject(err);
+    this.parser.getWorker().postMessage({ type: 'cancelColumn', reqId });
   }
 
   /** Bytes held by a model's built columns, plus their shared scope once there is one. */
@@ -425,8 +469,19 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (onProgress) this.paramInflight.get(memo.reqId)?.listeners.add(onProgress);
       return memo.promise;
     }
-    // The rows of the model's value columns.
-    this.scopes.set(modelId, Int32Array.from(expressIds));
+    // The rows of the model's value columns. Columns built over another
+    // scope (a retry after a failure, with different elements) no longer
+    // line up with it, so they go.
+    const scope = Int32Array.from(expressIds);
+    const previous = this.scopes.get(modelId);
+    if (previous && !sameIds(previous, scope)) {
+      const columns = this.columns.get(modelId);
+      this.columns.delete(modelId);
+      for (const entry of columns?.values() ?? []) {
+        this.cancelColumnBuild(entry.reqId, new Error('The parameters were described again over other elements'));
+      }
+    }
+    this.scopes.set(modelId, scope);
     const reqId = this.nextReqId++;
     const listeners = new Set<(done: number, total: number) => void>();
     if (onProgress) listeners.add(onProgress);

@@ -23,6 +23,18 @@ export class BulkRequestCancelled extends Error {
   }
 }
 
+/**
+ * The column a caller awaited was given up (`releaseColumn`) because its
+ * parameter was closed before it was built. Not a failure: asking again
+ * builds it.
+ */
+export class ColumnBuildCancelled extends Error {
+  constructor() {
+    super('The column was no longer needed');
+    this.name = 'ColumnBuildCancelled';
+  }
+}
+
 export interface ElementPropertyRepository {
   /**
    * Fetch properties for a single element. Results are memoized per
@@ -132,5 +144,17 @@ export interface ElementPropertyRepository {
     modelId: string,
     path: string,
     onProgress?: (done: number, total: number) => void,
+    /**
+     * `urgent`: someone is waiting on it now (a value was picked). It goes
+     * ahead of other background work and is not given up by `releaseColumn`.
+     */
+    options?: { urgent?: boolean },
   ): Promise<ParameterColumn>;
+
+  /**
+   * A column asked for in case (its parameter was opened) is no longer
+   * needed: give up its build if it is still running and nobody picked from
+   * it. See `ColumnBuildCancelled`.
+   */
+  releaseColumn(modelId: string, path: string): void;
 }

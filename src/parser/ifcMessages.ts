@@ -132,7 +132,18 @@ export type ToWorker =
    * back. Background steps like `describeParameters`; replies with
    * `progress` and one `column`.
    */
-  | { type: 'parameterColumn'; reqId: number; id: string; expressIds: Int32Array; path: string }
+  | { type: 'parameterColumn'; reqId: number; id: string; expressIds: Int32Array; path: string; urgent?: boolean }
+  /**
+   * The column for `reqId` is no longer wanted (its parameter was closed):
+   * it goes unanswered, and stops if nobody else waits for it. NOT enqueued,
+   * like `cancel`: it must reach a job that is between its steps.
+   */
+  | { type: 'cancelColumn'; reqId: number }
+  /**
+   * Someone is now waiting on the column for `reqId` (a value was picked):
+   * it goes ahead of every other background job. NOT enqueued.
+   */
+  | { type: 'hurryColumn'; reqId: number }
   /** Close a model in web-ifc and free its per-model caches. */
   | { type: 'disposeModel'; id: string }
   /** Dispose the whole web-ifc instance. Precedes `worker.terminate()`. */

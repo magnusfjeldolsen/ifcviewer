@@ -47,6 +47,8 @@ export interface ParametersPanelDeps {
    * viewer builds its value column in the background).
    */
   prepare?(modelId: string, parameter: ParameterSummary): void;
+  /** The parameter was closed again before a value was picked: what `prepare` started can stop. */
+  release?(modelId: string, parameter: ParameterSummary): void;
 }
 
 const counts = new Intl.NumberFormat('en-US');
@@ -129,6 +131,7 @@ export class ParametersPanel {
             if (this.modelId !== null) deps.prepare!(this.modelId, parameter);
           }
         : undefined,
+      onClose: deps.release ? (parameter, modelId) => deps.release!(modelId, parameter) : undefined,
     });
     parent.appendChild(this.container);
   }
@@ -180,6 +183,8 @@ export class ParametersPanel {
 
   close(): void {
     this.generation++;
+    // Closing the panel closes its open parameter, and so gives up its build.
+    this.list.open(null);
     this.modelId = null;
     this.container.classList.add('hidden');
   }

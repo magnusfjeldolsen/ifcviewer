@@ -90,6 +90,12 @@ interface Job {
   waiters: number[];
   stopped: boolean;
   lastProgressAt: number;
+  /**
+   * Someone is waiting on this job right now (a value was picked). While any
+   * job is urgent, every other job's steps stand aside, so a pick never
+   * waits behind a column built in case it was needed.
+   */
+  urgent: boolean;
   /** A kept answer for this question, if there is one: replies without reading. */
   kept?: () => ((reqId: number) => void) | null;
 }
@@ -140,7 +146,13 @@ export class ParameterDiscoveries {
    * `column` message whose arrays are transferred. Not kept here: the main
    * thread keeps it, so asking twice (after the first answer) reads twice.
    */
-  requestColumn(reqId: number, modelId: string, expressIds: ArrayLike<number>, path: string): void {
+  requestColumn(
+    reqId: number,
+    modelId: string,
+    expressIds: ArrayLike<number>,
+    path: string,
+    urgent = false,
+  ): void {
     const builder = new ColumnBuilder(path, expressIds.length);
     let column: ColumnData | null = null;
     this.start(reqId, modelId, expressIds, `${modelId}|column|${path}`, {
@@ -152,7 +164,33 @@ export class ParameterDiscoveries {
         const last = job.waiters[job.waiters.length - 1] === r;
         this.host.post({ type: 'column', reqId: r, column }, last ? columnTransferables(column) : []);
       },
-    });
+    }, undefined, urgent);
+  }
+
+  /**
+   * The caller of `reqId` no longer wants the answer: it goes unanswered.
+   * A job nobody waits for any more stops before its next step, so a column
+   * built for a parameter that was opened and closed again does not keep
+   * the worker busy. Called straight from the message handler, not queued.
+   */
+  cancel(reqId: number): void {
+    for (const job of this.jobs.values()) {
+      const i = job.waiters.indexOf(reqId);
+      if (i < 0) continue;
+      job.waiters.splice(i, 1);
+      if (job.waiters.length === 0) this.end(job);
+      return;
+    }
+  }
+
+  /**
+   * The caller of `reqId` is now waiting on it (a value was picked): its job
+   * goes first. Called straight from the message handler, not queued.
+   */
+  hurry(reqId: number): void {
+    for (const job of this.jobs.values()) {
+      if (job.waiters.includes(reqId)) job.urgent = true;
+    }
   }
 
   /** The model was closed: stop its jobs and forget its result. */
@@ -181,11 +219,13 @@ export class ParameterDiscoveries {
     key: string,
     fold: JobFold,
     kept?: (job: Job) => ((reqId: number) => void) | null,
+    urgent = false,
   ): void {
     const scope = scopeFingerprint(expressIds);
     const running = this.jobs.get(key);
     if (running && running.scope === scope) {
       running.waiters.push(reqId);
+      if (urgent) running.urgent = true;
       return;
     }
     // A different scope for the same question: the newer request wins.
@@ -203,6 +243,7 @@ export class ParameterDiscoveries {
       waiters: [reqId],
       stopped: false,
       lastProgressAt: -Infinity,
+      urgent,
     };
     if (kept) job.kept = () => kept(job);
     this.jobs.set(key, job);
@@ -215,6 +256,9 @@ export class ParameterDiscoveries {
   /** One step: bind or re-check the model, read a chunk, report. True while there is more. */
   private async step(job: Job): Promise<boolean> {
     if (job.stopped) return false;
+    // Stand aside for a job someone is waiting on: this step is queued again
+    // behind it without reading anything.
+    if (!job.urgent && this.anyUrgent()) return true;
     const open = this.host.openId(job.modelId);
 
     if (job.webIfcId === undefined) {
@@ -264,6 +308,11 @@ export class ParameterDiscoveries {
 
     this.end(job);
     for (const reqId of job.waiters) job.fold.reply(reqId, job);
+    return false;
+  }
+
+  private anyUrgent(): boolean {
+    for (const j of this.jobs.values()) if (j.urgent && !j.stopped) return true;
     return false;
   }
 

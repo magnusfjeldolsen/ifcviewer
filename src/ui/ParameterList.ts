@@ -53,6 +53,12 @@ export interface ParameterListOptions {
    * picking needs can start getting ready.
    */
   onOpen?(parameter: ParameterSummary): void;
+  /**
+   * The open row closed: by a second click, by another row opening, or by
+   * the list being given another model's data or none. Whatever `onOpen`
+   * got ready for it can be given up. `modelId` is the model it belonged to.
+   */
+  onClose?(parameter: ParameterSummary, modelId: string): void;
 }
 
 /** "412 of 1,235". */
@@ -214,6 +220,7 @@ export class ParameterList {
    */
   setData(data: ModelParameters | null): void {
     if (data?.modelId !== this.data?.modelId || data === null) {
+      this.closed(this.openKey);
       this.openKey = null;
       this.valueFilter = '';
       this.fetched.clear();
@@ -240,6 +247,7 @@ export class ParameterList {
   /** Open one row (or close all with null), as a click on its header does. */
   open(key: string | null): void {
     const previous = this.openKey;
+    if (previous !== key) this.closed(previous);
     this.openKey = key;
     this.valueFilter = '';
     this.refreshOpen = null;
@@ -253,6 +261,13 @@ export class ParameterList {
 
   openRow(): string | null {
     return this.openKey;
+  }
+
+  /** Tell `onClose` that row `key` (of the data shown now) is no longer open. */
+  private closed(key: string | null): void {
+    if (key === null || !this.data) return;
+    const p = this.data.parameters.find((x) => x.key === key);
+    if (p) this.options.onClose?.(p, this.data.modelId);
   }
 
   getContainer(): HTMLElement {

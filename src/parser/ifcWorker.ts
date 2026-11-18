@@ -1037,7 +1037,16 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       break;
 
     case 'parameterColumn':
-      discoveries.requestColumn(msg.reqId, msg.id, msg.expressIds, msg.path);
+      discoveries.requestColumn(msg.reqId, msg.id, msg.expressIds, msg.path, msg.urgent === true);
+      break;
+
+    // NOT enqueued: they act on background jobs between their steps.
+    case 'cancelColumn':
+      discoveries.cancel(msg.reqId);
+      break;
+
+    case 'hurryColumn':
+      discoveries.hurry(msg.reqId);
       break;
 
     // NOT enqueued — deliberately. The job being cancelled is at the head
