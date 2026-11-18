@@ -514,6 +514,7 @@ function flatRowToNode(row: PropertyFlatRow): PropertyNode {
     key: row.name,
     value: row.rawValue,
     unit: row.unit,
+    unitKey: row.unitKey,
     description: row.description,
     source: row.source,
     inheritedFromType: row.inheritedFromType,

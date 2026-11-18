@@ -24,10 +24,10 @@ import {
   ModelPropertyCache,
   ModelPropertyCaches,
 } from '../src/inspector/repository/modelPropertyCache';
-import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { intersectSeed, intersectStep } from '../src/inspector/intersection';
 import type { ElementProperties } from '../src/inspector/types';
-import type { UnitTable } from '../src/inspector/format';
+import type { ModelUnits } from '../src/inspector/units';
 import workerSrc from '../src/parser/ifcWorker.ts?raw';
 
 type Snapshot = Omit<ElementProperties, 'fetchedAt'>;
@@ -46,8 +46,8 @@ function ids(api: IfcAPI, modelID: number, type: number): number[] {
   return out;
 }
 
-async function unitsOf(api: IfcAPI, modelID: number): Promise<UnitTable> {
-  return computeUnitTable(api as unknown as Parameters<typeof computeUnitTable>[0], modelID);
+async function unitsOf(api: IfcAPI, modelID: number): Promise<ModelUnits> {
+  return readModelUnits(api as unknown as Parameters<typeof readModelUnits>[0], modelID);
 }
 
 /**
@@ -110,7 +110,7 @@ function countingApi(api: IfcAPI): { api: IfcAPI; reads: Map<number, number> } {
 describe('ModelPropertyCache — a small Revit-shaped model', () => {
   let api: IfcAPI;
   let modelID: number;
-  let units: UnitTable;
+  let units: ModelUnits;
 
   beforeAll(async () => {
     api = new IfcAPI();

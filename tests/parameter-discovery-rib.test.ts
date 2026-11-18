@@ -22,11 +22,11 @@ import {
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
 import { ModelPropertyCache, type CacheableApi } from '../src/inspector/repository/modelPropertyCache';
-import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { firstRowPerPath } from '../src/inspector/repository/flatRows';
 import { parameterValueOf, type ValueCount } from '../src/inspector/parameterFold';
 import { elementMatches } from '../src/inspector/matchValue';
-import type { UnitTable } from '../src/inspector/format';
+import type { ModelUnits } from '../src/inspector/units';
 import type { ModelParameters, ParameterValue } from '../src/inspector/types';
 import { createIfcClassNamer } from '../src/parser/ifcClassNames';
 import { geometryProductIds } from '../src/parser/geometryProducts';
@@ -42,7 +42,7 @@ const FILE_PRESENT = existsSync(IFC_PATH);
 describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
   let api: IfcAPI;
   let modelID: number;
-  let unitTable: UnitTable;
+  let unitTable: ModelUnits;
   let className: (code: number) => string;
   /** The elements the viewer draws: those that stream geometry. */
   let scope: number[];
@@ -70,7 +70,7 @@ describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
     api = new IfcAPI();
     await api.Init();
     modelID = api.OpenModel(new Uint8Array(await fs.readFile(IFC_PATH)));
-    unitTable = await computeUnitTable(api as unknown as Parameters<typeof computeUnitTable>[0], modelID);
+    unitTable = await readModelUnits(api as unknown as Parameters<typeof readModelUnits>[0], modelID);
     className = createIfcClassNamer(api);
     const drawn = new Set<number>();
     api.StreamMeshes(modelID, geometryProductIds(api, modelID), (m) => {

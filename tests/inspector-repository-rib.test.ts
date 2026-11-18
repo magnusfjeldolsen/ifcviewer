@@ -32,7 +32,7 @@ import {
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
 import type { ElementProperties } from '../src/inspector/types';
-import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { elementMatches } from '../src/inspector/matchValue';
 import { typeQuery } from '../src/inspector/selectSimilar';
 import { createIfcClassNamer } from '../src/parser/ifcClassNames';
@@ -57,8 +57,8 @@ describe.skipIf(!FILE_PRESENT)('RIB.ifc end-to-end', () => {
     const buf = await fs.readFile(IFC_PATH);
     modelID = api.OpenModel(new Uint8Array(buf));
     const propApi = api as unknown as PropertyApi;
-    const unitTable = await computeUnitTable(
-      api as unknown as Parameters<typeof computeUnitTable>[0],
+    const unitTable = await readModelUnits(
+      api as unknown as Parameters<typeof readModelUnits>[0],
       modelID,
     );
     const vec = api.GetLineIDsWithType(modelID, IFCPRODUCT, true);
@@ -202,8 +202,8 @@ describe.skipIf(!SNOWDON_PRESENT)('select similar (Snowdon Towers — no ObjectT
 
     try {
       const propApi = api as unknown as PropertyApi;
-      const unitTable = await computeUnitTable(
-        api as unknown as Parameters<typeof computeUnitTable>[0],
+      const unitTable = await readModelUnits(
+        api as unknown as Parameters<typeof readModelUnits>[0],
         modelID,
       );
 

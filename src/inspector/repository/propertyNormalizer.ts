@@ -4,8 +4,8 @@
  *
  * This module contains NO orchestration — every function is synchronous
  * and takes plain JS objects (as produced by `IfcAPI.properties.*`) plus
- * an optional `UnitTable` for unit-suffix resolution. The async fetch
- * coordination lives in `WebIfcPropertyRepository`.
+ * the model's `ModelUnits` for units. The async fetch coordination lives in
+ * the IFC worker.
  *
  * Split out from `WebIfcPropertyRepository.ts` to keep the orchestration
  * file readable. No behavior change.
@@ -17,7 +17,11 @@ import {
   IFCCOMPLEXPROPERTY,
   IFCLOGICAL,
   IFCMATERIAL,
+  IFCPROPERTYBOUNDEDVALUE,
+  IFCPROPERTYENUMERATEDVALUE,
+  IFCPROPERTYLISTVALUE,
   IFCPROPERTYSINGLEVALUE,
+  IFCPROPERTYTABLEVALUE,
   IFCQUANTITYAREA,
   IFCQUANTITYCOUNT,
   IFCQUANTITYLENGTH,
@@ -26,11 +30,8 @@ import {
   IFCQUANTITYWEIGHT,
 } from '../ifcTypeCodes';
 
-import {
-  measureKindForType,
-  unitSuffixForType,
-  type UnitTable,
-} from '../format';
+import { formatRawValue, measureKindForType } from '../format';
+import { NO_UNIT, type ModelUnits, type UnitRef } from '../units';
 import type {
   ElementIdentity,
   PropertyGroup,
@@ -59,10 +60,16 @@ import type {
 export interface TypedValue {
   type: number;
   value: unknown;
+  /**
+   * The IFC type name, upper case (`"IFCLENGTHMEASURE"`, `"IFCLABEL"`), when
+   * known. What decides the value's unit: web-ifc's numeric `type` on a
+   * measure is only a primitive code, so the name is the measure's identity.
+   */
+  measure?: string;
 }
 
 /** Map IFC measure class names → typecodes so the new-shape wrappers can
- *  feed `unitSuffixForType` / `measureKindForType`. */
+ *  feed `measureKindForType`. */
 export const MEASURE_NAME_TO_TYPECODE: Readonly<Record<string, number>> = (() => {
   const w = IFC_TYPE_CODES;
   const out: Record<string, number> = {};
@@ -100,21 +107,27 @@ export function normalizeTypedValue(v: unknown): TypedValue | null {
   if (typeof v !== 'object' || v === null) return null;
   const obj = v as Record<string, unknown>;
   if (typeof obj.type !== 'number') return null;
+  const name = typeof obj.name === 'string' ? obj.name.toUpperCase() : null;
   // New shape: prefer the IFC class typecode resolved from the `name` string.
   if ('_representationValue' in obj || '_internalValue' in obj) {
-    const name = typeof obj.name === 'string' ? obj.name : null;
     const fromName = name ? MEASURE_NAME_TO_TYPECODE[name] : undefined;
     return {
       type: typeof fromName === 'number' ? fromName : obj.type,
       value: '_representationValue' in obj ? obj._representationValue : obj._internalValue,
+      measure: name ?? TYPECODE_TO_MEASURE.get(obj.type),
     };
   }
   // Old shape: must have a `value` key.
   if ('value' in obj) {
-    return { type: obj.type, value: obj.value };
+    return { type: obj.type, value: obj.value, measure: name ?? TYPECODE_TO_MEASURE.get(obj.type) };
   }
   return null;
 }
+
+/** The reverse of `MEASURE_NAME_TO_TYPECODE`, for wrappers that carry a class typecode but no name. */
+const TYPECODE_TO_MEASURE: ReadonlyMap<number, string> = new Map(
+  Object.entries(MEASURE_NAME_TO_TYPECODE).map(([name, code]) => [code, name]),
+);
 
 /**
  * Helper: read a typed-wrapper field, returning the raw `value` cast to
@@ -239,26 +252,30 @@ function quantityKindForType(
   }
 }
 
-/**
- * Map IFC quantity type code to the closest IFC measure type code, so
- * `unitSuffixForType` can pick the right unit from the unit table.
- */
-function quantityMeasureType(typeCode: number | undefined): number {
+/** The IFC unit type a quantity is in; null for a count, which has none. */
+function quantityUnitType(typeCode: number | undefined): string | null {
   switch (typeCode) {
     case IFCQUANTITYAREA:
-      return 2650437152; // IFCAREAMEASURE
+      return 'AREAUNIT';
     case IFCQUANTITYVOLUME:
-      return 3458127941; // IFCVOLUMEMEASURE
+      return 'VOLUMEUNIT';
     case IFCQUANTITYWEIGHT:
-      return 3124614049; // IFCMASSMEASURE
+      return 'MASSUNIT';
     case IFCQUANTITYTIME:
-      return 2726807636; // IFCTIMEMEASURE
+      return 'TIMEUNIT';
     case IFCQUANTITYCOUNT:
-      return 1778710042; // IFCCOUNTMEASURE
+      return null;
     case IFCQUANTITYLENGTH:
     default:
-      return 1243674935; // IFCLENGTHMEASURE
+      return 'LENGTHUNIT';
   }
+}
+
+/** Put a unit on a node: its symbol to show, and its key to compare. */
+function applyUnit(node: PropertyNode, unit: UnitRef): PropertyNode {
+  if (unit.symbol) node.unit = unit.symbol;
+  if (unit.key) node.unitKey = unit.key;
+  return node;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +378,7 @@ export function buildDirect(identity: ElementIdentity, item: unknown): PropertyN
 // PSet / Qto groups
 // ---------------------------------------------------------------------------
 
-export function buildPsetGroup(raw: unknown, unitTable: UnitTable | null): PropertyGroup | null {
+export function buildPsetGroup(raw: unknown, units: ModelUnits | null): PropertyGroup | null {
   if (!isObj(raw)) return null;
   const name = readString(raw.Name) ?? '(unnamed Pset)';
   const description = readString(raw.Description);
@@ -369,13 +386,13 @@ export function buildPsetGroup(raw: unknown, unitTable: UnitTable | null): Prope
   if (!Array.isArray(propsRaw)) return { name, source: 'pset', description, properties: [] };
   const properties: PropertyNode[] = [];
   for (const p of propsRaw) {
-    const node = buildPropertyNode(p, 'pset', unitTable);
+    const node = buildPropertyNode(p, 'pset', units);
     if (node) properties.push(node);
   }
   return { name, source: 'pset', description, properties };
 }
 
-export function buildQuantityGroup(raw: unknown, unitTable: UnitTable | null): PropertyGroup | null {
+export function buildQuantityGroup(raw: unknown, units: ModelUnits | null): PropertyGroup | null {
   if (!isObj(raw)) return null;
   const name = readString(raw.Name) ?? '(unnamed Qto)';
   const description = readString(raw.Description);
@@ -383,22 +400,35 @@ export function buildQuantityGroup(raw: unknown, unitTable: UnitTable | null): P
   if (!Array.isArray(quantsRaw)) return { name, source: 'qto', description, properties: [] };
   const properties: PropertyNode[] = [];
   for (const q of quantsRaw) {
-    const node = buildQuantityNode(q, unitTable);
+    const node = buildQuantityNode(q, units);
     if (node) properties.push(node);
   }
   return { name, source: 'qto', description, properties };
 }
 
-/** Build a property node from an IfcPropertySingleValue / ComplexProperty / etc. */
+/**
+ * Build a property node from an IfcPropertySingleValue, -EnumeratedValue,
+ * -ListValue, -BoundedValue, -TableValue or IfcComplexProperty.
+ *
+ * Units: a unit set on the property (`Unit`) wins over the project's unit for
+ * the value's measure; with neither, a measure's unit is "not stated" (see
+ * `units.ts`). What each kind shows (and the Parameters list counts as text):
+ *  - enumerated: its chosen values, joined;
+ *  - list: its items, joined, in the list's unit;
+ *  - bounded: "lower – upper", with the set point when there is one;
+ *  - table: its rows as "defining → defined" pairs.
+ */
 export function buildPropertyNode(
   raw: unknown,
   source: PropertySource,
-  unitTable: UnitTable | null,
+  units: ModelUnits | null,
 ): PropertyNode | null {
   if (!isObj(raw)) return null;
   const typeCode = getRawTypeCode(raw);
   const key = readString(raw.Name) ?? '(unnamed)';
   const description = readString(raw.Description);
+  const unitOf = (measure: string | undefined, own: unknown): UnitRef =>
+    units ? units.forMeasure(measure, own) : NO_UNIT;
 
   if (typeCode === IFCPROPERTYSINGLEVALUE) {
     const nv = raw.NominalValue;
@@ -409,13 +439,7 @@ export function buildPropertyNode(
         value: coerceSingleValue(norm),
         raw: { typeCode: norm.type, value: norm.value },
       };
-      return {
-        key,
-        value,
-        unit: unitSuffixForType(norm.type, unitTable) || undefined,
-        description,
-        source,
-      };
+      return applyUnit({ key, value, description, source }, unitOf(norm.measure, raw.Unit));
     }
     // Missing nominal value
     return {
@@ -431,7 +455,7 @@ export function buildPropertyNode(
     const children: PropertyNode[] = [];
     if (Array.isArray(childrenRaw)) {
       for (const c of childrenRaw) {
-        const node = buildPropertyNode(c, source, unitTable);
+        const node = buildPropertyNode(c, source, units);
         if (node) children.push(node);
       }
     }
@@ -443,8 +467,43 @@ export function buildPropertyNode(
     };
   }
 
-  // Other property kinds (enumerated, list, bounded, table) — render a
-  // sensible fallback. Full support lives in Phase 3.
+  if (typeCode === IFCPROPERTYENUMERATEDVALUE) {
+    const values: string[] = [];
+    for (const v of Array.isArray(raw.EnumerationValues) ? raw.EnumerationValues : []) {
+      const norm = normalizeTypedValue(v);
+      if (norm && norm.value !== null && norm.value !== undefined) values.push(formatRawValue(norm.type, norm.value));
+    }
+    return { key, value: { kind: 'enumerated', values }, description, source };
+  }
+
+  if (typeCode === IFCPROPERTYLISTVALUE) {
+    const items = typedList(raw.ListValues);
+    const value: PropertyValue = { kind: 'list', values: items.map(singleOf) };
+    return applyUnit({ key, value, description, source }, unitOf(items[0]?.measure, raw.Unit));
+  }
+
+  if (typeCode === IFCPROPERTYBOUNDEDVALUE) {
+    const lower = normalizeTypedValue(raw.LowerBoundValue);
+    const upper = normalizeTypedValue(raw.UpperBoundValue);
+    const setpoint = normalizeTypedValue(raw.SetPointValue);
+    const value: PropertyValue = { kind: 'bounded' };
+    if (typeof lower?.value === 'number') value.lower = lower.value;
+    if (typeof upper?.value === 'number') value.upper = upper.value;
+    if (typeof setpoint?.value === 'number') value.setpoint = setpoint.value;
+    const measure = (lower ?? upper ?? setpoint)?.measure;
+    return applyUnit({ key, value, description, source }, unitOf(measure, raw.Unit));
+  }
+
+  if (typeCode === IFCPROPERTYTABLEVALUE) {
+    const value: PropertyValue = {
+      kind: 'table',
+      defining: typedList(raw.DefiningValues).map(singleOf),
+      defined: typedList(raw.DefinedValues).map(singleOf),
+    };
+    return { key, value, description, source };
+  }
+
+  // Anything else (a reference value): present, without a value.
   return {
     key,
     value: { kind: 'single', value: null, raw: { typeCode: typeCode ?? 0, value: null } },
@@ -453,8 +512,26 @@ export function buildPropertyNode(
   };
 }
 
-/** Build a property node from an IfcPhysicalQuantity (length/area/etc.). */
-export function buildQuantityNode(raw: unknown, unitTable: UnitTable | null): PropertyNode | null {
+/** The typed values of a list attribute, skipping anything that is not one. */
+function typedList(v: unknown): TypedValue[] {
+  if (!Array.isArray(v)) return [];
+  const out: TypedValue[] = [];
+  for (const x of v) {
+    const n = normalizeTypedValue(x);
+    if (n) out.push(n);
+  }
+  return out;
+}
+
+function singleOf(n: TypedValue): PropertyValue {
+  return { kind: 'single', value: coerceSingleValue(n), raw: { typeCode: n.type, value: n.value } };
+}
+
+/**
+ * Build a property node from an IfcPhysicalQuantity (length/area/etc.). A
+ * unit set on the quantity wins over the project's unit for its kind.
+ */
+export function buildQuantityNode(raw: unknown, units: ModelUnits | null): PropertyNode | null {
   if (!isObj(raw)) return null;
   const typeCode = getRawTypeCode(raw);
   const key = readString(raw.Name) ?? '(unnamed)';
@@ -465,25 +542,13 @@ export function buildQuantityNode(raw: unknown, unitTable: UnitTable | null): Pr
   const num = readNumber(raw[valueField]);
   if (num === undefined) return null;
 
-  const quantityKind = quantityKindForType(typeCode);
-
   const value: PropertyValue = {
     kind: 'quantity',
-    quantityKind,
+    quantityKind: quantityKindForType(typeCode),
     value: num,
   };
-
-  // Pick a unit suffix: prefer the model's unit assignment for the matching
-  // measure kind; fall back to the default for that quantity kind.
-  const unit = unitSuffixForType(quantityMeasureType(typeCode), unitTable) || undefined;
-
-  return {
-    key,
-    value,
-    unit,
-    description,
-    source: 'qto',
-  };
+  const unit = units ? units.forUnitType(quantityUnitType(typeCode), raw.Unit) : NO_UNIT;
+  return applyUnit({ key, value, description, source: 'qto' }, unit);
 }
 
 // ---------------------------------------------------------------------------

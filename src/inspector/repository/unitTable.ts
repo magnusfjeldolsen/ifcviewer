@@ -1,31 +1,24 @@
 /**
- * Project-level IfcUnitAssignment readers.
+ * Reads a model's units from web-ifc: the project's unit assignment
+ * (`IfcProject.UnitsInContext.Units`) into a `ModelUnits`, which also reads
+ * the units set on single properties and quantities as they come up.
  *
- * `computeUnitTable` walks the `IfcProject.UnitsInContext.Units` list and
- * builds the model's effective `UnitTable` (driving the unit-pill suffix
- * in the inspector UI). Pure of orchestration concerns: takes a small
- * `UnitTableApi` so we can call it without depending on the full
- * `PropertyApi` surface.
- *
- * Split out of `WebIfcPropertyRepository.ts` to keep that file focused on
- * memoization + per-element fetch coordination. No behavior change.
+ * Only the web-ifc glue lives here; what a unit is, and how it is shown and
+ * compared, is `../units.ts`.
  */
 
-import { IFCPROJECT, IFCSIUNIT, IFCCONVERSIONBASEDUNIT } from '../ifcTypeCodes';
+import { IFCPROJECT } from '../ifcTypeCodes';
+import { ModelUnits } from '../units';
+import { isObj } from './propertyNormalizer';
 
-import {
-  buildUnitTable,
-  type RawUnitEntry,
-  type UnitTable,
-} from '../format';
-import { isObj, readString } from './propertyNormalizer';
-
-/** Minimal IfcAPI subset needed to read the project unit assignment. */
+/** Minimal IfcAPI subset needed to read a model's units. */
 export interface UnitTableApi {
   GetLineIDsWithType(modelID: number, type: number, includeInherited?: boolean): {
     get(index: number): number;
     size(): number;
   };
+  /** Reads a unit line set on a property (`flatten` resolves its references). */
+  GetLine?(modelID: number, expressID: number, flatten?: boolean): unknown;
   properties: {
     getItemProperties(
       modelID: number,
@@ -36,68 +29,33 @@ export interface UnitTableApi {
   };
 }
 
-/** Read one entry of `IfcProject.UnitsInContext.Units`. */
-export function readUnitEntry(u: unknown): RawUnitEntry | null {
-  if (!isObj(u)) return null;
-  const typeCode = typeof u.type === 'number' ? u.type : undefined;
-  const unitType = readString(u.UnitType);
-  if (!unitType) return null;
-
-  if (typeCode === IFCSIUNIT) {
-    return {
-      unitType,
-      siPrefix: readString(u.Prefix) ?? null,
-      siName: readString(u.Name) ?? null,
-    };
-  }
-  if (typeCode === IFCCONVERSIONBASEDUNIT) {
-    return {
-      unitType,
-      conversionLabel: readString(u.Name) ?? null,
-    };
-  }
-  // Derived units and other variants — skip in Phase 1.
-  return null;
-}
-
 /**
- * Compute the unit table for a model by walking IfcProject.UnitsInContext.
- * Returns an empty `UnitTable` if the project line cannot be read.
+ * The model's units. A model whose project cannot be read states no units:
+ * its measures read as "unit not stated" rather than as metres.
  *
  * `webIfcId` is the internal web-ifc model id (already resolved by the
  * caller via its UUID→numeric map).
  */
-export async function computeUnitTable(
-  api: UnitTableApi,
-  webIfcId: number,
-): Promise<UnitTable> {
-  // Find the project line. Models always have exactly one IfcProject.
+export async function readModelUnits(api: UnitTableApi, webIfcId: number): Promise<ModelUnits> {
+  const readLine = api.GetLine
+    ? (id: number): unknown => api.GetLine!(webIfcId, id, true)
+    : undefined;
+
   let projects: { get(i: number): number; size(): number };
   try {
     projects = api.GetLineIDsWithType(webIfcId, IFCPROJECT, false);
   } catch {
-    return buildUnitTable([]);
+    return ModelUnits.none(readLine);
   }
-  if (!projects || projects.size() === 0) return buildUnitTable([]);
-  const projectId = projects.get(0);
+  if (!projects || projects.size() === 0) return ModelUnits.none(readLine);
 
   let project: unknown;
   try {
-    project = await api.properties.getItemProperties(webIfcId, projectId, true, false);
+    project = await api.properties.getItemProperties(webIfcId, projects.get(0), true, false);
   } catch {
-    return buildUnitTable([]);
+    return ModelUnits.none(readLine);
   }
 
-  // Recursive walk down `UnitsInContext.Units` to collect SI / conversion units.
-  const entries: RawUnitEntry[] = [];
-  if (isObj(project)) {
-    const unitsInContext = project.UnitsInContext;
-    if (isObj(unitsInContext) && Array.isArray(unitsInContext.Units)) {
-      for (const u of unitsInContext.Units) {
-        const entry = readUnitEntry(u);
-        if (entry) entries.push(entry);
-      }
-    }
-  }
-  return buildUnitTable(entries);
+  const units = isObj(project) && isObj(project.UnitsInContext) ? project.UnitsInContext.Units : undefined;
+  return ModelUnits.fromAssignment(Array.isArray(units) ? units : [], readLine);
 }

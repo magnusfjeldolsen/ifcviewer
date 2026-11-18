@@ -13,9 +13,14 @@
  * One value per element per path: rows go through `firstRowPerPath`, the
  * same rule matching uses, so a path on both the instance and its type is
  * counted once, with the instance's value.
+ *
+ * Units: for numeric values it counts how many are in each unit (by unit
+ * key, see `units.ts`), so a parameter whose values are in different units
+ * is flagged and never added up as if they were one.
  */
 
 import { firstRowPerPath } from './repository/flatRows';
+import type { UnitCount } from './units';
 import type {
   ElementProperties,
   ModelParameters,
@@ -63,9 +68,8 @@ function kindOf(v: ParameterValue): Exclude<ParameterKind, 'mixed'> {
 interface Accumulator {
   count: number;
   kind: ParameterKind | null;
-  unit: string | undefined;
-  unitSeen: boolean;
-  unitsDiffer: boolean;
+  /** Numeric values per unit key (`""` = no unit), with the unit's symbol. */
+  units: Map<string, { symbol: string; count: number }>;
   min: number;
   max: number;
   sum: number;
@@ -100,9 +104,7 @@ export class ParameterFold {
         acc = {
           count: 0,
           kind: null,
-          unit: undefined,
-          unitSeen: false,
-          unitsDiffer: false,
+          units: new Map(),
           min: Infinity,
           max: -Infinity,
           sum: 0,
@@ -113,7 +115,7 @@ export class ParameterFold {
         };
         this.params.set(path, acc);
       }
-      this.fold(acc, value, row.unit);
+      this.fold(acc, value, row.unitKey ?? '', row.unit ?? '');
     }
   }
 
@@ -129,21 +131,15 @@ export class ParameterFold {
     return { modelId, scopeSize, parameters };
   }
 
-  private fold(acc: Accumulator, value: ParameterValue, unit: string | undefined): void {
+  private fold(acc: Accumulator, value: ParameterValue, unitKey: string, symbol: string): void {
     acc.count++;
     const kind = kindOf(value);
     acc.kind = acc.kind === null || acc.kind === kind ? kind : 'mixed';
 
-    if (unit !== undefined && unit !== '') {
-      if (!acc.unitSeen) {
-        acc.unit = unit;
-        acc.unitSeen = true;
-      } else if (unit !== acc.unit) {
-        acc.unitsDiffer = true;
-      }
-    }
-
     if (typeof value === 'number') {
+      const u = acc.units.get(unitKey);
+      if (u) u.count++;
+      else acc.units.set(unitKey, { symbol, count: 1 });
       if (value < acc.min) acc.min = value;
       if (value > acc.max) acc.max = value;
       acc.sum += value;
@@ -218,8 +214,14 @@ function summarise(key: string, acc: Accumulator): ParameterSummary {
     distinct: acc.values ? acc.values.size : null,
     uniquePerElement: !acc.repeated && acc.count > 1,
   };
-  if (acc.unit !== undefined) out.unit = acc.unit;
-  if (acc.unitsDiffer) out.unitsDiffer = true;
+  if (acc.units.size > 0) {
+    const units: UnitCount[] = [...acc.units.entries()]
+      .map(([key, u]) => ({ key, symbol: u.symbol, count: u.count }))
+      .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    out.units = units;
+    if (units.length > 1) out.unitsDiffer = true;
+    else if (units[0].symbol) out.unit = units[0].symbol;
+  }
   if (acc.numericCount > 0) out.numeric = { min: acc.min, max: acc.max, sum: acc.sum };
   if (acc.values) {
     out.values = sortValueCounts([...acc.values.entries()].map(([value, count]) => ({ value, count })));
