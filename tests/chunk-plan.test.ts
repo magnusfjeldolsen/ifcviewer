@@ -81,11 +81,16 @@ describe('planHelpers', () => {
     expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 32 })).toBe(MAX_HELPERS);
   });
 
-  it('fits helpers in a quarter of a small device’s memory', () => {
-    // 0.5 GB budget on a 2 GB device: none for a 357 MB file, the most for 48 MB.
-    expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 2 })).toBe(0);
-    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 2 })).toBe(MAX_HELPERS);
-    expect(planHelpers({ fileBytes: 100e6, cores: 20, deviceMemoryGB: 2 })).toBe(1);
+  it('gives a device that reports 4 GB or less no helpers at all', () => {
+    // Chrome reports 0.25, 0.5, 1, 2, 4 or 8: anything up to 4 is a small device.
+    for (const gb of [0.25, 0.5, 1, 2, 4]) {
+      expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: gb })).toBe(0);
+    }
+  });
+
+  it('keeps the usual limits when the device reports 8 GB, which is also what a 64 GB machine reports', () => {
+    expect(planHelpers({ fileBytes: 48e6, cores: 20, deviceMemoryGB: 8 })).toBe(MAX_HELPERS);
+    expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 8 })).toBe(1);
   });
 
   it('counts helpers of other loads against the same budget', () => {
@@ -95,7 +100,10 @@ describe('planHelpers', () => {
     expect(planHelpers({ fileBytes: 357e6, cores: 20, deviceMemoryGB: 32, helperBytesInUse: 3 * 357e6 })).toBe(0);
   });
 
-  it('assumes a modest device when the browser does not say', () => {
+  it('keeps the usual limits when the browser does not say (Firefox, Safari)', () => {
+    expect(planHelpers({ fileBytes: 48e6, cores: 20 })).toBe(MAX_HELPERS);
+    expect(planHelpers({ fileBytes: 357e6, cores: 20 })).toBe(1);
+    // Cores unknown: assume 4, which leaves room for one.
     expect(planHelpers({ fileBytes: 48 * MB })).toBe(1);
   });
 });
