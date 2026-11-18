@@ -186,7 +186,10 @@ export function markInheritedRecursively(node: PropertyNode): void {
   }
 }
 
-/** Best-effort: derive an "IfcXxx" class name from a numeric type code. */
+/**
+ * Placeholder class name for a type code nothing could name. The real name
+ * comes from web-ifc — see `src/parser/ifcClassNames.ts`.
+ */
 export function ifcClassFromTypeCode(typeCode: number): string {
   if (!typeCode) return 'IfcElement';
   return `IfcType_${typeCode}`;
@@ -291,10 +294,18 @@ export function stripAuthoringIdSuffix(
   return stripped.length > 0 ? stripped : name;
 }
 
+/**
+ * The element's identity. `ifcClass` comes from the line's numeric type code
+ * through `className`, never from the line object's constructor: a production
+ * build minifies web-ifc and renames its classes, so the constructor's name
+ * reads `lg` there (issue #90). Without a `className` the placeholder from
+ * `ifcClassFromTypeCode` is used.
+ */
 export function buildIdentity(
   modelId: string,
   expressId: number,
   item: unknown,
+  className: (typeCode: number) => string = ifcClassFromTypeCode,
 ): ElementIdentity {
   const o = isObj(item) ? item : {};
   const ifcTypeCode = getRawTypeCode(o) ?? 0;
@@ -302,9 +313,7 @@ export function buildIdentity(
   return {
     modelId,
     expressId,
-    ifcClass: typeof o.constructor?.name === 'string' && o.constructor?.name !== 'Object'
-      ? (o.constructor as { name: string }).name
-      : ifcClassFromTypeCode(ifcTypeCode),
+    ifcClass: className(ifcTypeCode),
     ifcTypeCode,
     globalId: readString((o as Record<string, unknown>).GlobalId),
     name: stripAuthoringIdSuffix(readString((o as Record<string, unknown>).Name), tag),

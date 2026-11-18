@@ -55,6 +55,7 @@ import type { ElementProperties, PropertyValue } from '../inspector/types';
 import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
 import type { ParsedMesh } from './types';
 import { weldForTransfer, WeldScratch } from './weld';
+import { createIfcClassNamer, type IfcClassNamer } from './ifcClassNames';
 
 /** Reused by every piece this worker welds (see WeldScratch). */
 const weldScratch = new WeldScratch();
@@ -519,6 +520,12 @@ async function ensureUnitTable(
 }
 
 /**
+ * Type code → `IfcSlab`, built on the current `IfcAPI` the first time it's
+ * needed. Never the line object's constructor name — see `ifcClassNames.ts`.
+ */
+let classNamer: { ifc: WebIFC.IfcAPI; name: IfcClassNamer } | null = null;
+
+/**
  * Fetch + normalize one element's properties. Single normalization path
  * shared by `getProps` and `intersect` — the worker has one and only one
  * way of producing an `ElementProperties` from web-ifc data.
@@ -531,6 +538,7 @@ async function getOne(
   unitTable: UnitTable,
   cache: ModelPropertyCache | undefined,
 ): Promise<ElementProperties> {
+  if (classNamer?.ifc !== ifc) classNamer = { ifc, name: createIfcClassNamer(ifc) };
   return fetchElementProperties(
     ifc as unknown as Parameters<typeof fetchElementProperties>[0],
     modelID,
@@ -538,6 +546,7 @@ async function getOne(
     expressId,
     unitTable,
     cache,
+    classNamer.name,
   );
 }
 
