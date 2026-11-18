@@ -18,6 +18,10 @@ import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { firstRowPerPath } from '../src/inspector/repository/flatRows';
 import { ParameterFold } from '../src/inspector/parameterFold';
 import { canSum, sumVerdictText, type ModelUnits } from '../src/inspector/units';
+import { ColumnBuilder, columnIdsWithValue, columnValueCounts, type ParameterColumn } from '../src/inspector/parameterColumn';
+import { elementMatches } from '../src/inspector/matchValue';
+import { valueQuery } from '../src/inspector/selectSimilar';
+import { intersectProperties } from '../src/inspector/intersection';
 import type { ElementProperties, PropertyFlatRow } from '../src/inspector/types';
 import { NO_UNITS_IFC, UNITS_IFC, WALL_A, WALL_B, WALL_C } from './fixtures/unitsIfc';
 
@@ -125,6 +129,59 @@ describe('units and value kinds on a fixture model', () => {
     ]);
 
     expect(canSum(params.get('Pset_Fixture.Duration')!)).toMatchObject({ ok: true, unitStated: false });
+  });
+});
+
+describe('the same number in two units, on a fixture model', () => {
+  let api: IfcAPI;
+  let modelID: number;
+  let elements: ElementProperties[];
+  const ids = [WALL_A, WALL_B, WALL_C];
+
+  beforeAll(async () => {
+    api = new IfcAPI();
+    await api.Init();
+    modelID = api.OpenModel(encode(UNITS_IFC));
+    const units = await readModelUnits(api as unknown as Parameters<typeof readModelUnits>[0], modelID);
+    const cache = new ModelPropertyCache(api as unknown as CacheableApi, modelID);
+    elements = [];
+    for (const id of ids) elements.push(await fetchElementProperties(api as unknown as PropertyApi, modelID, 'fx', id, units, cache));
+  });
+
+  afterAll(() => api.CloseModel(modelID));
+
+  const column = (): ParameterColumn => {
+    const b = new ColumnBuilder('Pset_Fixture.Depth', ids.length);
+    elements.forEach((e, i) => b.add(i, e));
+    return { ...b.finish(), modelId: 'fx', ids: Int32Array.from(ids) };
+  };
+
+  it('lists 3 mm and 3 m as two values, each with its unit', () => {
+    expect(columnValueCounts(column())).toEqual([
+      { value: 3, count: 1, unit: { key: 'si:m', symbol: 'm' } },
+      { value: 3, count: 1, unit: { key: 'si:mm', symbol: 'mm' } },
+    ]);
+  });
+
+  it('picking 3 m selects only the element whose 3 is in metres', () => {
+    const c = column();
+    expect(columnIdsWithValue(c, 3, 'si:m')).toEqual([WALL_B]);
+    expect(columnIdsWithValue(c, 3, 'si:mm')).toEqual([WALL_A]);
+    expect(columnIdsWithValue(c, 3, 'si:km')).toEqual([]);
+  });
+
+  it('select-similar from 3 mm does not find 3 m', () => {
+    const rowA = firstRowPerPath(elements[0].flat).get('Pset_Fixture.Depth')!;
+    const query = valueQuery(elements[0].identity, rowA)!;
+    if (query.kind !== 'value') throw new Error('expected a value query');
+    const matched = elements.filter((e) => elementMatches(e, query.selector, query.value)).map((e) => e.identity.expressId);
+    expect(matched).toEqual([WALL_A]);
+  });
+
+  it('the inspector says 3 mm and 3 m vary, rather than showing one value', () => {
+    const both = intersectProperties([elements[0], elements[1]]);
+    const depth = both.flat.find((r) => r.path === 'Pset_Fixture.Depth')!;
+    expect(depth.rawValue.kind).toBe('varies');
   });
 });
 

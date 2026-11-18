@@ -47,8 +47,11 @@ export interface NumericColumnData extends ColumnCommon {
   values: Float64Array;
   /** The units the values are in, in order of first appearance (see `units.ts`). */
   units: UnitRef[];
-  /** Per row, an index into `units`; null when every value is in `units[0]`. */
-  unitIndex: Uint16Array | null;
+  /**
+   * Per row, an index into `units`; null when every value is in `units[0]`.
+   * 16-bit, widened to 32-bit in the (absurd) case of more than 65,536 units.
+   */
+  unitIndex: Uint16Array | Uint32Array | null;
 }
 
 /** Text, yes/no, enumerations, or numbers mixed with those. */
@@ -86,7 +89,7 @@ export function columnTransferables(c: ColumnData): ArrayBuffer[] {
 export class ColumnBuilder {
   private numbers: Float64Array;
   private codes: Int32Array;
-  private unitOf: Uint16Array;
+  private unitOf: Uint16Array | Uint32Array;
   private dictionary: ParameterValue[] = [];
   private codeOf = new Map<ParameterValue, number>();
   private units: UnitRef[] = [];
@@ -132,6 +135,8 @@ export class ColumnBuilder {
       u = this.units.length;
       this.units.push({ key: unitKey, symbol: row.unit ?? '' });
       this.unitIndexOf.set(unitKey, u);
+      // An index past 16 bits would wrap round to another unit: widen first.
+      if (u > 0xffff && this.unitOf instanceof Uint16Array) this.unitOf = Uint32Array.from(this.unitOf);
     }
     this.unitOf[index] = u;
   }
@@ -156,7 +161,12 @@ export class ColumnBuilder {
 // Reading a column (main thread)
 // ---------------------------------------------------------------------------
 
-/** Every distinct value with how many elements hold it, most common first — as the Parameters list orders them. */
+/**
+ * Every distinct value with how many elements hold it, most common first —
+ * as the Parameters list orders them. When a number column's values are in
+ * more than one unit, a value is distinct per unit: 3 mm and 3 m are two
+ * entries, each carrying its unit.
+ */
 export function columnValueCounts(c: ColumnData): ValueCount[] {
   if (c.type === 'discrete') {
     const n = new Array<number>(c.dictionary.length).fill(0);
@@ -166,6 +176,19 @@ export function columnValueCounts(c: ColumnData): ValueCount[] {
     }
     return sortValueCounts(c.dictionary.map((value, i) => ({ value, count: n[i] })));
   }
+  if (c.unitIndex) {
+    const unitIndex = c.unitIndex;
+    const perUnit = c.units.map(() => new Map<number, number>());
+    for (let i = 0; i < c.values.length; i++) {
+      const v = c.values[i];
+      if (Number.isNaN(v)) continue;
+      const counts = perUnit[unitIndex[i]];
+      counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    return sortValueCounts(
+      perUnit.flatMap((counts, u) => [...counts.entries()].map(([value, count]) => ({ value, count, unit: c.units[u] }))),
+    );
+  }
   const counts = new Map<number, number>();
   for (let i = 0; i < c.values.length; i++) {
     const v = c.values[i];
@@ -174,12 +197,27 @@ export function columnValueCounts(c: ColumnData): ValueCount[] {
   return sortValueCounts([...counts.entries()].map(([value, count]) => ({ value, count })));
 }
 
-/** The rows whose value is `value`, compared exactly as the list counted it. */
-export function columnRowsWithValue(c: ColumnData, value: ParameterValue): number[] {
+/**
+ * The rows whose value is `value`, compared exactly as the list counted it.
+ * With `unitKey`, only rows whose number is in that unit: what picking one
+ * entry of a mixed-unit list selects. A column in a single unit matches its
+ * own unit's key (or no key given).
+ */
+export function columnRowsWithValue(c: ColumnData, value: ParameterValue, unitKey?: string): number[] {
   const rows: number[] = [];
   if (c.type === 'numeric') {
     if (typeof value !== 'number') return rows;
-    for (let i = 0; i < c.values.length; i++) if (c.values[i] === value) rows.push(i);
+    let only = -1;
+    if (unitKey !== undefined) {
+      only = c.units.findIndex((u) => u.key === unitKey);
+      if (only < 0) return rows;
+    }
+    const unitIndex = c.unitIndex;
+    for (let i = 0; i < c.values.length; i++) {
+      if (c.values[i] !== value) continue;
+      if (only >= 0 && (unitIndex ? unitIndex[i] : 0) !== only) continue;
+      rows.push(i);
+    }
     return rows;
   }
   const code = c.dictionary.indexOf(value);
@@ -188,9 +226,9 @@ export function columnRowsWithValue(c: ColumnData, value: ParameterValue): numbe
   return rows;
 }
 
-/** The elements whose value is `value`. */
-export function columnIdsWithValue(c: ParameterColumn, value: ParameterValue): number[] {
-  return columnRowsWithValue(c, value).map((row) => c.ids[row]);
+/** The elements whose value is `value` (in unit `unitKey`, when given). */
+export function columnIdsWithValue(c: ParameterColumn, value: ParameterValue, unitKey?: string): number[] {
+  return columnRowsWithValue(c, value, unitKey).map((row) => c.ids[row]);
 }
 
 /**

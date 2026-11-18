@@ -201,9 +201,19 @@ describe('opening a parameter', () => {
     expect(text('P.LoadBearing', 'param-values-without')).toBeNull();
   });
 
-  it('says why a mixed-unit parameter is not added up, and shows its values without a unit', () => {
+  it('says why a mixed-unit parameter is not added up, and lists each value in its own unit', async () => {
     const parent = document.createElement('div');
-    const list = new ParameterList(parent);
+    const mm = { key: 'si:mm', symbol: 'mm' };
+    const m = { key: 'si:m', symbol: 'm' };
+    // From the column: the same number in two units is two entries.
+    const loadValues = vi.fn(async () => [
+      { value: 3, count: 2, unit: mm },
+      { value: 3, count: 1, unit: m },
+      { value: 250, count: 1, unit: mm },
+      { value: 7, count: 1, unit: { key: '?LENGTHUNIT', symbol: '' } },
+    ]);
+    const onPickValue = vi.fn();
+    const list = new ParameterList(parent, { loadValues, onPickValue });
     list.setData({
       modelId: 'm',
       scopeSize: 3,
@@ -233,7 +243,15 @@ describe('opening a parameter', () => {
     expect(parent.querySelector('[data-key="P.Width"] .param-units-note')!.textContent).toBe(
       'Values are in different units (mm on 2, m on 1), so they are not added up',
     );
-    expect([...parent.querySelectorAll('[data-key="P.Width"] .param-value-text')].map((x) => x.textContent)).toEqual(['0.3', '200', '250']);
+    // The description merges 3 mm and 3 m, so the values come from the column.
+    expect(loadValues).toHaveBeenCalledTimes(1);
+    await new Promise((r) => setTimeout(r, 0));
+    const texts = [...parent.querySelectorAll('[data-key="P.Width"] .param-value-text')].map((x) => x.textContent);
+    expect(texts).toEqual(['3 mm', '3 m', '250 mm', '7 (unit not stated)']);
+    // Picking "3 m" picks 3 in metres only.
+    parent.querySelectorAll<HTMLButtonElement>('[data-key="P.Width"] .param-value')[1].click();
+    expect(onPickValue.mock.calls[0][1]).toBe(3);
+    expect(onPickValue.mock.calls[0][3]).toEqual(m);
   });
 
   it('tells whoever listens when a row is opened, so picking can get ready', () => {

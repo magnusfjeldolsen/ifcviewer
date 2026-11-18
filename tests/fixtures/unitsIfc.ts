@@ -6,7 +6,9 @@
  * time unit, so a duration's unit is "not stated".
  *
  * Three walls share `Pset_Fixture.Width`: A and C in the project's
- * millimetres, B with its own unit (metres) — a mixed-unit parameter. Wall A
+ * millimetres, B with its own unit (metres) — a mixed-unit parameter.
+ * `Pset_Fixture.Depth` is the same number, 3, on A (millimetres) and on B
+ * (metres): one number, two values. Wall A
  * also carries one property of every kind (enumerated, list, bounded, table),
  * per-property units (an inch) and quantities, one with its own unit (dm³).
  *
@@ -54,7 +56,7 @@ export const UNITS_IFC = [
 
   // Wall A: every kind of value.
   `#${WALL_A}=IFCWALL(${g(100)},$,'Wall A',$,$,$,$,$,$);`,
-  `#101=IFCPROPERTYSET(${g(101)},$,'Pset_Fixture',$,(#110,#111,#112,#113,#114,#115,#116,#117,#118,#119));`,
+  `#101=IFCPROPERTYSET(${g(101)},$,'Pset_Fixture',$,(#110,#111,#112,#113,#114,#115,#116,#117,#118,#119,#121));`,
   "#110=IFCPROPERTYSINGLEVALUE('Width',$,IFCLENGTHMEASURE(200.),$);",
   "#111=IFCPROPERTYSINGLEVALUE('Load',$,IFCPLANARFORCEMEASURE(5.),$);",
   "#112=IFCPROPERTYSINGLEVALUE('Duration',$,IFCTIMEMEASURE(3.),$);",
@@ -66,6 +68,7 @@ export const UNITS_IFC = [
   "#117=IFCPROPERTYSINGLEVALUE('Spacing',$,IFCPOSITIVELENGTHMEASURE(12.),#40);",
   "#118=IFCPROPERTYSINGLEVALUE('Slope',$,IFCPLANEANGLEMEASURE(2.5),$);",
   "#119=IFCPROPERTYSINGLEVALUE('Mark',$,IFCLABEL('A-1'),$);",
+  "#121=IFCPROPERTYSINGLEVALUE('Depth',$,IFCLENGTHMEASURE(3.),$);",
   `#102=IFCRELDEFINESBYPROPERTIES(${g(102)},$,$,$,(#${WALL_A}),#101);`,
   `#103=IFCELEMENTQUANTITY(${g(103)},$,'Qto_Fixture',$,$,(#130,#131,#132));`,
   "#130=IFCQUANTITYLENGTH('Length',$,$,4500.,$);",
@@ -75,9 +78,10 @@ export const UNITS_IFC = [
 
   // Wall B: the same width, in metres by its own unit.
   `#${WALL_B}=IFCWALL(${g(200)},$,'Wall B',$,$,$,$,$,$);`,
-  `#201=IFCPROPERTYSET(${g(201)},$,'Pset_Fixture',$,(#210,#211));`,
+  `#201=IFCPROPERTYSET(${g(201)},$,'Pset_Fixture',$,(#210,#211,#212));`,
   "#210=IFCPROPERTYSINGLEVALUE('Width',$,IFCLENGTHMEASURE(0.3),#23);",
   "#211=IFCPROPERTYENUMERATEDVALUE('Status',$,(IFCLABEL('EXISTING')),#120);",
+  "#212=IFCPROPERTYSINGLEVALUE('Depth',$,IFCLENGTHMEASURE(3.),#23);",
   `#202=IFCRELDEFINESBYPROPERTIES(${g(202)},$,$,$,(#${WALL_B}),#201);`,
   `#203=IFCELEMENTQUANTITY(${g(203)},$,'Qto_Fixture',$,$,(#230));`,
   "#230=IFCQUANTITYLENGTH('Length',$,$,3000.,$);",

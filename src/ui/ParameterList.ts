@@ -21,7 +21,7 @@
  */
 
 import { formatNumber } from '../inspector/format';
-import { canSum, isNotStated, sumVerdictText } from '../inspector/units';
+import { canSum, isNotStated, sumVerdictText, unitLabel, type UnitRef } from '../inspector/units';
 import type { ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 
@@ -42,8 +42,12 @@ export interface ParameterListOptions {
    * its values are not available.
    */
   loadValues?(key: string, onProgress: (done: number, total: number) => void): Promise<ValueCount[]>;
-  /** A value was picked. `additive` when Ctrl, Shift or Cmd was held. */
-  onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
+  /**
+   * A value was picked. `additive` when Ctrl, Shift or Cmd was held. `unit`
+   * is set for a parameter whose numbers are in more than one unit: the
+   * value picked is the value in that unit only.
+   */
+  onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean, unit?: UnitRef): void;
   /**
    * A row was opened: a value is likely to be picked next, so whatever
    * picking needs can start getting ready.
@@ -446,7 +450,7 @@ export class ParameterList {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'param-value';
-        const text = `${valueText(v.value)}${typeof v.value === 'number' ? unit : ''}`;
+        const text = `${valueText(v.value)}${v.unit ? entryUnitText(v.unit) : typeof v.value === 'number' ? unit : ''}`;
         b.title = this.options.onPickValue
           ? `${text}: select the ${counts.format(v.count)} element${v.count === 1 ? '' : 's'} (Ctrl or Shift adds to the selection)`
           : text;
@@ -460,7 +464,7 @@ export class ParameterList {
         b.appendChild(count);
         if (this.options.onPickValue) {
           b.addEventListener('click', (e) => {
-            this.options.onPickValue?.(p, v.value, e.ctrlKey || e.shiftKey || e.metaKey);
+            this.options.onPickValue?.(p, v.value, e.ctrlKey || e.shiftKey || e.metaKey, v.unit);
           });
         } else {
           b.disabled = true;
@@ -480,7 +484,9 @@ export class ParameterList {
    * otherwise fetched once through `loadValues` (and redrawn as it reports).
    */
   private valuesFor(p: ParameterSummary): ValuesState {
-    if (p.values) return { values: p.values, progress: null, error: null };
+    // A mixed-unit parameter's description counts 3 mm and 3 m as one value;
+    // its values come from the column, which keeps them apart.
+    if (p.values && !p.unitsDiffer) return { values: p.values, progress: null, error: null };
     let state = this.fetched.get(p.key);
     if (state) return state;
     state = { values: null, progress: null, error: null };
@@ -526,4 +532,10 @@ export function unitNoteText(p: ParameterSummary): string {
   if (!verdict.ok && verdict.reason === 'mixed-units') return sumVerdictText(verdict);
   if (verdict.ok && !verdict.unitStated) return 'The model does not state the unit of these values';
   return '';
+}
+
+/** The unit after a value in a mixed-unit list: " mm", or " (unit not stated)". */
+function entryUnitText(u: UnitRef): string {
+  if (isNotStated(u.key)) return ` (${unitLabel(u)})`;
+  return u.symbol ? ` ${u.symbol}` : ' (no unit)';
 }

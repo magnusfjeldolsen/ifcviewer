@@ -253,23 +253,27 @@ export function intersectStep(
     }
     if (!entry.agrees) {
       // Still need to collect the distinct display for the tooltip.
-      const disp = match.displayValue ?? '';
+      const disp = shownWithUnit(match);
       if (!entry.distinctSeen.has(disp)) {
         entry.distinctSeen.add(disp);
         entry.distinctDisplays.push(disp);
       }
       continue;
     }
-    if (!deepEqualValue(match.rawValue, entry.seedRow.rawValue)) {
+    // The same number in two units (3 mm, 3 m) is two values, not one.
+    if (
+      !deepEqualValue(match.rawValue, entry.seedRow.rawValue) ||
+      (match.unitKey ?? '') !== (entry.seedRow.unitKey ?? '')
+    ) {
       // Values disagree → seed the distinct list with seed's display and
       // this element's display.
       entry.agrees = false;
-      const seedDisp = entry.seedRow.displayValue ?? '';
+      const seedDisp = shownWithUnit(entry.seedRow);
       if (!entry.distinctSeen.has(seedDisp)) {
         entry.distinctSeen.add(seedDisp);
         entry.distinctDisplays.push(seedDisp);
       }
-      const nextDisp = match.displayValue ?? '';
+      const nextDisp = shownWithUnit(match);
       if (!entry.distinctSeen.has(nextDisp)) {
         entry.distinctSeen.add(nextDisp);
         entry.distinctDisplays.push(nextDisp);
@@ -506,6 +510,12 @@ function emptyResult(): ElementProperties {
     flat: [],
     fetchedAt: Date.now(),
   };
+}
+
+/** A row's value as the "varies" tooltip lists it: with its unit, so 3 mm and 3 m read apart. */
+function shownWithUnit(row: PropertyFlatRow): string {
+  const disp = row.displayValue ?? '';
+  return row.unit && disp ? `${disp} ${row.unit}` : disp;
 }
 
 /** Reconstruct a leaf PropertyNode from an intersected flat row. */

@@ -42,6 +42,7 @@ import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
+import type { UnitRef } from '../inspector/units';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
@@ -662,8 +663,8 @@ export class App {
         await this.loadGate.idle();
         return columnValueCounts(await this.propertyRepository.getColumn(modelId, key, onProgress));
       },
-      selectValue: (modelId, parameter, value, additive) =>
-        void this.selectParameterValue(modelId, parameter, value, additive),
+      selectValue: (modelId, parameter, value, additive, unit) =>
+        void this.selectParameterValue(modelId, parameter, value, additive, unit),
       prepare: (modelId, parameter) => {
         void this.loadGate
           .idle()
@@ -1392,19 +1393,22 @@ export class App {
     parameter: ParameterSummary,
     value: ParameterValue,
     additive: boolean,
+    /** For a mixed-unit parameter: the unit of the value picked. Only values in it are selected. */
+    valueUnit?: UnitRef,
   ): Promise<void> {
     const key = parameter.key;
     // An inspector reduction for the previous selection would only hold up
     // the column behind it in the worker's queue.
     this.propertyRepository.cancelBulk();
-    const unit = typeof value === 'number' && parameter.unit ? ` ${parameter.unit}` : '';
+    const symbol = valueUnit ? valueUnit.symbol : parameter.unit;
+    const unit = typeof value === 'number' && symbol ? ` ${symbol}` : '';
     const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}` };
     this.setStatus(`Finding ${query.label}…`);
     try {
       const column = await this.propertyRepository.getColumn(modelId, key, (done, total) =>
         this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
       );
-      const ids = columnIdsWithValue(column, value);
+      const ids = columnIdsWithValue(column, value, valueUnit?.key);
       // The class of each match is not known here: the inspector fills it in,
       // as it does for an all-products select-similar.
       const identities = ids.map((expressId) => ({ modelId, expressId, ifcClass: '', ifcTypeCode: 0 }));

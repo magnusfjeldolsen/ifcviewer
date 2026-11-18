@@ -127,6 +127,17 @@ describe('value columns', () => {
     expect(canSum({ kind: 'numeric', units: columnUnits(c, [0, 2]) })).toMatchObject({ ok: true, unit: { key: 'si:mm' } });
   });
 
+  it('keeps the unit of every row right even past 65,536 distinct units', () => {
+    const n = 0x10000 + 3;
+    const b = new ColumnBuilder('Q.L', n);
+    for (let i = 0; i < n; i++) b.add(i, props(i, [row('Q.L', single(1), { unitKey: `u${i}` })]));
+    const c = b.finish();
+    if (c.type !== 'numeric') throw new Error('expected numeric');
+    expect(c.unitIndex).toBeInstanceOf(Uint32Array);
+    expect(c.units[c.unitIndex![n - 1]].key).toBe(`u${n - 1}`);
+    expect(c.units[c.unitIndex![5]].key).toBe('u5');
+  });
+
   it('codes text, yes/no and enumerations into a dictionary, -1 where an element has none', () => {
     const c = build('P.S', [
       props(1, [row('P.S', single('a'))]),

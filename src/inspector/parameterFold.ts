@@ -20,7 +20,7 @@
  */
 
 import { firstRowPerPath } from './repository/flatRows';
-import type { UnitCount } from './units';
+import type { UnitCount, UnitRef } from './units';
 import type {
   ElementProperties,
   ModelParameters,
@@ -175,11 +175,23 @@ export class ParameterFold {
 export interface ValueCount {
   value: ParameterValue;
   count: number;
+  /**
+   * The unit this entry's number is in, when the parameter's numbers are in
+   * more than one: 3 mm and 3 m are then two entries, each picked on its own.
+   * Absent when there is a single unit (or none).
+   */
+  unit?: UnitRef;
 }
 
-/** Most common first; ties in a stable value order (numbers, then yes/no, then text). */
+/** Most common first; ties in a stable value order (numbers, then yes/no, then text), then by unit. */
 export function sortValueCounts(values: ValueCount[]): ValueCount[] {
-  return values.sort((a, b) => b.count - a.count || compareValues(a.value, b.value));
+  return values.sort(
+    (a, b) => b.count - a.count || compareValues(a.value, b.value) || compareKeys(a.unit?.key ?? '', b.unit?.key ?? ''),
+  );
+}
+
+function compareKeys(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function summarise(key: string, acc: Accumulator): ParameterSummary {
