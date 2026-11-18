@@ -46,6 +46,10 @@ a local disk) were small by comparison.
 - **How many helpers.** None under 20 MB; at most two; at most half the cores
   minus one; and within one 1.25 GB memory budget shared by all loads, counting
   three file sizes per helper.
+- **Small devices get no helpers.** When the browser reports 4 GB of device
+  memory or less, the load runs on one worker. Above that, or when the browser
+  does not say (Firefox, Safari), the limits above apply. Chrome reports this
+  in coarse steps; on a 64 GB machine it reported 32.
 - **Geometry crosses to the main thread in compact form.** Normals as signed
   bytes and indices as 16 bits where a piece allows, which is how the renderer
   stores them anyway.
