@@ -20,7 +20,7 @@
  *    Asking again while a job runs joins that job.
  */
 
-import { ParameterFold } from '../inspector/parameterFold';
+import { ParameterFold, ValueTally } from '../inspector/parameterFold';
 import type { ElementProperties, ModelParameters } from '../inspector/types';
 import type { FromWorker } from './ifcMessages';
 import type { SerialQueue } from './serialQueue';
@@ -61,19 +61,30 @@ export function scopeFingerprint(ids: readonly number[]): string {
   return `${ids.length}:${(h >>> 0).toString(16)}`;
 }
 
+/** What a job does with each element read, and how it answers when done. */
+interface JobFold {
+  add(props: ElementProperties): void;
+  /** Post the answer to `reqId`. */
+  reply(reqId: number, job: Job): void;
+}
+
 interface Job {
+  /** Jobs with the same key are the same question: a second ask joins. */
+  key: string;
   modelId: string;
   ids: readonly number[];
   scope: string;
   /** Bound by the first step. */
   webIfcId: number | undefined;
-  fold: ParameterFold;
+  fold: JobFold;
   pos: number;
   unreadable: number;
   /** Request ids waiting for this job's result. */
   waiters: number[];
   stopped: boolean;
   lastProgressAt: number;
+  /** A kept answer for this question, if there is one: replies without reading. */
+  kept?: () => ((reqId: number) => void) | null;
 }
 
 interface Kept {
@@ -97,39 +108,45 @@ export class ParameterDiscoveries {
    * the worker's message handler: it queues its own steps.
    */
   request(reqId: number, modelId: string, expressIds: readonly number[]): void {
-    const scope = scopeFingerprint(expressIds);
-    const running = this.jobs.get(modelId);
-    if (running && running.scope === scope) {
-      running.waiters.push(reqId);
-      return;
-    }
-    // A different scope for the same model: the newer request wins.
-    if (running) this.fail(running, 'Superseded by a newer request');
-
-    const job: Job = {
-      modelId,
-      ids: expressIds,
-      scope,
-      webIfcId: undefined,
-      fold: new ParameterFold(),
-      pos: 0,
-      unreadable: 0,
-      waiters: [reqId],
-      stopped: false,
-      lastProgressAt: -Infinity,
-    };
-    this.jobs.set(modelId, job);
-    this.host.queue.enqueueBackground(
-      () => this.step(job),
-      (err) => this.fail(job, err instanceof Error ? err.message : 'Parameter discovery failed'),
-    );
+    const fold = new ParameterFold();
+    let result: ModelParameters | null = null;
+    this.start(reqId, modelId, expressIds, modelId, {
+      add: (props) => fold.add(props),
+      reply: (r, job) => {
+        if (!result) {
+          result = fold.result(modelId, job.ids.length);
+          if (job.unreadable > 0) result.unreadable = job.unreadable;
+          this.kept.set(modelId, { webIfcId: job.webIfcId!, scope: job.scope, result });
+        }
+        this.host.post({ type: 'parameters', reqId: r, result });
+      },
+    }, (job) => {
+      const kept = this.kept.get(modelId);
+      if (!kept || kept.webIfcId !== job.webIfcId || kept.scope !== job.scope) return null;
+      return (r) => this.host.post({ type: 'parameters', reqId: r, result: kept.result });
+    });
   }
 
-  /** The model was closed: stop its job and forget its result. */
+  /**
+   * Every distinct value of one parameter (`path`) across `expressIds`, with
+   * counts, most common first — for a parameter with too many values for the
+   * description to keep. Same chunked, cancellable background steps as
+   * `request`; the answer is not kept here (the caller keeps it).
+   */
+  requestValues(reqId: number, modelId: string, expressIds: readonly number[], path: string): void {
+    const tally = new ValueTally(path);
+    this.start(reqId, modelId, expressIds, `${modelId}|${path}`, {
+      add: (props) => tally.add(props),
+      reply: (r) => this.host.post({ type: 'parameterValues', reqId: r, values: tally.result() }),
+    });
+  }
+
+  /** The model was closed: stop its jobs and forget its result. */
   drop(modelId: string): void {
     this.kept.delete(modelId);
-    const job = this.jobs.get(modelId);
-    if (job) this.fail(job, 'The model was closed');
+    for (const job of [...this.jobs.values()]) {
+      if (job.modelId === modelId) this.fail(job, 'The model was closed');
+    }
   }
 
   /** web-ifc was torn down: stop everything and forget everything. */
@@ -138,9 +155,47 @@ export class ParameterDiscoveries {
     this.kept.clear();
   }
 
-  /** Whether a job is running for `modelId` (tests). */
+  /** Whether any job is running for `modelId` (tests). */
   isRunning(modelId: string): boolean {
-    return this.jobs.has(modelId);
+    return [...this.jobs.values()].some((j) => j.modelId === modelId);
+  }
+
+  private start(
+    reqId: number,
+    modelId: string,
+    expressIds: readonly number[],
+    key: string,
+    fold: JobFold,
+    kept?: (job: Job) => ((reqId: number) => void) | null,
+  ): void {
+    const scope = scopeFingerprint(expressIds);
+    const running = this.jobs.get(key);
+    if (running && running.scope === scope) {
+      running.waiters.push(reqId);
+      return;
+    }
+    // A different scope for the same question: the newer request wins.
+    if (running) this.fail(running, 'Superseded by a newer request');
+
+    const job: Job = {
+      key,
+      modelId,
+      ids: expressIds,
+      scope,
+      webIfcId: undefined,
+      fold,
+      pos: 0,
+      unreadable: 0,
+      waiters: [reqId],
+      stopped: false,
+      lastProgressAt: -Infinity,
+    };
+    if (kept) job.kept = () => kept(job);
+    this.jobs.set(key, job);
+    this.host.queue.enqueueBackground(
+      () => this.step(job),
+      (err) => this.fail(job, err instanceof Error ? err.message : 'Parameter discovery failed'),
+    );
   }
 
   /** One step: bind or re-check the model, read a chunk, report. True while there is more. */
@@ -154,9 +209,10 @@ export class ParameterDiscoveries {
         return false;
       }
       job.webIfcId = open;
-      const kept = this.kept.get(job.modelId);
-      if (kept && kept.webIfcId === open && kept.scope === job.scope) {
-        this.finish(job, kept.result);
+      const answer = job.kept?.();
+      if (answer) {
+        this.end(job);
+        for (const reqId of job.waiters) answer(reqId);
         return false;
       }
       if (this.host.prepare && job.ids.length > 0) {
@@ -176,8 +232,8 @@ export class ParameterDiscoveries {
       try {
         props = await this.host.read(job.modelId, job.webIfcId, expressId);
       } catch {
-        // One unreadable element does not sink the model's description; it
-        // is counted and reported instead.
+        // One unreadable element does not sink the answer; it is counted and
+        // reported instead.
         job.unreadable++;
         continue;
       }
@@ -191,23 +247,19 @@ export class ParameterDiscoveries {
     }
     if (job.pos < total) return true;
 
-    const result = job.fold.result(job.modelId, total);
-    if (job.unreadable > 0) result.unreadable = job.unreadable;
-    this.kept.set(job.modelId, { webIfcId: job.webIfcId, scope: job.scope, result });
-    this.finish(job, result);
+    this.end(job);
+    for (const reqId of job.waiters) job.fold.reply(reqId, job);
     return false;
   }
 
-  private finish(job: Job, result: ModelParameters): void {
+  private end(job: Job): void {
     job.stopped = true;
-    if (this.jobs.get(job.modelId) === job) this.jobs.delete(job.modelId);
-    for (const reqId of job.waiters) this.host.post({ type: 'parameters', reqId, result });
+    if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
   }
 
   private fail(job: Job, message: string): void {
     if (job.stopped) return;
-    job.stopped = true;
-    if (this.jobs.get(job.modelId) === job) this.jobs.delete(job.modelId);
+    this.end(job);
     for (const reqId of job.waiters) this.host.post({ type: 'error', reqId, message });
   }
 }

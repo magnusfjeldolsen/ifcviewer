@@ -228,6 +228,37 @@ describe('WorkerPropertyRepository — lifecycle', () => {
       expect(worker.posted.filter((m) => m.type === 'describeParameters')).toHaveLength(2);
     });
 
+    it('fetches one parameter\'s values once per model and path, and drops them on dispose', async () => {
+      const { repo, worker } = setup();
+      const seen: number[] = [];
+      const p = repo.parameterValues('m', [1, 2], 'P.X', (d) => seen.push(d));
+      const again = repo.parameterValues('m', [1, 2], 'P.X');
+      const msg = lastOfType(worker, 'parameterValues');
+      expect(msg).toMatchObject({ id: 'm', expressIds: [1, 2], path: 'P.X' });
+      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(1);
+      worker.reply({ type: 'progress', reqId: msg.reqId, done: 2, total: 2 });
+      const values = [{ value: 'a', count: 2 }];
+      worker.reply({ type: 'parameterValues', reqId: msg.reqId, values });
+      await expect(p).resolves.toEqual(values);
+      await expect(again).resolves.toEqual(values);
+      expect(seen).toEqual([2]);
+
+      const pending = repo.parameterValues('m', [1, 2], 'P.Y');
+      repo.disposeModel('m');
+      await expect(pending).rejects.toThrow(/closed/);
+      void repo.parameterValues('m', [1, 2], 'P.X').catch(() => {});
+      expect(worker.posted.filter((m) => m.type === 'parameterValues')).toHaveLength(3);
+    });
+
+    it('findMatching passes an explicit candidate set and a parameter-value target', () => {
+      const { repo, worker } = setup();
+      void repo.findMatching('m', null, { path: 'P.X' }, { kind: 'parameter-value', value: 3 }, undefined, [5, 6]);
+      expect(lastOfType(worker, 'findMatching')).toMatchObject({
+        candidates: [5, 6],
+        value: { kind: 'parameter-value', value: 3 },
+      });
+    });
+
     it('rejects when the model is disposed, and forgets the result', async () => {
       const { repo, worker } = setup();
       const p = repo.describeParameters('m', [1]);

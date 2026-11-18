@@ -276,7 +276,7 @@ export function identitiesFromIds(query: SimilarQuery, ids: readonly number[]): 
 }
 
 /** Status-line text for a finished run. */
-export function describeSimilarResult(query: SimilarQuery, count: number): string {
+export function describeSimilarResult(query: Pick<SimilarQuery, 'label'>, count: number): string {
   if (count === 0) return `No elements match ${query.label}`;
   const noun = count === 1 ? 'element' : 'elements';
   return `Selected ${count} ${noun} — ${query.label}`;

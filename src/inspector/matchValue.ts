@@ -29,14 +29,29 @@
  * than offering an action that silently selects nothing.
  */
 
-import type { ElementProperties, PropertyValue } from './types';
+import type { ElementProperties, ParameterValue, PropertyValue } from './types';
 import { firstRowPerPath } from './repository/flatRows';
+import { parameterValueOf } from './parameterFold';
 
 /** Identifies one property by its flat-row path. */
 export interface PropertySelector {
   /** Dotted `PropertyFlatRow.path`, e.g. "Pset_WallCommon.LoadBearing". */
   path: string;
 }
+
+/**
+ * A value as the Parameters list counts it (`parameterValueOf`): a number,
+ * text or yes/no, with enumerations joined and quantities as numbers. Picking
+ * one in the list selects exactly the elements the list counted for it,
+ * because both sides derive the value the same way from the same row.
+ */
+export interface ParameterValueTarget {
+  kind: 'parameter-value';
+  value: ParameterValue;
+}
+
+/** What `elementMatches` compares a candidate's row against. */
+export type MatchTarget = PropertyValue | ParameterValueTarget;
 
 /**
  * True when this value can be used as a match target at all. The UI uses
@@ -84,9 +99,12 @@ export function valuesMatch(candidate: PropertyValue, target: PropertyValue): bo
 export function elementMatches(
   props: ElementProperties,
   selector: PropertySelector,
-  value: PropertyValue,
+  value: MatchTarget,
 ): boolean {
   const row = firstRowPerPath(props.flat).get(selector.path);
   if (!row) return false;
+  if (value.kind === 'parameter-value') {
+    return parameterValueOf(row.rawValue, row.displayValue) === value.value;
+  }
   return valuesMatch(row.rawValue, value);
 }

@@ -24,7 +24,8 @@ import {
 import { ModelPropertyCache, type CacheableApi } from '../src/inspector/repository/modelPropertyCache';
 import { computeUnitTable } from '../src/inspector/repository/unitTable';
 import { firstRowPerPath } from '../src/inspector/repository/flatRows';
-import { parameterValueOf } from '../src/inspector/parameterFold';
+import { parameterValueOf, type ValueCount } from '../src/inspector/parameterFold';
+import { elementMatches } from '../src/inspector/matchValue';
 import type { UnitTable } from '../src/inspector/format';
 import type { ModelParameters, ParameterValue } from '../src/inspector/types';
 import { createIfcClassNamer } from '../src/parser/ifcClassNames';
@@ -130,4 +131,43 @@ describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
     for (const p of all.parameters) expect(p.count).toBeLessThanOrEqual(scope.length);
     expect(byKey.get('Identity.GlobalId')).toMatchObject({ count: scope.length, uniquePerElement: true });
   });
+
+  it('the count next to every value is the number of elements picking it selects', async () => {
+    const all = await discover(scope);
+    // What the worker's findMatching does with the drawn elements as
+    // candidates: read each (as a click would) and run the same predicate.
+    const elements = await Promise.all(scope.map((id) => inspect(id)));
+    let checked = 0;
+    for (const p of all.parameters) {
+      const values = p.values ?? (await discoverValues(p.key));
+      for (const { value, count } of values) {
+        const selected = elements.filter((e) =>
+          elementMatches(e, { path: p.key }, { kind: 'parameter-value', value }),
+        ).length;
+        expect(selected, `${p.key} = ${String(value)}`).toBe(count);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(100);
+  });
+
+  it('values fetched on demand agree with the description, and sum to its count', async () => {
+    const all = await discover(scope);
+    for (const p of all.parameters) {
+      const fetched = await discoverValues(p.key);
+      if (p.values) expect(fetched).toEqual(p.values);
+      expect(fetched.reduce((n, v) => n + v.count, 0)).toBe(p.count);
+    }
+  });
+
+  async function discoverValues(path: string): Promise<ValueCount[]> {
+    const reqId = nextReq++;
+    discoveries.requestValues(reqId, MODEL, scope, path);
+    for (;;) {
+      const r = posted.find((m) => (m.type === 'parameterValues' || m.type === 'error') && m.reqId === reqId);
+      if (r?.type === 'parameterValues') return r.values;
+      if (r?.type === 'error') throw new Error(r.message);
+      await new Promise((res) => setTimeout(res, 0));
+    }
+  }
 });

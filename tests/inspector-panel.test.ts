@@ -223,6 +223,9 @@ function makeStubRepo(initial: ElementProperties = makeProperties()): StubRepo {
     findMatching() {
       throw new Error('not implemented');
     },
+    parameterValues() {
+      throw new Error('not implemented');
+    },
     describeParameters() {
       throw new Error('not implemented');
     },
@@ -1054,6 +1057,9 @@ describe('InspectorPanel', () => {
         findMatching: () => {
           throw new Error('not implemented');
         },
+        parameterValues: () => {
+          throw new Error('not implemented');
+        },
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1211,6 +1217,9 @@ describe('InspectorPanel', () => {
         findMatching: () => {
           throw new Error('not implemented');
         },
+        parameterValues: () => {
+          throw new Error('not implemented');
+        },
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1311,6 +1320,9 @@ describe('InspectorPanel', () => {
         findMatching: () => {
           throw new Error('not implemented');
         },
+        parameterValues: () => {
+          throw new Error('not implemented');
+        },
         describeParameters: () => {
           throw new Error('not implemented');
         },
@@ -1360,6 +1372,9 @@ describe('InspectorPanel', () => {
           throw new Error('not implemented');
         },
         findMatching: () => {
+          throw new Error('not implemented');
+        },
+        parameterValues: () => {
           throw new Error('not implemented');
         },
         describeParameters: () => {

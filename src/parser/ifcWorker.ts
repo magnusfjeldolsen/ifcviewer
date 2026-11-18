@@ -52,8 +52,8 @@ import {
   intersectFinalize,
   type RunningIntersection,
 } from '../inspector/intersection';
-import { elementMatches, type PropertySelector } from '../inspector/matchValue';
-import type { ElementProperties, PropertyValue } from '../inspector/types';
+import { elementMatches, type MatchTarget, type PropertySelector } from '../inspector/matchValue';
+import type { ElementProperties } from '../inspector/types';
 import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
 import type { ParsedMesh } from './types';
 import { weldForTransfer, WeldScratch } from './weld';
@@ -842,7 +842,8 @@ async function handleFindMatching(
   id: string,
   ifcType: number | null,
   selector: PropertySelector,
-  value: PropertyValue,
+  value: MatchTarget,
+  scope?: number[],
 ): Promise<void> {
   const ifc = await getApi();
   const modelID = modelIds.get(id);
@@ -850,7 +851,7 @@ async function handleFindMatching(
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
 
-  const candidates = candidateIds(ifc, modelID, ifcType);
+  const candidates = scope ?? candidateIds(ifc, modelID, ifcType);
   if (candidates.length === 0) {
     post({ type: 'progress', reqId, done: 0, total: 0 });
     post({ type: 'ids', reqId, ids: [] });
@@ -1011,7 +1012,7 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       enqueue(async () => {
         try {
           await runBulk(msg.reqId, () =>
-            handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value),
+            handleFindMatching(msg.reqId, msg.id, msg.ifcType, msg.selector, msg.value, msg.candidates),
           );
         } catch (err) {
           post({ type: 'error', reqId: msg.reqId, message: errorMessage(err) });
@@ -1032,6 +1033,10 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
     // Queues its own background steps (see `parameterDiscovery.ts`).
     case 'describeParameters':
       discoveries.request(msg.reqId, msg.id, msg.expressIds);
+      break;
+
+    case 'parameterValues':
+      discoveries.requestValues(msg.reqId, msg.id, msg.expressIds, msg.path);
       break;
 
     // NOT enqueued — deliberately. The job being cancelled is at the head

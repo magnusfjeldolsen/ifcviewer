@@ -6,8 +6,9 @@
  * proxy a worker, cache to IndexedDB, or back onto a different engine.
  */
 
-import type { PropertySelector } from '../matchValue';
-import type { ElementIdentity, ElementProperties, ModelParameters, PropertyValue } from '../types';
+import type { MatchTarget, PropertySelector } from '../matchValue';
+import type { ValueCount } from '../parameterFold';
+import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 
 /**
  * Rejection reason for a bulk request the caller abandoned via
@@ -90,13 +91,17 @@ export interface ElementPropertyRepository {
    * the main thread. Matching is present-and-equal: an element without a
    * row at that path is not a match. `onProgress` reports throttled
    * `done` / `total` counters over the candidate set.
+   *
+   * `candidates`, when given, replaces the class-based candidate set: the
+   * Parameters list passes the elements the viewer draws.
    */
   findMatching(
     modelId: string,
     ifcType: number | null,
     selector: PropertySelector,
-    value: PropertyValue,
+    value: MatchTarget,
     onProgress?: (done: number, total: number) => void,
+    candidates?: readonly number[],
   ): Promise<number[]>;
 
   /**
@@ -114,4 +119,17 @@ export interface ElementPropertyRepository {
     expressIds: readonly number[],
     onProgress?: (done: number, total: number) => void,
   ): Promise<ModelParameters>;
+
+  /**
+   * Every distinct value of one parameter across `expressIds`, with counts,
+   * most common first: for a parameter with more distinct values than the
+   * description keeps. Background steps like `describeParameters`; kept per
+   * model and parameter until `disposeModel`.
+   */
+  parameterValues(
+    modelId: string,
+    expressIds: readonly number[],
+    path: string,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ValueCount[]>;
 }

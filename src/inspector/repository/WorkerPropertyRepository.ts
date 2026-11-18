@@ -21,8 +21,9 @@
 import type { WorkerIfcParser } from '../../parser/WorkerIfcParser';
 import type { FromWorker } from '../../parser/ifcMessages';
 import { intersectProperties as combineIntersections } from '../intersection';
-import type { PropertySelector } from '../matchValue';
-import type { ElementIdentity, ElementProperties, ModelParameters, PropertyValue } from '../types';
+import type { MatchTarget, PropertySelector } from '../matchValue';
+import type { ValueCount } from '../parameterFold';
+import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 import { BulkRequestCancelled, type ElementPropertyRepository } from './ElementPropertyRepository';
 
 /** Resolve/reject pair for one in-flight `getProps` request. */
@@ -51,10 +52,10 @@ interface PendingIds {
   onProgress?: (done: number, total: number) => void;
 }
 
-/** An in-flight `describeParameters`, shared by everyone who asked for that model. */
-interface PendingParameters {
+/** An in-flight background request, shared by everyone who asked the same question. */
+interface PendingBackground<T> {
   modelId: string;
-  resolve: (result: ModelParameters) => void;
+  resolve: (result: T) => void;
   reject: (err: Error) => void;
   listeners: Set<(done: number, total: number) => void>;
 }
@@ -71,7 +72,11 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   /** In-flight `getLengthUnit` requests, correlated by reqId. */
   private unitInflight = new Map<number, PendingUnit>();
   /** In-flight `describeParameters` requests, correlated by reqId. */
-  private paramInflight = new Map<number, PendingParameters>();
+  private paramInflight = new Map<number, PendingBackground<ModelParameters>>();
+  /** In-flight `parameterValues` requests, correlated by reqId. */
+  private valuesInflight = new Map<number, PendingBackground<ValueCount[]>>();
+  /** Values per model and parameter path; same lifetime as `paramMemo`. */
+  private valuesMemo = new Map<string, Map<string, { promise: Promise<ValueCount[]>; reqId: number }>>();
   /**
    * Parameters per model: one request per model for its lifetime. Dropped on
    * `disposeModel`, and on failure so a later ask retries.
@@ -102,6 +107,9 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       for (const p of this.paramInflight.values()) p.reject(err);
       this.paramInflight.clear();
       this.paramMemo.clear();
+      for (const p of this.valuesInflight.values()) p.reject(err);
+      this.valuesInflight.clear();
+      this.valuesMemo.clear();
       this.lengthUnits.clear();
       // Drop the memo too: its promises may be unsettled and the worker
       // state behind them is gone.
@@ -266,6 +274,17 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
         pending.reject(new Error('The model was closed'));
       }
     }
+    const values = this.valuesMemo.get(modelId);
+    if (values) {
+      this.valuesMemo.delete(modelId);
+      for (const { reqId } of values.values()) {
+        const pending = this.valuesInflight.get(reqId);
+        if (pending) {
+          this.valuesInflight.delete(reqId);
+          pending.reject(new Error('The model was closed'));
+        }
+      }
+    }
     // Tell the worker to close the model and free its unit-table cache.
     this.parser.disposeModel(modelId);
   }
@@ -281,8 +300,9 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     modelId: string,
     ifcType: number | null,
     selector: PropertySelector,
-    value: PropertyValue,
+    value: MatchTarget,
     onProgress?: (done: number, total: number) => void,
+    candidates?: readonly number[],
   ): Promise<number[]> {
     const reqId = this.nextReqId++;
     const reply = this.trackIds(reqId, onProgress);
@@ -293,8 +313,47 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       ifcType,
       selector,
       value,
+      ...(candidates ? { candidates: [...candidates] } : {}),
     });
     return reply;
+  }
+
+  parameterValues(
+    modelId: string,
+    expressIds: readonly number[],
+    path: string,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ValueCount[]> {
+    let perModel = this.valuesMemo.get(modelId);
+    const memo = perModel?.get(path);
+    if (memo) {
+      if (onProgress) this.valuesInflight.get(memo.reqId)?.listeners.add(onProgress);
+      return memo.promise;
+    }
+    const reqId = this.nextReqId++;
+    const listeners = new Set<(done: number, total: number) => void>();
+    if (onProgress) listeners.add(onProgress);
+    const promise = new Promise<ValueCount[]>((resolve, reject) => {
+      this.valuesInflight.set(reqId, { modelId, resolve, reject, listeners });
+    });
+    const entry = { promise, reqId };
+    if (!perModel) {
+      perModel = new Map();
+      this.valuesMemo.set(modelId, perModel);
+    }
+    perModel.set(path, entry);
+    promise.catch(() => {
+      const m = this.valuesMemo.get(modelId);
+      if (m?.get(path) === entry) m.delete(path);
+    });
+    this.parser.getWorker().postMessage({
+      type: 'parameterValues',
+      reqId,
+      id: modelId,
+      expressIds: [...expressIds],
+      path,
+    });
+    return promise;
   }
 
   /**
@@ -453,8 +512,15 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       pending.resolve(msg.result);
       return;
     }
+    if (msg.type === 'parameterValues') {
+      const pending = this.valuesInflight.get(msg.reqId);
+      if (!pending) return;
+      this.valuesInflight.delete(msg.reqId);
+      pending.resolve(msg.values);
+      return;
+    }
     if (msg.type === 'progress') {
-      const params = this.paramInflight.get(msg.reqId);
+      const params = this.paramInflight.get(msg.reqId) ?? this.valuesInflight.get(msg.reqId);
       if (params) {
         for (const listener of params.listeners) listener(msg.done, msg.total);
         return;
@@ -495,6 +561,12 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
       if (pendingParams) {
         this.paramInflight.delete(msg.reqId);
         pendingParams.reject(new Error(msg.message));
+        return;
+      }
+      const pendingValues = this.valuesInflight.get(msg.reqId);
+      if (pendingValues) {
+        this.valuesInflight.delete(msg.reqId);
+        pendingValues.reject(new Error(msg.message));
       }
     }
   }

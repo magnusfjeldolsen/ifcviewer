@@ -175,6 +175,41 @@ export class ParameterFold {
   }
 }
 
+/** One distinct value of a parameter and how many elements hold it. */
+export interface ValueCount {
+  value: ParameterValue;
+  count: number;
+}
+
+/**
+ * Every distinct value of ONE parameter, with counts and no cap: what a
+ * parameter with more values than the description keeps is fetched with.
+ * Same rule as the fold (first row per path, same value derivation), so its
+ * counts are the counts the description would have shown.
+ */
+export class ValueTally {
+  private values = new Map<ParameterValue, number>();
+
+  constructor(private readonly path: string) {}
+
+  add(props: ElementProperties): void {
+    const row = firstRowPerPath(props.flat).get(this.path);
+    if (!row) return;
+    const value = parameterValueOf(row.rawValue, row.displayValue);
+    if (value === null) return;
+    this.values.set(value, (this.values.get(value) ?? 0) + 1);
+  }
+
+  /** Most common first; ties in a stable value order. */
+  result(): ValueCount[] {
+    return sortValueCounts([...this.values.entries()].map(([value, count]) => ({ value, count })));
+  }
+}
+
+export function sortValueCounts(values: ValueCount[]): ValueCount[] {
+  return values.sort((a, b) => b.count - a.count || compareValues(a.value, b.value));
+}
+
 function summarise(key: string, acc: Accumulator): ParameterSummary {
   const out: ParameterSummary = {
     key,
@@ -187,9 +222,7 @@ function summarise(key: string, acc: Accumulator): ParameterSummary {
   if (acc.unitsDiffer) out.unitsDiffer = true;
   if (acc.numericCount > 0) out.numeric = { min: acc.min, max: acc.max, sum: acc.sum };
   if (acc.values) {
-    out.values = [...acc.values.entries()]
-      .map(([value, count]) => ({ value, count }))
-      .sort((a, b) => b.count - a.count || compareValues(a.value, b.value));
+    out.values = sortValueCounts([...acc.values.entries()].map(([value, count]) => ({ value, count })));
   }
   return out;
 }
