@@ -40,6 +40,8 @@ import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
+import { valueText } from '../ui/ParameterList';
+import type { ParameterValue } from '../inspector/types';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
@@ -642,14 +644,27 @@ export class App {
       getModels: () => [...this.modelRecords.values()]
         .filter((r) => this.modelManager.getModel(r.id))
         .map((r) => ({ id: r.id, name: r.name })),
-      describe: async (modelId, onProgress) => {
+      describe: async (modelId, onProgress, onStarted) => {
         await this.loadGate.idle();
+        onStarted?.();
         return this.propertyRepository.describeParameters(
           modelId,
           this.modelManager.elementIds(modelId),
           onProgress,
         );
       },
+      isLoading: () => this.loadGate.busy,
+      loadValues: async (modelId, key, onProgress) => {
+        await this.loadGate.idle();
+        return this.propertyRepository.parameterValues(
+          modelId,
+          this.modelManager.elementIds(modelId),
+          key,
+          onProgress,
+        );
+      },
+      selectValue: (modelId, parameter, value, additive) =>
+        void this.selectParameterValue(modelId, parameter.key, value, additive),
     });
 
     // Persist the basket on every content change (debounced via the same
@@ -665,6 +680,10 @@ export class App {
     // App.dispose so the tray unsubscribes from a still-live event source.
     const contextualParent = document.getElementById('app')!;
     this.contextualActions = new ContextualActions(contextualParent);
+    // The tray shares the right edge with the Parameters panel and grows
+    // upward; the panel stays clear of it.
+    const tray = contextualParent.querySelector<HTMLElement>('.contextual-actions');
+    if (tray) this.parametersPanel.keepClearOf(tray);
     this.contextualActions.register({
       id: 'remove-clipping',
       label: 'Remove clipping',
@@ -1344,6 +1363,52 @@ export class App {
       // Superseded by a newer query — the user moved on, not an error.
       if (err instanceof BulkRequestCancelled) return;
       console.error('App: select similar failed', err);
+      this.setStatus('Could not complete the search');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    }
+  }
+
+  /**
+   * The Parameters list's "select the elements with this value": the same
+   * worker predicate and bulk read as select-similar (`findMatching`), with
+   * the value compared the way the list counted it and the elements the
+   * viewer draws as candidates — so the count shown next to the value is the
+   * number selected. Like select-similar, hidden elements are selected too.
+   *
+   * `additive` (Ctrl/Shift) adds to the selection through the ordinary
+   * `applyMany('add')`, which keeps the single-model lock; otherwise the
+   * result replaces the selection through `selectExactly`, one undo step.
+   */
+  private async selectParameterValue(
+    modelId: string,
+    key: string,
+    value: ParameterValue,
+    additive: boolean,
+  ): Promise<void> {
+    this.propertyRepository.cancelBulk();
+    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}` };
+    this.setStatus(`Finding ${query.label}…`);
+    try {
+      const ids = await this.propertyRepository.findMatching(
+        modelId,
+        null,
+        { path: key },
+        { kind: 'parameter-value', value },
+        (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
+        this.modelManager.elementIds(modelId),
+      );
+      // The class of each match is not known here: the inspector fills it in,
+      // as it does for an all-products select-similar.
+      const identities = ids.map((expressId) => ({ modelId, expressId, ifcClass: '', ifcTypeCode: 0 }));
+      if (identities.length > 0) {
+        if (additive) this.selectionManager.applyMany('add', identities);
+        else this.selectionManager.selectExactly(identities);
+      }
+      this.setStatus(describeSimilarResult(query, identities.length));
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    } catch (err) {
+      if (err instanceof BulkRequestCancelled) return;
+      console.error('App: select parameter value failed', err);
       this.setStatus('Could not complete the search');
       window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
     }

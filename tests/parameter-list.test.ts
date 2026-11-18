@@ -101,6 +101,165 @@ describe('ParameterList', () => {
   });
 });
 
+describe('opening a parameter', () => {
+  const scope: ModelParameters = {
+    modelId: 'm',
+    scopeSize: 20,
+    parameters: [
+      param('P.Profile', {
+        count: 14,
+        distinct: 2,
+        values: [
+          { value: 'HEA140', count: 10 },
+          { value: 'HEA160', count: 4 },
+        ],
+      }),
+      param('P.LoadBearing', { count: 20, kind: 'boolean', distinct: 2, values: [{ value: true, count: 12 }, { value: false, count: 8 }] }),
+      param('P.Length', {
+        count: 20,
+        kind: 'numeric',
+        unit: 'mm',
+        numeric: { min: 100, max: 300, sum: 4000 },
+        distinct: 2,
+        values: [
+          { value: 200, count: 15 },
+          { value: 100, count: 5 },
+        ],
+      }),
+      param('P.Many', { count: 20, distinct: null, values: undefined }),
+      param('Identity.GlobalId', { count: 20, distinct: null, values: undefined, uniquePerElement: true }),
+      param('P.Twelve', {
+        count: 12,
+        distinct: 12,
+        values: Array.from({ length: 12 }, (_, i) => ({ value: `t${i}`, count: 1 })),
+      }),
+    ],
+  };
+
+  function listWith(options: ConstructorParameters<typeof ParameterList>[1] = {}) {
+    const parent = document.createElement('div');
+    const list = new ParameterList(parent, options);
+    list.setData(scope);
+    const head = (key: string) => parent.querySelector<HTMLButtonElement>(`[data-key="${key}"] .param-head`)!;
+    const values = (key: string) =>
+      [...parent.querySelectorAll(`[data-key="${key}"] .param-value`)].map(
+        (b) => `${b.querySelector('.param-value-text')!.textContent} · ${b.querySelector('.param-value-count')!.textContent}`,
+      );
+    const text = (key: string, cls: string) => parent.querySelector(`[data-key="${key}"] .${cls}`)?.textContent ?? null;
+    return { parent, list, head, values, text };
+  }
+
+  it('is a button that expands in place and lists values with counts, most common first', () => {
+    const { head, values, text } = listWith();
+    expect(head('P.Profile').getAttribute('aria-expanded')).toBe('false');
+    head('P.Profile').click();
+    expect(head('P.Profile').getAttribute('aria-expanded')).toBe('true');
+    expect(values('P.Profile')).toEqual(['HEA140 · 10', 'HEA160 · 4']);
+    expect(text('P.Profile', 'param-values-without')).toBe('6 without this parameter');
+    // No filter for two values.
+    expect(text('P.Profile', 'param-value-filter')).toBeNull();
+  });
+
+  it('shows one open row at a time, and closes on a second click', () => {
+    const { head, list } = listWith();
+    head('P.Profile').click();
+    head('P.LoadBearing').click();
+    expect(list.openRow()).toBe('P.LoadBearing');
+    expect(head('P.Profile').getAttribute('aria-expanded')).toBe('false');
+    head('P.LoadBearing').click();
+    expect(list.openRow()).toBeNull();
+  });
+
+  it('lists true and false for yes/no, and no "without" line when every element has it', () => {
+    const { head, values, text } = listWith();
+    head('P.LoadBearing').click();
+    expect(values('P.LoadBearing')).toEqual(['true · 12', 'false · 8']);
+    expect(text('P.LoadBearing', 'param-values-without')).toBeNull();
+  });
+
+  it('shows min and max for numbers, then the values with their unit', () => {
+    const { head, values, text } = listWith();
+    head('P.Length').click();
+    expect(text('P.Length', 'param-range')).toBe('min 100 mm · max 300 mm');
+    expect(values('P.Length')).toEqual(['200 mm · 15', '100 mm · 5']);
+  });
+
+  it('offers a value filter when there are many values', () => {
+    const { parent, head, values } = listWith();
+    head('P.Twelve').click();
+    const filter = parent.querySelector<HTMLInputElement>('[data-key="P.Twelve"] .param-value-filter')!;
+    filter.value = 't1';
+    filter.dispatchEvent(new Event('input'));
+    expect(values('P.Twelve')).toEqual(['t1 · 1', 't10 · 1', 't11 · 1']);
+  });
+
+  it('fetches the values of a parameter past the cap when opened, shows the 500 most common, and filters all of them', async () => {
+    const all = Array.from({ length: 7347 }, (_, i) => ({ value: `v${i}`, count: 7347 - i }));
+    let progress!: (d: number, t: number) => void;
+    let resolve!: (v: typeof all) => void;
+    const loadValues = vi.fn((_key: string, onProgress: (d: number, t: number) => void) => {
+      progress = onProgress;
+      return new Promise<typeof all>((r) => (resolve = r));
+    });
+    const { parent, head, values, text } = listWith({ loadValues });
+    head('P.Many').click();
+    expect(loadValues).toHaveBeenCalledWith('P.Many', expect.any(Function));
+    expect(text('P.Many', 'param-values-status')).toBe('Reading values…');
+    progress(5, 20);
+    expect(text('P.Many', 'param-values-status')).toBe('Reading values… 5 of 20 elements');
+    resolve(all);
+    await flush();
+    expect(values('P.Many')).toHaveLength(500);
+    expect(values('P.Many')[0]).toBe('v0 · 7,347');
+    expect(text('P.Many', 'param-values-status')).toBe('Showing the 500 most common of 7,347; type to filter');
+    const filter = parent.querySelector<HTMLInputElement>('[data-key="P.Many"] .param-value-filter')!;
+    filter.value = 'v7346';
+    filter.dispatchEvent(new Event('input'));
+    expect(values('P.Many')).toEqual(['v7346 · 1']);
+    // Fetched once: closing and opening again does not ask again.
+    head('P.Many').click();
+    head('P.Many').click();
+    expect(loadValues).toHaveBeenCalledTimes(1);
+  });
+
+  it('a unique-per-element parameter shows the note and the filter only; typing finds a value', async () => {
+    const loadValues = vi.fn(async () => [{ value: 'abc', count: 1 }, { value: 'xyz', count: 1 }]);
+    const { parent, head, values, text } = listWith({ loadValues });
+    head('Identity.GlobalId').click();
+    await flush();
+    expect(text('Identity.GlobalId', 'param-values-note')).toMatch(/Unique per element/);
+    expect(values('Identity.GlobalId')).toEqual([]);
+    const filter = parent.querySelector<HTMLInputElement>('[data-key="Identity.GlobalId"] .param-value-filter')!;
+    filter.value = 'XY';
+    filter.dispatchEvent(new Event('input'));
+    expect(values('Identity.GlobalId')).toEqual(['xyz · 1']);
+  });
+
+  it('picking a value hands it on, adding to the selection with Ctrl or Shift', () => {
+    const onPickValue = vi.fn();
+    const { parent, head } = listWith({ onPickValue });
+    head('P.Profile').click();
+    const [first, second] = parent.querySelectorAll<HTMLButtonElement>('[data-key="P.Profile"] .param-value');
+    first.click();
+    second.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+    expect(onPickValue.mock.calls.map((c) => [c[0].key, c[1], c[2]])).toEqual([
+      ['P.Profile', 'HEA140', false],
+      ['P.Profile', 'HEA160', true],
+    ]);
+  });
+
+  it('gives every name and value its full text as a tooltip', () => {
+    const long = 'A_very_long_type_name_without_spaces'.repeat(4);
+    const parent = document.createElement('div');
+    const list = new ParameterList(parent);
+    list.setData({ modelId: 'm', scopeSize: 2, parameters: [param(`Pset_${long}.${long}`, { values: [{ value: long, count: 2 }], count: 2 })] });
+    expect(parent.querySelector('.param-key')!.getAttribute('title')).toBe(`Pset_${long}.${long}`);
+    expect(parent.querySelector('.param-spread')!.getAttribute('title')).toBe(`all "${long}"`);
+    parent.querySelector<HTMLButtonElement>('.param-head')!.click();
+    expect(parent.querySelector('.param-value')!.getAttribute('title')).toBe(long);
+  });
+});
+
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: Error) => void } {
   let resolve!: (v: T) => void;
   let reject!: (e: Error) => void;
@@ -143,6 +302,32 @@ describe('ParametersPanel', () => {
     );
     expect(parent.querySelectorAll('.param-row')).toHaveLength(3);
     expect(parent.querySelector('.params-panel-progress')!.classList.contains('hidden')).toBe(true);
+  });
+
+  it('says it is waiting while a model loads, then reading once it starts', () => {
+    const parent = document.createElement('div');
+    let started!: () => void;
+    const panel = new ParametersPanel(parent, {
+      getModels: () => [{ id: 'm', name: 'A.ifc' }],
+      isLoading: () => true,
+      describe: (_m, _p, onStarted) => {
+        started = onStarted!;
+        return new Promise(() => {});
+      },
+    });
+    panel.open('m');
+    const status = () => parent.querySelector('.params-panel-status')!.textContent;
+    expect(status()).toBe('Waiting for the load to finish…');
+    started();
+    expect(status()).toBe('Reading parameters…');
+  });
+
+  it('keeps clear of the contextual tray by its height', () => {
+    const { panel } = panelWith([{ id: 'm', name: 'A.ifc' }]);
+    const tray = document.createElement('div');
+    Object.defineProperty(tray, 'offsetHeight', { value: 132 });
+    panel.keepClearOf(tray);
+    expect(panel.getContainer().style.getPropertyValue('--params-clearance')).toBe('132px');
   });
 
   it('says so when discovery fails', async () => {
@@ -210,6 +395,8 @@ describe('Models panel entry point', () => {
     tree.setModelWarning('m2', 'File missing');
     const buttons = parent.querySelectorAll<HTMLButtonElement>('.model-row-params');
     expect(buttons).toHaveLength(2);
+    expect(buttons[0].title).toBe('Parameters in this model');
+    expect(buttons[0].getAttribute('aria-label')).toBe('Parameters in this model');
     buttons[0].click();
     expect(onShowParameters).toHaveBeenCalledWith('m1');
     expect(buttons[1].disabled).toBe(true);

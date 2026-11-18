@@ -1738,7 +1738,9 @@ html, body {
   right: 12px;
   width: 340px;
   max-width: calc(100% - 24px);
-  max-height: calc(100% - 56px - 96px);
+  /* Above the footer and the contextual tray, whose height the panel is
+     told as it changes (ParametersPanel.keepClearOf). */
+  max-height: calc(100% - 56px - 40px - 12px - var(--params-clearance, 44px));
   background: rgba(255, 255, 255, 0.97);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -1900,19 +1902,119 @@ html, body {
   margin: 0;
   padding: 0 0 6px;
   overflow-y: auto;
+  /* Nothing in the panel scrolls sideways: long text is cut, see below. */
+  overflow-x: hidden;
   min-height: 0;
   flex: 1;
 }
 
 .param-row {
-  padding: 5px 10px;
   border-top: 1px solid #f3f4f6;
+  min-width: 0;
+}
+
+.param-head {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.param-head:hover,
+.param-row.open > .param-head {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.param-head:focus-visible,
+.param-value:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
 }
 
 .param-key {
+  display: block;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.param-values {
+  padding: 2px 10px 8px 18px;
+  min-width: 0;
+}
+
+.param-range,
+.param-values-note,
+.param-values-status,
+.param-values-without {
+  color: #6b7280;
+  font-size: 11px;
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.param-values-without {
+  color: #9ca3af;
+}
+
+.param-value-filter {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 4px 0;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+}
+
+.param-value-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.param-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  font: inherit;
+  color: #1f2937;
+  text-align: left;
+  cursor: pointer;
+}
+
+.param-value:hover:not(:disabled) {
+  background: #eff6ff;
+}
+
+.param-value:disabled {
+  cursor: default;
+}
+
+.param-value-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.param-value-count {
+  flex-shrink: 0;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
 }
 
 .param-group {
@@ -1931,6 +2033,17 @@ html, body {
   color: #6b7280;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+
+/* A long value in the meta line (a type name of a hundred characters) is cut, not
+   allowed to widen the panel. */
+.param-meta > span {
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .param-meta > span + span::before {

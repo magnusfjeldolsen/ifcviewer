@@ -9,14 +9,32 @@
  * The list itself is `ParameterList`, which knows nothing about this panel.
  */
 
-import type { ModelParameters } from '../inspector/types';
+import type { ValueCount } from '../inspector/parameterFold';
+import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 import { ParameterList } from './ParameterList';
 
 export interface ParametersPanelDeps {
   /** The loaded models, in the order the Models panel shows them. */
   getModels(): { id: string; name: string }[];
-  /** Describe one model's parameters, reporting elements read so far. */
-  describe(modelId: string, onProgress: (done: number, total: number) => void): Promise<ModelParameters>;
+  /**
+   * Describe one model's parameters, reporting elements read so far.
+   * `onStarted` is called once reading begins (after any running load).
+   */
+  describe(
+    modelId: string,
+    onProgress: (done: number, total: number) => void,
+    onStarted?: () => void,
+  ): Promise<ModelParameters>;
+  /** Whether a model is loading right now: discovery waits for it. */
+  isLoading?(): boolean;
+  /** Every distinct value of one parameter, for one that has too many to keep. */
+  loadValues?(
+    modelId: string,
+    key: string,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<ValueCount[]>;
+  /** Select the model's elements that have `value` at this parameter. */
+  selectValue?(modelId: string, parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
 }
 
 const counts = new Intl.NumberFormat('en-US');
@@ -32,6 +50,7 @@ export class ParametersPanel {
   private modelId: string | null = null;
   /** Bumped on every open: replies for an earlier one are dropped. */
   private generation = 0;
+  private clearanceObserver: ResizeObserver | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -80,7 +99,20 @@ export class ParametersPanel {
     this.container.appendChild(header);
     this.container.appendChild(this.statusEl);
     this.container.appendChild(this.progressEl);
-    this.list = new ParameterList(this.container);
+    this.list = new ParameterList(this.container, {
+      loadValues: deps.loadValues
+        ? (key, onProgress) => {
+            const modelId = this.modelId;
+            if (modelId === null) return Promise.reject(new Error('No model is shown'));
+            return deps.loadValues!(modelId, key, onProgress);
+          }
+        : undefined,
+      onPickValue: deps.selectValue
+        ? (parameter, value, additive) => {
+            if (this.modelId !== null) deps.selectValue!(this.modelId, parameter, value, additive);
+          }
+        : undefined,
+    });
     parent.appendChild(this.container);
   }
 
@@ -93,15 +125,21 @@ export class ParametersPanel {
     this.list.setData(null);
     this.setProgress(null);
     this.statusEl.classList.remove('error');
-    this.statusEl.textContent = 'Reading parameters…';
+    this.statusEl.textContent = this.deps.isLoading?.() ? 'Waiting for the load to finish…' : 'Reading parameters…';
 
     let promise: Promise<ModelParameters>;
     try {
-      promise = this.deps.describe(modelId, (done, total) => {
-        if (gen !== this.generation) return;
-        this.statusEl.textContent = `Reading parameters… ${counts.format(done)} of ${counts.format(total)} elements`;
-        this.setProgress(total > 0 ? done / total : 1);
-      });
+      promise = this.deps.describe(
+        modelId,
+        (done, total) => {
+          if (gen !== this.generation) return;
+          this.statusEl.textContent = `Reading parameters… ${counts.format(done)} of ${counts.format(total)} elements`;
+          this.setProgress(total > 0 ? done / total : 1);
+        },
+        () => {
+          if (gen === this.generation) this.statusEl.textContent = 'Reading parameters…';
+        },
+      );
     } catch (err) {
       promise = Promise.reject(err);
     }
@@ -169,6 +207,21 @@ export class ParametersPanel {
     this.titleModel.title = this.titleModel.textContent;
   }
 
+  /**
+   * Keep the panel's bottom edge above `el` (the contextual action tray in
+   * the bottom-right corner), which grows upward as actions appear.
+   */
+  keepClearOf(el: HTMLElement): void {
+    const update = (): void => {
+      this.container.style.setProperty('--params-clearance', `${el.offsetHeight}px`);
+    };
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    this.clearanceObserver?.disconnect();
+    this.clearanceObserver = new ResizeObserver(update);
+    this.clearanceObserver.observe(el);
+  }
+
   getContainer(): HTMLElement {
     return this.container;
   }
@@ -178,6 +231,7 @@ export class ParametersPanel {
   }
 
   dispose(): void {
+    this.clearanceObserver?.disconnect();
     this.generation++;
     this.list.dispose();
     this.container.remove();

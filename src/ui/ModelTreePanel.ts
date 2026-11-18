@@ -156,7 +156,7 @@ export class ModelTreePanel {
       paramsBtn.type = 'button';
       paramsBtn.className = 'model-row-params';
       paramsBtn.title = 'Parameters in this model';
-      paramsBtn.setAttribute('aria-label', `Parameters in ${name}`);
+      paramsBtn.setAttribute('aria-label', 'Parameters in this model');
       paramsBtn.textContent = '☰'; // ☰
       paramsBtn.addEventListener('click', () => {
         try {
