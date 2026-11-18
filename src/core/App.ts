@@ -25,6 +25,10 @@ import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
 import { SessionStore } from '../services/SessionStore';
 import { GeometryCache, sha256Hex } from '../services/GeometryCache';
+import { LoadTimeline, type LoadPhases } from './LoadTimeline';
+import { partFilesSupported, type CacheWriteReport } from '../services/geometryParts';
+import { loadingStatus } from '../ui/loadingStatus';
+import { loadErrorStatus } from './loadErrors';
 import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { CandidateResolver } from '../inspector/CandidateResolver';
@@ -66,6 +70,8 @@ export interface LoadSettledEvent {
   meshCount: number;
   fromCache: boolean;
   error?: string;
+  /** Where the load's time went, when it was measured. See `LoadTimeline`. */
+  phases?: LoadPhases;
 }
 
 /** What the `?stats` debug surface needs to reach. Nothing else uses it. */
@@ -74,6 +80,10 @@ export interface DebugHandles {
   modelManager: ModelManager;
   onLoadSettled(cb: (event: LoadSettledEvent) => void): void;
 }
+
+/** Status while another tab blocks storage (see `SessionStore.openDB`). */
+export const STORAGE_BLOCKED_STATUS =
+  'The viewer is open in another tab with an older version, so models are not remembered here. Close the other tabs and reload.';
 
 /** How long a transient status message stays up before clearing. */
 const STATUS_CLEAR_MS = 4000;
@@ -431,6 +441,9 @@ export class App {
     // the background to refill the web-ifc state the property inspector
     // needs.
     this.geometryCache = new GeometryCache(this.sessionStore);
+    // A tab running an older build can hold the database at its version.
+    // The viewer then works without remembering anything; say so plainly.
+    this.sessionStore.onStorageBlocked(() => this.setStatus(STORAGE_BLOCKED_STATUS));
     this.memoryToggle = new MemoryToggle(appEl, this.sessionStore);
     this.memoryToggle.onChange(async (enabled) => {
       if (enabled) {
@@ -904,9 +917,13 @@ export class App {
       // Pre-fetch all stored models for fallback name-based lookup
       const allStored = await this.sessionStore.getAllModels();
       for (const record of records) {
+        // A restore starts with the page, as the `?stats` surface counts it.
+        const timeline = new LoadTimeline(0);
         try {
           this.setStatus(`Restoring ${record.name}...`);
+          timeline.mark('main.restoreStarted');
           let stored = await this.sessionStore.getModel(record.id);
+          timeline.mark('main.ifcFromIdb');
 
           // Fallback: UUID mismatch (e.g. after migration) — find by name
           if (!stored) {
@@ -918,61 +935,79 @@ export class App {
           }
 
           if (stored) {
-            // Buffer is available — try the geometry-cache fast path first.
-            // On hit we hydrate the scene from cached typed-array buffers
-            // (instant on a 200 MB model) and ask the worker to open the
-            // model for properties (no geometry streamed).
-            const cachedMeshes = record.hash
-              ? await this.geometryCache.load(record.hash)
-              : null;
-            if (cachedMeshes) {
-              this.modelManager.addModel({
-                id: record.id,
-                meshes: cachedMeshes,
-              });
-              this.sceneBounds.addMeshes(record.id, cachedMeshes);
-              this.modelTreePanel.addModel(
-                record.id, record.name, cachedMeshes.length, record.source.type,
-              );
-              this.bufferCache.set(record.id, stored.buffer);
-              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
-              this.emitLoadSettled({
-                name: record.name, source: 'restore', ok: true,
-                meshCount: cachedMeshes.length, fromCache: true,
-              });
-              // Open the model in the worker for property queries. A later
-              // `getProps` for this id simply queues behind this open in
-              // the worker and resolves once the model is ready — the old
-              // "properties unavailable" gap is handled by message ordering.
+            // Buffer is available — try the geometry cache first. It is read
+            // part by part, each appended as it arrives, so even a model with
+            // gigabytes of geometry fills in progressively and is never held
+            // twice. Meanwhile the worker opens the model for properties (no
+            // geometry): a `getProps` simply queues behind that open.
+            let restored = false;
+            const cached = record.hash ? await this.geometryCache.open(record.hash) : null;
+            timeline.mark('main.cacheIndex');
+            if (cached) {
               void this.parser.openForProperties(stored.buffer, record.id).catch((err) => {
                 console.warn(`Worker openForProperties failed for ${record.id}:`, err);
               });
-            } else {
-              // Cache miss — full streamed parse, then backfill the cache
-              // so the *next* restore is fast. Backfills also rescue
-              // sessions saved before the cache feature shipped (no hash).
               this.modelManager.beginStream(record.id);
-              const forCache = this.geometryCache.collector();
+              let pieces = 0;
+              const ok = await cached.read((meshes) => {
+                if (pieces === 0) {
+                  timeline.mark('main.firstPart');
+                  // Show the first part where the user left the camera.
+                  if (session?.camera) this.viewer.restoreCameraState(session.camera);
+                }
+                timeline.time('main.append', () => this.modelManager.appendMeshes(record.id, meshes));
+                timeline.time('main.bounds', () => this.sceneBounds.addMeshes(record.id, meshes));
+                pieces += meshes.length;
+              }, (span, ms) => timeline.add(span, ms));
+              if (ok) {
+                timeline.time('main.finish', () => this.modelManager.endStream(record.id));
+                this.modelTreePanel.addModel(record.id, record.name, pieces, record.source.type);
+                this.bufferCache.set(record.id, stored.buffer);
+                this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+                timeline.mark('main.settled');
+                this.emitLoadSettled({
+                  name: record.name, source: 'restore', ok: true,
+                  meshCount: pieces, fromCache: true, phases: timeline.toJSON(),
+                });
+                restored = true;
+              } else {
+                // Unreadable entry (already removed): drop what came in, close
+                // the properties-only model, and parse instead.
+                this.modelManager.removeModel(record.id);
+                this.sceneBounds.removeModel(record.id);
+                this.parser.disposeModel(record.id);
+              }
+            }
+            if (!restored) {
+              // Cache miss — full streamed parse; the workers store the
+              // geometry as they go, so the *next* restore is fast. Also
+              // rescues sessions saved before the cache existed (no hash).
+              this.modelManager.beginStream(record.id);
+              const cacheKey = this.cacheKeyFor(record.id);
               const parsed = await this.parser.parseStreaming(
                 stored.buffer, record.id, (batch) => {
-                  this.modelManager.appendMeshes(record.id, batch);
-                  this.sceneBounds.addMeshes(record.id, batch);
-                  forCache.add(batch);
+                  timeline.mark('main.firstBatch');
+                  timeline.time('main.append', () => this.modelManager.appendMeshes(record.id, batch));
+                  timeline.time('main.bounds', () => this.sceneBounds.addMeshes(record.id, batch));
                 },
+                timeline,
+                { cacheKey },
               );
-              this.modelManager.endStream(record.id);
+              timeline.mark('main.streamed');
+              timeline.absorbWorker(parsed.timings);
+              timeline.time('main.finish', () => this.modelManager.endStream(record.id));
               this.modelTreePanel.addModel(record.id, record.name, parsed.meshCount);
               this.bufferCache.set(record.id, stored.buffer);
-              const hash = record.hash ?? await sha256Hex(stored.buffer);
+              const hashPromise = record.hash ? Promise.resolve(record.hash) : sha256Hex(stored.buffer);
+              this.commitCache(cacheKey, hashPromise, parsed.cache);
+              const hash = await hashPromise;
               this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
-              const meshes = forCache.meshes();
-              if (meshes) void this.geometryCache.save(hash, meshes);
+              timeline.mark('main.settled');
               this.emitLoadSettled({
                 name: record.name, source: 'restore', ok: true,
-                meshCount: parsed.meshCount, fromCache: false,
+                meshCount: parsed.meshCount, fromCache: false, phases: timeline.toJSON(),
               });
-            }
-            // Fix the IndexedDB key to match the session UUID
+            }            // Fix the IndexedDB key to match the session UUID
             if (stored.id !== record.id) {
               await this.sessionStore.removeModel(stored.id);
               await this.sessionStore.saveModel(record.id, record.name, stored.buffer);
@@ -993,7 +1028,12 @@ export class App {
             console.warn(`SessionStore: no buffer for local model "${record.name}" (id: ${record.id})`);
             this.modelRecords.set(record.id, { ...record, hasCachedBuffer: false });
             this.modelTreePanel.addModel(record.id, record.name, 0, 'local');
-            this.modelTreePanel.setModelWarning(record.id, 'File missing — re-upload to restore');
+            this.modelTreePanel.setModelWarning(
+              record.id,
+              this.sessionStore.isStorageBlocked()
+                ? 'Close the viewer’s other tabs, then reload to restore'
+                : 'File missing — re-upload to restore',
+            );
           }
         } catch (err) {
           // skip models that fail to restore — drop any partial stream
@@ -1050,6 +1090,10 @@ export class App {
     if (session?.camera) {
       this.viewer.restoreCameraState(session.camera);
     }
+
+    // Clear out cache parts no entry points at (a load that failed or was
+    // closed mid-way). After the restore, so it never competes with it.
+    void this.geometryCache.sweep();
   }
 
   private enqueueLoad(file: LoadedFile, source?: ModelSource): void {
@@ -1063,12 +1107,23 @@ export class App {
     // partially-built model if the parse fails. Null before the stream
     // starts and once it completes.
     let streamId: string | null = null;
+    // Set once the workers may be writing cache parts for this load.
+    let cacheKey: string | undefined;
+    const timeline = new LoadTimeline(file.readStartedAt ?? performance.now());
+    if (file.readEndedAt !== undefined) timeline.mark('main.read', file.readEndedAt);
+    timeline.mark('main.handled');
     try {
       // Reject duplicate filenames
       for (const existing of this.modelRecords.values()) {
         if (existing.name === file.name) {
           this.setStatus(`${file.name} is already loaded`);
           setTimeout(() => this.setStatus(''), 3000);
+          // Settled, as a load that did not happen: whoever waits for this
+          // load (the `?stats` surface, the bench) hears about it.
+          this.emitLoadSettled({
+            name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false,
+            error: 'already loaded',
+          });
           return;
         }
       }
@@ -1089,17 +1144,15 @@ export class App {
       streamId = id;
       let totalElements = 0;
       let framed = false;
-      // Only gather meshes for the geometry cache when it will be written.
-      const forCache = this.sessionStore.isMemoryEnabled() ? this.geometryCache.collector() : null;
+      // The workers store the geometry in the cache as they stream it, when
+      // it will be kept (memory on); see `commitCache`.
+      cacheKey = this.cacheKeyFor(id);
       const parsed = await this.parser.parseStreaming(file.buffer, id, (batch, progress) => {
-        this.modelManager.appendMeshes(id, batch);
-        this.sceneBounds.addMeshes(id, batch);
-        forCache?.add(batch);
-        totalElements = progress.total;
-        this.setStatus(
-          `Loading ${file.name}… ` +
-          `(${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()} elements)`,
-        );
+        timeline.mark('main.firstBatch');
+        timeline.time('main.append', () => this.modelManager.appendMeshes(id, batch));
+        timeline.time('main.bounds', () => this.sceneBounds.addMeshes(id, batch));
+        totalElements = progress.loaded;
+        this.setStatus(loadingStatus(file.name, progress));
         // Fit once, on the first batch, so the camera frames the model
         // early and the progressive fill is actually visible. We do NOT
         // re-fit at the end: the load is interactive now, and a late fit
@@ -1108,10 +1161,15 @@ export class App {
           framed = true;
           this.viewer.fitToBox(this.modelManager.getBoundingBox());
         }
-      });
-      this.modelManager.endStream(id);
+      }, timeline, { cacheKey });
+      timeline.mark('main.streamed');
+      timeline.absorbWorker(parsed.timings);
+      timeline.time('main.finish', () => this.modelManager.endStream(id));
       streamId = null;
+      this.commitCache(cacheKey, hashPromise, parsed.cache);
+      cacheKey = undefined; // commitCache owns it now
       const hash = await hashPromise;
+      timeline.mark('main.hashed');
 
       const modelSource: ModelSource = source ?? { type: 'local', fileName: file.name };
       const record: ModelRecord = {
@@ -1134,33 +1192,36 @@ export class App {
         modelSource.type,
       );
 
-      // Persist to IndexedDB if memory is enabled
+      this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
+      setTimeout(() => this.setStatus(''), 3000);
+      timeline.mark('main.settled');
+      this.emitLoadSettled({
+        name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
+        phases: timeline.toJSON(),
+      });
+
+      // Persist to IndexedDB if memory is enabled. After the load has
+      // settled: the model is on screen and usable, and writing a large
+      // file (0.8 s for 357 MB) is no reason to keep saying "Loading". The
+      // next queued load still waits for it.
       if (this.sessionStore.isMemoryEnabled()) {
         await this.sessionStore.saveModel(id, file.name, file.buffer);
         // Force an immediate session save (not debounced) so the record
         // is in localStorage even if the user refreshes right away
         this.sessionStore.saveSession(this.buildSessionState());
-        // Fire-and-forget geometry-cache write. Runs after the scene is
-        // up so the user-perceived parse time is unaffected; a failed
-        // write just means the next restore falls back to a full parse.
-        const meshes = forCache?.meshes();
-        if (meshes) void this.geometryCache.save(hash, meshes);
       }
-
-      this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
-      setTimeout(() => this.setStatus(''), 3000);
-      this.emitLoadSettled({
-        name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
-      });
     } catch (err) {
       // A streamed load that failed partway leaves an empty/partial model
       // and an open stream — drop both (removeModel also clears the stream).
+      // Whatever parts the workers wrote will never be an entry.
+      if (cacheKey) void this.geometryCache.discard(cacheKey);
       if (streamId) {
         this.modelManager.removeModel(streamId);
         this.sceneBounds.removeModel(streamId);
       }
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      this.setStatus(`Error: ${msg}`);
+      // Out of memory, in whatever shape, becomes one plain sentence.
+      this.setStatus(loadErrorStatus(err));
       this.emitLoadSettled({
         name: file.name, source: 'file', ok: false, meshCount: 0, fromCache: false, error: msg,
       });
@@ -1491,11 +1552,38 @@ export class App {
     };
   }
 
+  /**
+   * A key for the workers to store this load's geometry under, or undefined
+   * when nothing is kept (memory off, or no private file system).
+   */
+  private cacheKeyFor(id: string): string | undefined {
+    if (!this.sessionStore.isMemoryEnabled() || !partFilesSupported()) return undefined;
+    return this.geometryCache.newKey(id);
+  }
+
+  /**
+   * Once the workers have stored every part and the file's hash is known,
+   * make the parts the cache entry for that file — or drop them if a write
+   * failed. Runs after the load has settled; the user never waits for it.
+   */
+  private commitCache(
+    cacheKey: string | undefined,
+    hash: Promise<string>,
+    written: Promise<CacheWriteReport> | undefined,
+  ): void {
+    if (!cacheKey || !written) return;
+    void Promise.all([hash, written])
+      .then(([h, report]) => this.geometryCache.commit(h, cacheKey, report))
+      .catch(() => this.geometryCache.discard(cacheKey));
+  }
+
   private emitLoadSettled(event: LoadSettledEvent): void {
     for (const cb of this.loadSettledListeners) cb(event);
   }
 
   private setStatus(text: string): void {
+    // While storage is blocked, an otherwise empty status keeps saying so.
+    if (text === '' && this.sessionStore?.isStorageBlocked()) text = STORAGE_BLOCKED_STATUS;
     if (this.statusEl) this.statusEl.textContent = text;
   }
 

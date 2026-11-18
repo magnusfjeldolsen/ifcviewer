@@ -1,135 +1,81 @@
 /**
- * Cache parsed-IFC mesh buffers in IndexedDB, keyed by the SHA-256 of the
- * source .ifc buffer. On a cache hit we hydrate the scene directly from
- * the stored Float32Array / Uint32Array buffers and skip the expensive
- * web-ifc parse — the ~60 s wait on a 191 MB model collapses to < 2 s.
+ * Cache parsed-IFC geometry in IndexedDB, keyed by the SHA-256 of the .ifc
+ * file, so a model opens again without parsing it again.
  *
- * The web-ifc model itself is still needed for property queries; the App
- * kicks off a background re-parse after restoring from cache. This module
- * is concerned only with the geometry side.
+ * The workers write the geometry while they stream it, as part files (see
+ * `geometryParts.ts`); this module is the main thread's side: it records a
+ * finished set of files as a cache entry in IndexedDB (`commit`), reads an
+ * entry back part by part (`open`), and keeps the cache within its cap
+ * (`evict`, `sweep`).
  *
- * Storage layout: one IDB record per source .ifc file. Records are evicted
- * oldest-first when their combined size exceeds GEOMETRY_CACHE_CAP_BYTES.
- * Schema-version mismatches are treated as cache misses.
+ * Reading back part by part is what lets a model of any size reopen: each
+ * part is appended to the scene and let go before the next is read, so the
+ * restore never holds more than one part beyond what the scene holds.
  */
 
 import type { ParsedMesh } from '../parser/types';
-import type { SessionStore } from './SessionStore';
+import type { GeometryIndexRecord, SessionStore } from './SessionStore';
+import { cacheKeyTime, newCacheKey, opfsPartFiles, type CacheWriteReport, type PartFiles } from './geometryParts';
+import { unpackMeshes } from './geometryPack';
 
 /**
- * Bump when the on-disk shape of CachedMesh changes meaning. Existing
- * entries are treated as misses and silently re-populated on next parse.
+ * Bump when the meaning of the stored parts changes. An index record of any
+ * other version is a miss: its entry is removed and the model parsed again.
  *
- * Reasons to bump:
- *   - Add or remove a CachedMesh field.
- *   - Change units or interpretation of any field.
- *   - Switch the typed-array representation (e.g. Uint16 → Uint32 indices).
+ *   1 — one record per model (removed with the v4 database upgrade)
+ *   2 — an index over part files the workers write to OPFS
  */
-export const CACHE_SCHEMA_VERSION = 1;
+export const CACHE_SCHEMA_VERSION = 2;
 
-/** Max bytes across the entire geometry-cache store before eviction kicks in. */
-export const GEOMETRY_CACHE_CAP_BYTES = 500 * 1024 * 1024;
+/** The least the cache may hold, whatever the browser says about storage. */
+export const MIN_CACHE_BYTES = 500 * 1024 * 1024;
+/** The most it may hold. */
+export const MAX_CACHE_BYTES = 8 * 1024 ** 3;
+/** Share of the origin's storage quota the cache may use, between those two. */
+export const CACHE_QUOTA_SHARE = 0.25;
 
-export interface CachedMesh {
-  expressID: number;
-  vertices: ArrayBuffer; // Float32Array.buffer (positions, xyz stride 3)
-  normals: ArrayBuffer;  // Float32Array.buffer (normals, xyz stride 3)
-  indices: ArrayBuffer;  // Uint32Array.buffer
-  color: { r: number; g: number; b: number; a: number };
-  transform: number[];   // length 16 (Matrix4 column-major)
-  /** `ParsedMesh.bounds`; absent on entries written before it existed. */
-  bounds?: ParsedMesh['bounds'];
-}
-
-export interface CachedGeometryRecord {
-  hash: string;
-  cachedAt: number;
-  schemaVersion: number;
-  /** Pre-computed at save time so eviction doesn't need to walk meshes. */
-  sizeBytes: number;
-  meshes: CachedMesh[];
-}
-
-/** Convert in-memory ParsedMesh[] to the serializable CachedMesh[] shape. */
-export function serializeMeshes(parsed: ParsedMesh[]): CachedMesh[] {
-  const out: CachedMesh[] = new Array(parsed.length);
-  for (let i = 0; i < parsed.length; i++) {
-    const m = parsed[i];
-    out[i] = {
-      expressID: m.expressID,
-      vertices: copyView(m.vertices),
-      normals: copyView(m.normals),
-      indices: copyView(m.indices),
-      color: { r: m.color.r, g: m.color.g, b: m.color.b, a: m.color.a },
-      transform: m.transform.slice(),
-    };
-    if (m.bounds) out[i].bounds = m.bounds;
-  }
-  return out;
-}
-
-/** Convert CachedMesh[] back to ParsedMesh[]. Reconstructs typed-array views. */
-export function deserializeMeshes(cached: CachedMesh[]): ParsedMesh[] {
-  const out: ParsedMesh[] = new Array(cached.length);
-  for (let i = 0; i < cached.length; i++) {
-    const c = cached[i];
-    out[i] = {
-      expressID: c.expressID,
-      vertices: new Float32Array(c.vertices),
-      normals: new Float32Array(c.normals),
-      indices: new Uint32Array(c.indices),
-      color: { r: c.color.r, g: c.color.g, b: c.color.b, a: c.color.a },
-      transform: c.transform.slice(),
-    };
-    if (c.bounds) out[i].bounds = c.bounds;
-  }
-  return out;
-}
-
-/** Sum the byte size of a record's mesh buffers + small per-mesh overhead. */
-export function computeRecordSize(meshes: CachedMesh[]): number {
-  let total = 0;
-  for (const m of meshes) {
-    total += m.vertices.byteLength + m.normals.byteLength + m.indices.byteLength;
-    // Object overhead per mesh (color + transform + expressID): rough estimate.
-    total += 168;
-  }
-  return total;
-}
-
-/** Bytes a mesh will take in the cache (what `computeRecordSize` counts). */
-function meshBytes(m: ParsedMesh): number {
-  return m.vertices.byteLength + m.normals.byteLength + m.indices.byteLength + 168;
-}
+/** Parts being read while the one before them is appended. */
+const READ_AHEAD = 3;
 
 /**
- * Gathers a streamed model's meshes for the cache, batch by batch, but only
- * while they fit under the cache cap. A model too big for the cache would be
- * evicted the moment it was written, so holding a second copy of its geometry
- * for the length of the load — next to what the renderer already holds —
- * buys nothing: past the cap the collector drops what it has and stops.
+ * Part files with no index record, from a load that started this long ago
+ * and is not running in this tab, are leftovers of a failed or abandoned
+ * load. A load still writing in another tab holds its files open, and the
+ * file system refuses to remove them; this margin covers the seconds between
+ * its writers closing their files and its index record being written.
  */
-export class CacheCollector {
-  private list: ParsedMesh[] | null = [];
-  private bytes = 0;
+export const ORPHAN_AGE_MS = 2 * 60 * 1000;
 
-  constructor(private capBytes: number) {}
+/** The index operations this module needs (SessionStore; tests pass a fake). */
+export type GeometryIndex = Pick<
+  SessionStore,
+  'putGeometryIndex' | 'getGeometryIndex' | 'getAllGeometryIndex' | 'removeGeometryIndex'
+>;
+/** A cache entry ready to be read. */
+export interface CachedModel {
+  parts: number;
+  sizeBytes: number;
+  /**
+   * Read the parts in order, handing each one's meshes to `onMeshes`.
+   * Resolves true if every part was read, false if one was missing or
+   * corrupt — the caller then drops what it got and parses instead (the
+   * entry has been removed by then).
+   */
+  read(onMeshes: (meshes: ParsedMesh[]) => void, onTime?: (span: string, ms: number) => void): Promise<boolean>;
+}
 
-  add(meshes: readonly ParsedMesh[]): void {
-    if (!this.list) return;
-    for (const m of meshes) {
-      this.bytes += meshBytes(m);
-      if (this.bytes > this.capBytes) {
-        this.list = null;
-        return;
-      }
-      this.list.push(m);
-    }
-  }
+/** The cap the browser's storage estimate allows, between the min and the max. */
+export function capFromQuota(quota: number | undefined): number {
+  if (!quota || !Number.isFinite(quota)) return 2 * 1024 ** 3;
+  return Math.max(MIN_CACHE_BYTES, Math.min(MAX_CACHE_BYTES, quota * CACHE_QUOTA_SHARE));
+}
 
-  /** Everything added, or null if it outgrew the cache. */
-  meshes(): ParsedMesh[] | null {
-    return this.list;
+async function browserCap(): Promise<number> {
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    return capFromQuota(estimate?.quota);
+  } catch {
+    return capFromQuota(undefined);
   }
 }
 
@@ -144,104 +90,169 @@ export async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   return out;
 }
 
-/**
- * Thin wrapper around SessionStore's geometry-cache IDB operations.
- * Owns serialization, schema-version checks, and the LRU eviction policy.
- */
 export class GeometryCache {
   constructor(
-    private store: SessionStore,
-    private capBytes: number = GEOMETRY_CACHE_CAP_BYTES,
+    private index: GeometryIndex,
+    private files: PartFiles = opfsPartFiles,
+    private capBytes: () => Promise<number> = browserCap,
+    private now: () => number = Date.now,
   ) {}
 
-  /** A collector for one streamed load, bounded by this cache's cap. */
-  collector(): CacheCollector {
-    return new CacheCollector(this.capBytes);
+  /** Keys of loads in this tab whose parts are not yet committed or discarded. */
+  private active = new Set<string>();
+
+  /** A key for the parts of a new load. Its files are never swept until `commit` or `discard`. */
+  newKey(id: string): string {
+    const key = newCacheKey(id, this.now());
+    this.active.add(key);
+    return key;
   }
 
   /**
-   * Save parsed meshes under `hash`. Evicts oldest entries if the new
-   * total would exceed the cap. Fire-and-forget: failures are logged and
-   * swallowed — a missed cache write is never user-visible.
+   * The workers have stored a load's parts: make them the entry for `hash`.
+   * A failed write (or an entry bigger than the whole cache) is discarded
+   * instead. Never throws: a missed cache write is never user-visible.
    */
-  async save(hash: string, parsed: ParsedMesh[]): Promise<void> {
+  async commit(hash: string, key: string, report: CacheWriteReport): Promise<void> {
+    this.active.delete(key);
     try {
-      // Bigger than the whole cache: it would only evict everything else and
-      // then itself. Skip the copy and the write.
-      let bytes = 0;
-      for (const m of parsed) bytes += meshBytes(m);
-      if (bytes > this.capBytes) return;
-      const meshes = serializeMeshes(parsed);
-      const record: CachedGeometryRecord = {
+      const cap = await this.capBytes();
+      if (!report.ok || report.parts === 0 || report.bytes > cap) {
+        console.info(
+          `GeometryCache: not cached (${!report.ok ? report.error ?? 'a write failed' : report.parts === 0 ? 'no geometry' : `${(report.bytes / 1e6).toFixed(0)} MB is over the ${(cap / 1e6).toFixed(0)} MB cap`})`,
+        );
+        await this.files.remove(key);
+        return;
+      }
+      const previous = await this.index.getGeometryIndex(hash);
+      await this.index.putGeometryIndex({
         hash,
-        cachedAt: Date.now(),
+        key,
+        files: report.files ?? [],
+        parts: report.parts,
+        sizeBytes: report.bytes,
+        cachedAt: this.now(),
         schemaVersion: CACHE_SCHEMA_VERSION,
-        sizeBytes: computeRecordSize(meshes),
-        meshes,
-      };
-      await this.store.saveCachedGeometry(record);
-      await this.evictOldestUntilUnderCap();
+      });
+      if (previous && previous.key !== key) await this.files.remove(previous.key);
+      await this.evict();
     } catch (err) {
-      console.warn('GeometryCache: save failed', err);
+      console.warn('GeometryCache: commit failed', err);
     }
   }
 
-  /**
-   * Load meshes by hash. Returns null on miss, schema-version mismatch,
-   * or any IDB error (which is treated as a miss — the caller falls back
-   * to a full parse).
-   */
-  async load(hash: string): Promise<ParsedMesh[] | null> {
+  /** Drop the parts of a load that will not become an entry. */
+  async discard(key: string): Promise<void> {
+    this.active.delete(key);
     try {
-      const record = await this.store.loadCachedGeometry(hash);
-      if (!record) return null;
-      if (record.schemaVersion !== CACHE_SCHEMA_VERSION) return null;
-      // StoredCachedGeometry.meshes is typed `unknown[]` so SessionStore stays
-      // free of typed-array knowledge. Trust the schema-version gate above:
-      // any record we accept here was produced by `serializeMeshes`.
-      return deserializeMeshes(record.meshes as CachedMesh[]);
+      await this.files.remove(key);
     } catch (err) {
-      console.warn('GeometryCache: load failed', err);
+      console.warn('GeometryCache: discard failed', err);
+    }
+  }
+
+  /** The entry for `hash`, or null on a miss (including an entry of another version). */
+  async open(hash: string): Promise<CachedModel | null> {
+    let found: GeometryIndexRecord | null;
+    try {
+      found = await this.index.getGeometryIndex(hash);
+    } catch (err) {
+      console.warn('GeometryCache: lookup failed', err);
       return null;
     }
+    if (!found) return null;
+    if (found.schemaVersion !== CACHE_SCHEMA_VERSION || !Array.isArray(found.files)) {
+      await this.remove(found);
+      return null;
+    }
+    const entry = found;
+    return {
+      parts: entry.parts,
+      sizeBytes: entry.sizeBytes,
+      read: async (onMeshes, onTime) => {
+        try {
+          // Every part's place: which file, where in it, how long.
+          const places: Array<{ worker: number; offset: number; length: number }> = [];
+          for (const f of entry.files) {
+            let offset = 0;
+            for (const length of f.sizes) {
+              places.push({ worker: f.worker, offset, length });
+              offset += length;
+            }
+          }
+          if (places.length !== entry.parts) throw new Error(`expected ${entry.parts} parts, index lists ${places.length}`);
+          // Keep the next parts' reads going while this one is appended:
+          // reading is the disk's time, appending the main thread's.
+          const ahead: Array<Promise<ArrayBuffer | null>> = [];
+          let next = 0;
+          const fill = (): void => {
+            while (ahead.length < READ_AHEAD && next < places.length) {
+              const p = places[next++];
+              // A failed read counts as a missing part (and is never left unhandled).
+              ahead.push(this.files.read(entry.key, p.worker, p.offset, p.length).catch(() => null));
+            }
+          };
+          for (let i = 0; i < places.length; i++) {
+            fill();
+            const t0 = performance.now();
+            const data = await ahead.shift()!;
+            fill();
+            const t1 = performance.now();
+            if (!data) throw new Error(`part ${i} missing`);
+            const meshes = unpackMeshes(data);
+            onTime?.('main.cacheGet', t1 - t0);
+            onTime?.('main.cacheUnpack', performance.now() - t1);
+            onMeshes(meshes);
+          }
+          return true;        } catch (err) {
+          console.warn('GeometryCache: entry unreadable, removing it', err);
+          await this.remove(entry);
+          return false;
+        }
+      },
+    };
   }
 
   /**
-   * Remove the oldest entries until total size is under the cap.
-   * Approximate LRU by `cachedAt` — adequate for a handful of large
-   * records; we don't need true LRU.
+   * Remove the oldest entries until the total is under the cap. Approximate
+   * LRU by `cachedAt` — adequate for a handful of large entries.
    */
-  async evictOldestUntilUnderCap(): Promise<void> {
-    const meta = await this.store.getAllCachedGeometryMeta();
+  async evict(): Promise<void> {
+    const all = await this.index.getAllGeometryIndex();
+    const cap = await this.capBytes();
     let total = 0;
-    for (const m of meta) total += m.sizeBytes;
-    if (total <= this.capBytes) return;
-
-    const sorted = meta.slice().sort((a, b) => a.cachedAt - b.cachedAt);
-    for (const m of sorted) {
-      if (total <= this.capBytes) break;
-      await this.store.removeCachedGeometry(m.hash);
-      total -= m.sizeBytes;
-      console.info(`GeometryCache: evicted ${m.hash.slice(0, 8)}… (${(m.sizeBytes / 1e6).toFixed(1)} MB)`);
+    for (const e of all) total += e.sizeBytes;
+    for (const e of all.slice().sort((a, b) => a.cachedAt - b.cachedAt)) {
+      if (total <= cap) break;
+      await this.remove(e);
+      total -= e.sizeBytes;
+      console.info(`GeometryCache: evicted ${e.hash.slice(0, 8)}… (${(e.sizeBytes / 1e6).toFixed(1)} MB)`);
     }
   }
-}
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
+  /**
+   * Remove parts no entry points at: leftovers of loads that failed, were
+   * abandoned, or were replaced. Only those older than `ORPHAN_AGE_MS`, so
+   * a load still writing (here or in another tab) is left alone.
+   */
+  async sweep(): Promise<void> {
+    try {
+      const live = new Set((await this.index.getAllGeometryIndex()).map((e) => e.key));
+      const now = this.now();
+      for (const key of await this.files.keys()) {
+        if (live.has(key) || this.active.has(key)) continue;
+        const at = cacheKeyTime(key);
+        if (Number.isFinite(at) && now - at < ORPHAN_AGE_MS) continue;
+        await this.files.remove(key);
+      }
+    } catch (err) {
+      console.warn('GeometryCache: sweep failed', err);
+    }
+  }
 
-/**
- * Detach a typed-array view into a fresh ArrayBuffer copy. Typed arrays
- * can be views over a larger buffer (or even a SharedArrayBuffer), so we
- * can't just hand out `view.buffer`. Allocating a fresh ArrayBuffer and
- * copying the bytes guarantees the result is an owned, plain ArrayBuffer
- * that IDB can serialize without surprises.
- */
-function copyView(view: Float32Array | Uint32Array): ArrayBuffer {
-  const out = new ArrayBuffer(view.byteLength);
-  new Uint8Array(out).set(
-    new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
-  );
-  return out;
+  /** Remove an entry: its index record and its files. Never throws. */
+  private async remove(entry: GeometryIndexRecord): Promise<void> {
+    await this.index.removeGeometryIndex(entry.hash).catch(() => {});
+    await this.files.remove(entry.key).catch(() => {});
+  }
 }

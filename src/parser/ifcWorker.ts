@@ -7,7 +7,12 @@
  * numeric-web-ifc-id map. The main thread never sees a numeric model id.
  *
  * Responsibilities:
- *  - `parse`        — open a model and stream geometry back in batches.
+ *  - `parse`        — open a model and stream geometry back in batches; for
+ *                     a shared parse, only the chunks the coordinator hands
+ *                     out over the `chunkPort` (until `stopShare` or the end).
+ *  - `share`        — as a helper: open a copy of a model, stream chunks for
+ *                     it, close it. The same script runs as main worker and
+ *                     as helper; a helper never answers property queries.
  *  - `openForProps` — open a model for property queries only (cache-restore).
  *  - `getProps`     — fetch + normalize one element's properties.
  *  - `intersect`    — fold N elements' properties into one synthetic result.
@@ -47,17 +52,27 @@ import {
 } from '../inspector/intersection';
 import { elementMatches, type PropertySelector } from '../inspector/matchValue';
 import type { ElementProperties, PropertyValue } from '../inspector/types';
-import type { FromWorker, ToWorker } from './ifcMessages';
-import type { ParsedMesh, StreamProgress } from './types';
-import { weldVertices, WELD_NORMAL_STEPS } from './weld';
+import type { FromChunkPort, FromWorker, ToChunkPort, ToWorker } from './ifcMessages';
+import type { ParsedMesh } from './types';
+import { weldForTransfer, WeldScratch } from './weld';
+
+/** Reused by every piece this worker welds (see WeldScratch). */
+const weldScratch = new WeldScratch();
+import { WorkerTimeline } from '../core/LoadTimeline';
+import { geometryProductIds } from './geometryProducts';
+import { StreamBatcher } from './streamBatcher';
+import { openPartFile, PartWriter, type SyncFile } from '../services/geometryParts';
+import { ShareRegistry } from './shareRegistry';
 
 /**
- * Product-ID batch size for `parse`. Each batch is one `batch` message.
- * Kept moderate so the main thread builds geometry in reasonable chunks
- * without paying a `postMessage` round-trip per product. The worker never
- * yields, so this only governs message granularity, not parse speed.
+ * When `parse` sends a `batch`: after this many products, or after this many
+ * ms of streaming, whichever comes first (see `StreamBatcher`). The count
+ * keeps the message rate sane on a model of small elements; the clock puts
+ * the first geometry on screen within a fraction of a second, and keeps each
+ * batch small enough for the main thread to append without a long stall.
  */
 const STREAM_BATCH_SIZE = 200;
+const STREAM_BATCH_INTERVAL_MS = 200;
 
 // --- web-ifc instance + per-model state -------------------------------------
 
@@ -120,18 +135,31 @@ function extractFlatMesh(
   flatMesh: WebIFC.FlatMesh,
   modelID: number,
   sink: ParsedMesh[],
+  timeline?: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
 ): void {
   for (let i = 0; i < flatMesh.geometries.size(); i++) {
     const placedGeom = flatMesh.geometries.get(i);
+    const t0 = performance.now();
     const geom = ifc.GetGeometry(modelID, placedGeom.geometryExpressID);
 
-    const verts = ifc.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
-    const idxs = ifc.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
+    // Views of the wasm heap, not copies (`GetVertexArray` copies): read
+    // straight away into reused scratch, and nothing is left for the
+    // garbage collector but the welded result itself.
+    // Every call into web-ifc comes first: a call may grow the heap, and a
+    // view made before that would be left pointing at the old, emptied one.
+    const vPtr = geom.GetVertexData() / 4;
+    const vLen = geom.GetVertexDataSize();
+    const iPtr = geom.GetIndexData() / 4;
+    const iLen = geom.GetIndexDataSize();
+    const heap = ifc.wasmModule as unknown as { HEAPF32: Float32Array; HEAPU32: Uint32Array };
+    const verts = heap.HEAPF32.subarray(vPtr, vPtr + vLen);
+    const idxs = heap.HEAPU32.subarray(iPtr, iPtr + iLen);
 
     // Extract vertices (position only, stride of 6: x,y,z,nx,ny,nz).
     const vertexCount = verts.length / 6;
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
+    const positions = weldScratch.f32('positions', vertexCount * 3);
+    const normals = weldScratch.f32('normals', vertexCount * 3);
     // Local bounds ride along in the same pass: see `ParsedMesh.bounds`. They
     // stay true after welding below, which keeps every distinct position.
     let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -157,7 +185,13 @@ function extractFlatMesh(
     // web-ifc gives nearly every triangle its own three vertices. Sharing the
     // ones that are the same point with the same (8-bit, as drawn) normal cuts
     // the vertex work and memory of a large model by about a fifth.
-    const welded = weldVertices(positions, normals, new Uint32Array(idxs), WELD_NORMAL_STEPS);
+    const t1 = performance.now();
+    const welded = weldForTransfer(positions, normals, idxs, weldScratch);
+    if (timeline) {
+      const t2 = performance.now();
+      timeline.add(`${role}.extract`, t1 - t0);
+      timeline.add(`${role}.weld`, t2 - t1);
+    }
 
     const color = placedGeom.color;
     const mesh: ParsedMesh = {
@@ -194,46 +228,257 @@ function batchTransferables(meshes: ParsedMesh[]): Transferable[] {
 
 /**
  * Parse a model: open it, then stream geometry. The worker is not the UI
- * thread, so it never has to yield — it runs ONE `StreamAllMeshes` pass,
- * extracts geometry inside the callback, and posts `batch` messages as
- * products accumulate. A single pass is faster than the reverted
- * main-thread two-pass streaming.
+ * thread, so it never has to yield — it lists the elements, runs ONE
+ * `StreamMeshes` pass over them, extracts geometry inside the callback, and
+ * posts `batch` messages as products accumulate. Every reply carries the
+ * parse's `token`.
  */
-async function handleParse(id: string, buffer: ArrayBuffer): Promise<void> {
+async function handleParse(
+  id: string,
+  token: number,
+  buffer: ArrayBuffer,
+  shared: boolean,
+  cacheKey: string | undefined,
+  timeline: WorkerTimeline,
+): Promise<void> {
+  timeline.mark('worker.started');
+  // Opened while the model opens; awaited once there is geometry to store.
+  const file = cacheKey ? openPartFile(cacheKey, 0) : null;
+  const opened: { modelID: number | null } = { modelID: null };
+  try {
+    await parseInto(id, token, buffer, shared, file, timeline, opened);
+  } catch (err) {
+    // The part file holds a lock for as long as it is open: let it go, so a
+    // later sweep can remove the half-written load.
+    closeQuietly(file);
+    // A model opened for a parse that failed is of no use to anyone.
+    if (opened.modelID !== null) closeModel(id, opened.modelID);
+    throw err;
+  }
+}
+
+async function parseInto(
+  id: string,
+  token: number,
+  buffer: ArrayBuffer,
+  shared: boolean,
+  file: Promise<SyncFile | null> | null,
+  timeline: WorkerTimeline,
+  opened: { modelID: number | null },
+): Promise<void> {
   const ifc = await getApi();
+  timeline.mark('worker.ready');
+  const t0 = performance.now();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  opened.modelID = modelID;
+  timeline.add('worker.open', performance.now() - t0);
+  timeline.mark('worker.opened');
   modelIds.set(id, modelID);
 
-  // Pass 1 — count products so `total` is determinate from the first batch.
-  // Cheap: no GetGeometry, just visits each FlatMesh.
-  let total = 0;
-  ifc.StreamAllMeshes(modelID, () => {
-    total++;
-  });
+  // The elements to stream, from the type index (milliseconds). Its length
+  // is the progress total: an upper bound, since a product without a body
+  // is listed but streams nothing. See `geometryProducts.ts`.
+  const ids = geometryProductIds(ifc, modelID);
+  post(shared ? { type: 'listed', token, total: ids.length, ids } : { type: 'listed', token, total: ids.length });
+  timeline.mark('worker.listed');
 
-  // Pass 2 — stream geometry, flushing a batch every STREAM_BATCH_SIZE
-  // products. `StreamAllMeshes` cannot be paused, so we accumulate inside
-  // the callback and post whenever the batch fills.
-  let pending: ParsedMesh[] = [];
-  let loaded = 0;
-  const flush = (): void => {
-    if (pending.length === 0) return;
-    const meshes = pending;
-    pending = [];
-    const progress: StreamProgress = { loaded, total };
-    post({ type: 'batch', id, meshes, progress }, batchTransferables(meshes));
-  };
+  const writer = file ? new PartWriter(await file, 0) : null;
 
-  ifc.StreamAllMeshes(modelID, (flatMesh: WebIFC.FlatMesh) => {
-    extractFlatMesh(ifc, flatMesh, modelID, pending);
-    loaded++;
-    if (loaded % STREAM_BATCH_SIZE === 0) flush();
-  });
-  flush();
+  // Geometry is extracted inside the stream callback (it is only valid
+  // there) and posted in batches as the batcher decides.
+  const batcher = new StreamBatcher<ParsedMesh>(
+    (meshes, products) => postBatch(token, meshes, products, undefined, timeline, 'worker', writer),
+    { maxProducts: STREAM_BATCH_SIZE, maxIntervalMs: STREAM_BATCH_INTERVAL_MS },
+  );
+
+  if (shared) {
+    timeline.mark('worker.waitPort');
+    const port = await shares.portFor(token);
+    await streamChunks(ifc, modelID, token, port, batcher, timeline, 'worker', writer);
+  } else {
+    streamIds(ifc, modelID, ids, batcher, timeline);
+  }
+  batcher.flush();
+  timeline.mark('worker.streamed');
+  timeline.add('worker.wasmHeapMB', wasmHeapMB(ifc));
 
   // Model kept open — property queries need the STEP graph. Closed by
   // `disposeModel` / `dispose`.
-  post({ type: 'parsed', id });
+  post({ type: 'parsed', token, timings: timeline.toJSON() });
+
+  if (writer) post({ type: 'cacheWritten', token, report: writer.finish() });
+}
+
+/** Size of web-ifc's heap in this worker, MB (it only ever grows). */
+function wasmHeapMB(ifc: WebIFC.IfcAPI): number {
+  return Math.round((ifc.wasmModule as unknown as { HEAPU8: Uint8Array }).HEAPU8.length / 1048576);
+}
+
+/** Close a model this worker opened, unless a later request has replaced it. */
+function closeModel(id: string, modelID: number): void {
+  if (modelIds.get(id) === modelID) {
+    modelIds.delete(id);
+    unitTables.delete(id);
+    propertyCaches.drop(id);
+  }
+  try {
+    api?.CloseModel(modelID);
+  } catch {
+    // web-ifc may be down already
+  }
+}
+
+/** Close a part file whatever state the load got to (closing twice is harmless). */
+function closeQuietly(file: Promise<SyncFile | null> | null): void {
+  void file?.then((f) => {
+    try {
+      f?.close();
+    } catch {
+      // already closed
+    }
+  });
+}
+
+/**
+ * Help another worker parse a model: open it, stream the chunks the
+ * coordinator hands out over `port`, close it. A chunk's geometry goes out in
+ * one batch, marked with the chunk's index: the main thread counts the chunk
+ * delivered when that batch arrives, so if this worker dies mid-chunk none of
+ * that chunk was delivered and another worker streams it.
+ */
+async function handleShare(
+  token: number,
+  buffer: ArrayBuffer,
+  port: MessagePort,
+  worker: number,
+  cacheKey: string | undefined,
+  timeline: WorkerTimeline,
+): Promise<void> {
+  timeline.mark('helper.started');
+  const file = cacheKey ? openPartFile(cacheKey, worker) : null;
+  try {
+    await shareInto(token, buffer, port, worker, file, timeline);
+  } catch (err) {
+    closeQuietly(file);
+    throw err;
+  }
+}
+
+async function shareInto(
+  token: number,
+  buffer: ArrayBuffer,
+  port: MessagePort,
+  worker: number,
+  file: Promise<SyncFile | null> | null,
+  timeline: WorkerTimeline,
+): Promise<void> {
+  const ifc = await getApi();
+  const t0 = performance.now();
+  const modelID = ifc.OpenModel(new Uint8Array(buffer));
+  timeline.add('helper.open', performance.now() - t0);
+  timeline.mark('helper.opened');
+  const writer = file ? new PartWriter(await file, worker) : null;
+  try {
+    const batcher = new StreamBatcher<ParsedMesh>(() => {}, {
+      maxProducts: Infinity,
+      maxIntervalMs: Infinity,
+    });
+    await streamChunks(ifc, modelID, token, port, batcher, timeline, 'helper', writer);
+  } finally {
+    ifc.CloseModel(modelID);
+  }
+  timeline.mark('helper.streamed');
+  // Memory, not time: what this helper's web-ifc heap grew to (summed over helpers).
+  timeline.add('helper.wasmHeapMB', wasmHeapMB(ifc));
+  post({ type: 'shareStreamed', token, timings: timeline.toJSON() });
+  // Flushed and closed before saying done: terminating the worker would
+  // otherwise lose what the file system has not written yet.
+  post({ type: 'shareDone', token, cache: writer?.finish() });
+}
+
+/** Coordinator ports, chunk inboxes and early stops of shared parses, by token. */
+const shares = new ShareRegistry<MessagePort>();
+
+/**
+ * Stream the chunks the coordinator hands out over `port` until it says
+ * there are no more (or the main thread stops the parse). After each chunk
+ * its geometry is posted to the main thread with the chunk's index, and the
+ * coordinator asked for another.
+ */
+async function streamChunks(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  token: number,
+  port: MessagePort,
+  batcher: StreamBatcher<ParsedMesh>,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+  writer: PartWriter | null = null,
+): Promise<void> {
+  const inbox = shares.open(token);
+  port.onmessage = (e: MessageEvent<ToChunkPort>): void => inbox.push(e.data);
+  const tell = (msg: FromChunkPort): void => port.postMessage(msg);
+  tell({ type: 'ready' });
+  try {
+    for (;;) {
+      const tw = performance.now();
+      const chunk = await inbox.next();
+      timeline.add(`${role}.waitChunk`, performance.now() - tw);
+      if (chunk.ids === null) break;
+      streamIds(ifc, modelID, chunk.ids, batcher, timeline, role);
+      const { items, products } = batcher.take();
+      // Always posted, even empty: it is what marks the chunk delivered.
+      postBatch(token, items, products, chunk.index, timeline, role, writer);
+      tell({ type: 'done', index: chunk.index });
+    }
+  } finally {
+    shares.close(token);
+    port.onmessage = null;
+    port.close();
+  }
+}
+
+/** `StreamMeshes` over `ids`, extracting every piece into the batcher. */
+function streamIds(
+  ifc: WebIFC.IfcAPI,
+  modelID: number,
+  ids: number[],
+  batcher: StreamBatcher<ParsedMesh>,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+): void {
+  const t0 = performance.now();
+  ifc.StreamMeshes(modelID, ids, (flatMesh: WebIFC.FlatMesh) => {
+    timeline.mark(`${role}.firstMesh`);
+    extractFlatMesh(ifc, flatMesh, modelID, batcher.sink, timeline, role);
+    batcher.endProduct();
+  });
+  timeline.add(`${role}.stream`, performance.now() - t0);
+}
+
+function postBatch(
+  token: number,
+  meshes: ParsedMesh[],
+  products: number,
+  chunk: number | undefined,
+  timeline: WorkerTimeline,
+  role: 'worker' | 'helper' = 'worker',
+  writer: PartWriter | null = null,
+): void {
+  if (chunk === undefined && meshes.length === 0 && products === 0) return;
+  if (writer && meshes.length > 0) {
+    // Packed (copied) before the buffers are transferred away below.
+    const tw = performance.now();
+    writer.write(meshes);
+    timeline.add(`${role}.cacheWrite`, performance.now() - tw);
+  }
+  const tp = performance.now();
+  const msg: FromWorker = chunk === undefined
+    ? { type: 'batch', token, meshes, products }
+    : { type: 'batch', token, meshes, products, chunk };
+  post(msg, batchTransferables(meshes));
+  timeline.add(`${role}.post`, performance.now() - tp);
+  if (meshes.length > 0) timeline.mark(`${role}.firstBatchPosted`);
 }
 
 /**
@@ -242,11 +487,11 @@ async function handleParse(id: string, buffer: ArrayBuffer): Promise<void> {
  * from cached meshes, the worker just needs the model open so later
  * `getProps` messages resolve.
  */
-async function handleOpenForProps(id: string, buffer: ArrayBuffer): Promise<void> {
+async function handleOpenForProps(id: string, token: number, buffer: ArrayBuffer): Promise<void> {
   const ifc = await getApi();
   const modelID = ifc.OpenModel(new Uint8Array(buffer));
   modelIds.set(id, modelID);
-  post({ type: 'parsed', id });
+  post({ type: 'parsed', token });
 }
 
 /**
@@ -641,22 +886,50 @@ function handleDispose(): void {
 self.onmessage = (event: MessageEvent<ToWorker>): void => {
   const msg = event.data;
   switch (msg.type) {
-    case 'parse':
+    case 'parse': {
+      // Stamped on arrival, before the queue: the gap to `worker.started` is
+      // time spent waiting behind other requests.
+      const timeline = new WorkerTimeline();
+      timeline.mark('worker.received');
       enqueue(async () => {
         try {
-          await handleParse(msg.id, msg.buffer);
+          await handleParse(msg.id, msg.token, msg.buffer, msg.shared === true, msg.cacheKey, timeline);
         } catch (err) {
-          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
         }
       });
+      break;
+    }
+
+    case 'share': {
+      const timeline = new WorkerTimeline();
+      timeline.mark('helper.received');
+      enqueue(async () => {
+        try {
+          await handleShare(msg.token, msg.buffer, msg.port, msg.worker, msg.cacheKey, timeline);
+        } catch (err) {
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
+        }
+      });
+      break;
+    }
+
+    // NOT enqueued: the shared parse waiting for it holds the queue.
+    case 'chunkPort':
+      shares.providePort(msg.token, msg.port);
+      break;
+
+    // NOT enqueued either: it must reach the parse that holds the queue.
+    case 'stopShare':
+      shares.stop(msg.token);
       break;
 
     case 'openForProps':
       enqueue(async () => {
         try {
-          await handleOpenForProps(msg.id, msg.buffer);
+          await handleOpenForProps(msg.id, msg.token, msg.buffer);
         } catch (err) {
-          post({ type: 'error', id: msg.id, message: errorMessage(err) });
+          post({ type: 'error', token: msg.token, message: errorMessage(err) });
         }
       });
       break;

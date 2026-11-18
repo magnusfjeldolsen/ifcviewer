@@ -9,11 +9,24 @@
  * Transferables.
  */
 
+import type { WorkerTimings } from '../core/LoadTimeline';
+import type { CacheWriteReport } from '../services/geometryParts';
+
 export interface ParsedMesh {
   expressID: number;
   vertices: Float32Array;
-  indices: Uint32Array;
-  normals: Float32Array;
+  /**
+   * 16-bit when every vertex of the piece fits, as the worker sends them: a
+   * piece's indices are half the size, and so is the garbage they become on
+   * the main thread once appended.
+   */
+  indices: Uint32Array | Uint16Array;
+  /**
+   * Unit normals, or as signed bytes (×127) as the worker sends them — the
+   * resolution they are drawn at — a quarter the size of floats. Readers
+   * normalise either.
+   */
+  normals: Float32Array | Int8Array;
   transform: number[];
   color: { r: number; g: number; b: number; a: number };
   /**
@@ -39,18 +52,23 @@ export interface ParsedModel {
 export interface StreamedModel {
   id: string;
   meshCount: number;
+  /** Where the worker's time went; absent if the worker did not report it. */
+  timings?: WorkerTimings;
+  /** With a cache key: resolves once the workers' cache parts are stored (or failed). */
+  cache?: Promise<CacheWriteReport>;
 }
 
 /**
  * Progress of a streamed parse, reported alongside each `batch` message.
  * Counted in products (≈ IFC elements with geometry), not meshes — one
- * product can yield several geometry meshes. `total` is known up front,
- * after web-ifc's `StreamAllMeshes` callback has visited every product,
- * so the count is determinate from the first batch onward.
+ * product can yield several geometry meshes. `total` is known from the first
+ * batch, read from the model's type index rather than by visiting every
+ * product, so it is an upper bound: products without a body are counted but
+ * deliver nothing. The last batch's `loaded` is the exact count.
  */
 export interface StreamProgress {
   /** Products whose geometry has been delivered so far. */
   loaded: number;
-  /** Total products with geometry in the model. */
+  /** Products listed for streaming; `loaded` ends at or a little below it. */
   total: number;
 }

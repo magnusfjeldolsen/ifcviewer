@@ -1,215 +1,238 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   CACHE_SCHEMA_VERSION,
   GeometryCache,
-  computeRecordSize,
-  deserializeMeshes,
-  serializeMeshes,
+  MAX_CACHE_BYTES,
+  MIN_CACHE_BYTES,
+  ORPHAN_AGE_MS,
+  capFromQuota,
   sha256Hex,
-  type CachedGeometryRecord,
-  type CachedMesh,
+  type GeometryIndex,
 } from '../src/services/GeometryCache';
+import { packMeshes } from '../src/services/geometryPack';
+import type { CacheWriteReport, PartFiles } from '../src/services/geometryParts';
+import type { GeometryIndexRecord } from '../src/services/SessionStore';
 import type { ParsedMesh } from '../src/parser/types';
-import type { SessionStore, StoredCachedGeometry, CachedGeometryMeta } from '../src/services/SessionStore';
 
-function makeMesh(seed: number, vertexCount = 3): ParsedMesh {
-  const verts = new Float32Array(vertexCount * 3);
-  const norms = new Float32Array(vertexCount * 3);
-  const idx = new Uint32Array(vertexCount);
-  for (let i = 0; i < vertexCount * 3; i++) {
-    verts[i] = seed + i * 0.1;
-    norms[i] = (seed + i) % 2 === 0 ? 0 : 1;
-  }
-  for (let i = 0; i < vertexCount; i++) idx[i] = i;
+afterEach(() => vi.restoreAllMocks());
+
+function mesh(id: number): ParsedMesh {
   return {
-    expressID: 100 + seed,
-    vertices: verts,
-    normals: norms,
-    indices: idx,
-    transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, seed, 0, 0, 1],
-    color: { r: 0.1 * seed, g: 0.2, b: 0.3, a: 1 },
+    expressID: id,
+    vertices: new Float32Array([id, 0, 0, 0, id, 0, 0, 0, id]),
+    normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+    indices: new Uint32Array([0, 1, 2]),
+    transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    color: { r: 1, g: 1, b: 1, a: 1 },
   };
 }
 
-describe('GeometryCache pure helpers', () => {
-  it('round-trips ParsedMesh through serialize/deserialize', () => {
-    const parsed = [makeMesh(1), makeMesh(2, 5), makeMesh(3, 1)];
-    const cached = serializeMeshes(parsed);
-    const restored = deserializeMeshes(cached);
-
-    expect(restored).toHaveLength(parsed.length);
-    for (let i = 0; i < parsed.length; i++) {
-      expect(restored[i].expressID).toBe(parsed[i].expressID);
-      expect(Array.from(restored[i].vertices)).toEqual(Array.from(parsed[i].vertices));
-      expect(Array.from(restored[i].normals)).toEqual(Array.from(parsed[i].normals));
-      expect(Array.from(restored[i].indices)).toEqual(Array.from(parsed[i].indices));
-      expect(restored[i].transform).toEqual(parsed[i].transform);
-      expect(restored[i].color).toEqual(parsed[i].color);
-    }
-  });
-
-  it('keeps the worker-computed local bounds, so a cache hit need not walk vertices', () => {
-    const withBounds: ParsedMesh = {
-      ...makeMesh(1),
-      bounds: { min: [1, 1.1, 1.2], max: [1.6, 1.7, 1.8] },
-    };
-    const restored = deserializeMeshes(serializeMeshes([withBounds, makeMesh(2)]));
-    expect(restored[0].bounds).toEqual(withBounds.bounds);
-    // Entries written before bounds existed come back without them.
-    expect(restored[1].bounds).toBeUndefined();
-  });
-
-  it('serialize copies buffers so the cached form is independent of the source', () => {
-    const parsed = [makeMesh(1)];
-    const cached = serializeMeshes(parsed);
-    // Mutate the source after serialize — cached must not see the mutation.
-    parsed[0].vertices[0] = 999;
-    const restored = deserializeMeshes(cached);
-    expect(restored[0].vertices[0]).not.toBe(999);
-  });
-
-  it('computeRecordSize counts typed-array bytes plus per-mesh overhead', () => {
-    const meshes: CachedMesh[] = serializeMeshes([makeMesh(1, 4)]);
-    // 4 verts * 3 floats * 4B = 48 verts + 48 normals + 4 indices * 4B = 16
-    // = 48 + 48 + 16 = 112 bytes payload + 168 overhead = 280
-    expect(computeRecordSize(meshes)).toBe(112 + 168);
-  });
-
-  it('sha256Hex produces a stable 64-char lowercase hex digest', async () => {
-    const a = new TextEncoder().encode('hello').buffer as ArrayBuffer;
-    const digest = await sha256Hex(a);
-    expect(digest).toHaveLength(64);
-    expect(digest).toMatch(/^[0-9a-f]{64}$/);
-    // Known SHA-256("hello")
-    expect(digest).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
-  });
-
-  it('sha256Hex differs for different buffers', async () => {
-    const a = new TextEncoder().encode('hello').buffer as ArrayBuffer;
-    const b = new TextEncoder().encode('world').buffer as ArrayBuffer;
-    expect(await sha256Hex(a)).not.toBe(await sha256Hex(b));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GeometryCache class — exercised against an in-memory fake of SessionStore's
-// geometry-cache API so we don't need real IndexedDB in the test runner.
-// ---------------------------------------------------------------------------
-
-class FakeStore {
-  records = new Map<string, StoredCachedGeometry>();
-
-  async saveCachedGeometry(record: StoredCachedGeometry): Promise<void> {
-    this.records.set(record.hash, record);
+class FakeIndex implements GeometryIndex {
+  records = new Map<string, GeometryIndexRecord>();
+  async putGeometryIndex(r: GeometryIndexRecord): Promise<void> {
+    this.records.set(r.hash, r);
   }
-  async loadCachedGeometry(hash: string): Promise<StoredCachedGeometry | null> {
+  async getGeometryIndex(hash: string): Promise<GeometryIndexRecord | null> {
     return this.records.get(hash) ?? null;
   }
-  async getAllCachedGeometryMeta(): Promise<CachedGeometryMeta[]> {
-    return Array.from(this.records.values()).map(r => ({
-      hash: r.hash, cachedAt: r.cachedAt, sizeBytes: r.sizeBytes,
-    }));
+  async getAllGeometryIndex(): Promise<GeometryIndexRecord[]> {
+    return [...this.records.values()];
   }
-  async removeCachedGeometry(hash: string): Promise<void> {
+  async removeGeometryIndex(hash: string): Promise<void> {
     this.records.delete(hash);
   }
 }
 
-function fakeStore(): SessionStore {
-  return new FakeStore() as unknown as SessionStore;
+/** Part files in memory: key → worker → bytes. */
+class FakeFiles implements PartFiles {
+  dirs = new Map<string, Map<number, Uint8Array>>();
+  async read(key: string, worker: number, offset: number, length: number): Promise<ArrayBuffer | null> {
+    const f = this.dirs.get(key)?.get(worker);
+    if (!f || offset + length > f.length) return null;
+    return f.slice(offset, offset + length).buffer;
+  }
+  async remove(key: string): Promise<void> {
+    this.dirs.delete(key);
+  }
+  async keys(): Promise<string[]> {
+    return [...this.dirs.keys()];
+  }
 }
 
-describe('GeometryCache', () => {
-  it('save then load returns equivalent ParsedMesh data', async () => {
-    const store = fakeStore();
-    const cache = new GeometryCache(store);
-    const parsed = [makeMesh(1, 4), makeMesh(2, 2)];
+const GB = 1024 ** 3;
 
-    await cache.save('hash-A', parsed);
-    const loaded = await cache.load('hash-A');
+function setup(cap = 10 * GB, now = 1_000_000) {
+  const index = new FakeIndex();
+  const files = new FakeFiles();
+  let clock = now;
+  const cache = new GeometryCache(index, files, async () => cap, () => clock);
+  return { index, files, cache, advance: (ms: number) => (clock += ms) };
+}
 
-    expect(loaded).not.toBeNull();
-    expect(loaded).toHaveLength(parsed.length);
-    expect(Array.from(loaded![0].vertices)).toEqual(Array.from(parsed[0].vertices));
-  });
-
-  it('load returns null on hash miss', async () => {
-    const cache = new GeometryCache(fakeStore());
-    expect(await cache.load('nope')).toBeNull();
-  });
-
-  it('load returns null when schema version does not match', async () => {
-    const store = fakeStore();
-    const cache = new GeometryCache(store);
-    // Plant a record with a future schema version.
-    const stale: CachedGeometryRecord = {
-      hash: 'stale',
-      cachedAt: 1000,
-      schemaVersion: CACHE_SCHEMA_VERSION + 999,
-      sizeBytes: 0,
-      meshes: [],
-    };
-    await store.saveCachedGeometry(stale);
-    expect(await cache.load('stale')).toBeNull();
-  });
-
-  it('eviction drops oldest records until total is under cap', async () => {
-    const store = fakeStore() as unknown as FakeStore;
-    // Cap so small that any single mesh forces an eviction once two are stored.
-    // makeMesh(N, 100) → 100*3*4 = 1200 verts + 1200 normals + 100*4 = 400 idx
-    // = 2800 bytes payload + 168 overhead = 2968 per record. Cap at 4000 → two
-    // records (5936) overflows; one record (2968) fits.
-    const cache = new GeometryCache(store as unknown as SessionStore, 4000);
-
-    // Override Date.now to give monotonic timestamps.
-    let t = 1000;
-    const realNow = Date.now;
-    Date.now = () => t;
-    try {
-      await cache.save('old', [makeMesh(1, 100)]); t += 10;
-      await cache.save('mid', [makeMesh(2, 100)]); t += 10;
-      await cache.save('new', [makeMesh(3, 100)]); // triggers eviction
-    } finally {
-      Date.now = realNow;
+/** Write a load's parts as the workers would — batches spread over workers — and return their merged report. */
+function writeLoad(files: FakeFiles, key: string, batchesByWorker: ParsedMesh[][][]): CacheWriteReport {
+  const dir = new Map<number, Uint8Array>();
+  const report: CacheWriteReport = { ok: true, parts: 0, bytes: 0, files: [] };
+  batchesByWorker.forEach((batches, worker) => {
+    const parts = batches.map((b) => new Uint8Array(packMeshes(b)));
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+      all.set(p, at);
+      at += p.length;
     }
+    dir.set(worker, all);
+    report.files!.push({ worker, sizes: parts.map((p) => p.length) });
+    report.parts += parts.length;
+    report.bytes += all.length;
+  });
+  files.dirs.set(key, dir);
+  return report;
+}
 
-    // Only the newest record should remain — both older ones evicted to fit.
-    expect(store.records.has('new')).toBe(true);
-    expect(store.records.has('mid')).toBe(false);
-    expect(store.records.has('old')).toBe(false);
+const ids = (got: ParsedMesh[][]) => got.map((m) => m.map((x) => x.expressID));
+
+describe('GeometryCache', () => {
+  it('commits a load’s part files as the entry for the file and reads every part back', async () => {
+    const { index, files, cache } = setup();
+    const key = cache.newKey('model-1');
+    const report = writeLoad(files, key, [[[mesh(1), mesh(2)], [mesh(3)]], [[mesh(4)]]]);
+    await cache.commit('h1', key, report);
+    expect(index.records.get('h1')).toMatchObject({ key, parts: 3, sizeBytes: report.bytes, schemaVersion: CACHE_SCHEMA_VERSION });
+
+    const entry = await cache.open('h1');
+    const got: ParsedMesh[][] = [];
+    await expect(entry!.read((m) => got.push(m))).resolves.toBe(true);
+    expect(ids(got)).toEqual([[1, 2], [3], [4]]);
   });
 
-  it('a model bigger than the whole cache is not written, and evicts nothing', async () => {
-    const store = fakeStore() as unknown as FakeStore;
-    const cache = new GeometryCache(store as unknown as SessionStore, 4000);
-    await cache.save('small', [makeMesh(1, 100)]); // 2968 bytes: fits
-    await cache.save('huge', [makeMesh(2, 100), makeMesh(3, 100)]); // 5936 bytes
-    expect(store.records.has('huge')).toBe(false);
-    expect(store.records.has('small')).toBe(true);
+  it('misses on a file it has not seen', async () => {
+    const { cache } = setup();
+    await expect(cache.open('nope')).resolves.toBeNull();
   });
 
-  it('a collector gathers a streamed model batch by batch while it fits the cap', () => {
-    const cache = new GeometryCache(fakeStore(), 4000);
-    const fits = cache.collector();
-    fits.add([makeMesh(1, 50)]);
-    fits.add([makeMesh(2, 50)]); // 2 × 1568 = 3136 bytes
-    expect(fits.meshes()?.map((m) => m.expressID)).toEqual([101, 102]);
-
-    // Past the cap it lets go of what it held: no second copy of a model
-    // the cache could not keep anyway.
-    const tooBig = cache.collector();
-    tooBig.add([makeMesh(1, 100)]);
-    tooBig.add([makeMesh(2, 100)]);
-    expect(tooBig.meshes()).toBeNull();
-    tooBig.add([makeMesh(3, 1)]);
-    expect(tooBig.meshes()).toBeNull();
+  it('drops the files of a failed write instead of making them an entry, and says why', async () => {
+    const { index, files, cache } = setup();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const key = cache.newKey('m');
+    writeLoad(files, key, [[[mesh(1)]]]);
+    await cache.commit('h', key, { ok: false, parts: 1, bytes: 10, error: 'QuotaExceededError: full' });
+    expect(index.records.size).toBe(0);
+    expect(files.dirs.size).toBe(0);
+    expect(info.mock.calls[0][0]).toMatch(/QuotaExceededError/);
   });
 
-  it('eviction is a no-op when total is under cap', async () => {
-    const store = fakeStore() as unknown as FakeStore;
-    const cache = new GeometryCache(store as unknown as SessionStore, 1_000_000);
-    await cache.save('a', [makeMesh(1, 4)]);
-    await cache.save('b', [makeMesh(2, 4)]);
-    expect(store.records.size).toBe(2);
+  it('drops a load bigger than the whole cache', async () => {
+    const { index, files, cache } = setup(100);
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const key = cache.newKey('m');
+    const report = writeLoad(files, key, [[[mesh(1), mesh(2), mesh(3)]]]);
+    expect(report.bytes).toBeGreaterThan(100);
+    await cache.commit('h', key, report);
+    expect(index.records.size).toBe(0);
+    expect(files.dirs.size).toBe(0);
+  });
+
+  it('replaces an older entry for the same file and frees its files', async () => {
+    const { index, files, cache, advance } = setup();
+    const k1 = cache.newKey('a');
+    await cache.commit('h', k1, writeLoad(files, k1, [[[mesh(1)]]]));
+    advance(1);
+    const k2 = cache.newKey('b');
+    await cache.commit('h', k2, writeLoad(files, k2, [[[mesh(2)]]]));
+    expect(index.records.get('h')?.key).toBe(k2);
+    expect(files.dirs.has(k1)).toBe(false);
+  });
+
+  it('treats an entry of another schema version as a miss, and removes it', async () => {
+    const { index, files, cache } = setup();
+    const key = cache.newKey('m');
+    const report = writeLoad(files, key, [[[mesh(1)]]]);
+    index.records.set('h', {
+      hash: 'h', key, files: report.files!, parts: 1, sizeBytes: 1, cachedAt: 0, schemaVersion: CACHE_SCHEMA_VERSION + 1,
+    });
+    await expect(cache.open('h')).resolves.toBeNull();
+    expect(index.records.size).toBe(0);
+    expect(files.dirs.size).toBe(0);
+  });
+
+  it('a missing, short or corrupt part fails the read and removes the entry, so the caller parses instead', async () => {
+    const { index, files, cache } = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const key = cache.newKey('m');
+    await cache.commit('h', key, writeLoad(files, key, [[[mesh(1)], [mesh(2)]]]));
+    files.dirs.get(key)!.get(0)!.fill(7, 8); // garbage after the first header
+    await expect((await cache.open('h'))!.read(() => {})).resolves.toBe(false);
+    expect(index.records.size).toBe(0);
+    expect(files.dirs.size).toBe(0);
+
+    const k2 = cache.newKey('n');
+    const r2 = writeLoad(files, k2, [[[mesh(1)]]]);
+    await cache.commit('h2', k2, r2);
+    files.dirs.get(k2)!.set(0, new Uint8Array(4)); // truncated file
+    await expect((await cache.open('h2'))!.read(() => {})).resolves.toBe(false);
+  });
+
+  it('evicts the oldest entries until the total fits the cap', async () => {
+    const { index, files, cache, advance } = setup();
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const keys: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const k = cache.newKey(`m${i}`);
+      keys.push(k);
+      await cache.commit(`h${i}`, k, writeLoad(files, k, [[[mesh(i)]]]));
+      advance(10);
+    }
+    const one = index.records.get('h0')!.sizeBytes;
+    const small = new GeometryCache(index, files, async () => one * 2, () => 0);
+    await small.evict();
+    expect([...index.records.keys()].sort()).toEqual(['h1', 'h2']);
+    expect(files.dirs.has(keys[0])).toBe(false);
+  });
+
+  it('never sweeps the files of a load still running in this tab, however long it takes', async () => {
+    const { files, cache, advance } = setup();
+    const running = cache.newKey('running');
+    writeLoad(files, running, [[[mesh(1)]]]);
+    advance(ORPHAN_AGE_MS * 10);
+    await cache.sweep();
+    expect(files.dirs.has(running)).toBe(true);
+    await cache.discard(running); // the load failed
+    expect(files.dirs.has(running)).toBe(false);
+  });
+
+  it('sweeps files no entry points at, once they are old enough not to be a load in progress', async () => {
+    const { files, cache, advance } = setup();
+    const live = cache.newKey('live');
+    await cache.commit('h', live, writeLoad(files, live, [[[mesh(1)]]]));
+    // Written by a load in another tab (or a previous session): no key here.
+    const orphan = new GeometryCache(new FakeIndex(), files, async () => GB, () => 1_000_000).newKey('failed');
+    writeLoad(files, orphan, [[[mesh(2)]]]);
+    writeLoad(files, 'not-ours', [[[mesh(3)]]]);
+
+    await cache.sweep();
+    expect(files.dirs.has(orphan)).toBe(true); // could still be writing
+    expect(files.dirs.has('not-ours')).toBe(false);
+
+    advance(ORPHAN_AGE_MS + 1);
+    await cache.sweep();
+    expect(files.dirs.has(orphan)).toBe(false);
+    expect(files.dirs.has(live)).toBe(true);
+  });
+});
+
+describe('cache sizing', () => {
+  it('sizes the cap from the storage quota, within bounds', () => {
+    expect(capFromQuota(100 * GB)).toBe(MAX_CACHE_BYTES);
+    expect(capFromQuota(1 * GB)).toBe(MIN_CACHE_BYTES);
+    expect(capFromQuota(12 * GB)).toBe(3 * GB);
+    expect(capFromQuota(undefined)).toBe(2 * GB);
+  });
+});
+
+describe('sha256Hex', () => {
+  it('hashes like the standard', async () => {
+    const hex = await sha256Hex(new TextEncoder().encode('abc').buffer as ArrayBuffer);
+    expect(hex).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   });
 });

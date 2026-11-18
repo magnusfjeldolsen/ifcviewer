@@ -43,6 +43,7 @@
 //                  http://localhost:5173/ifcviewer/) instead of building and
 //                  starting `vite preview`
 //   --no-build     serve the existing dist/ without rebuilding
+//   --port <n>     port for `vite preview` (default 4173)
 //   --label <name> name used in the result file (default: the file's basename).
 //                  Use a neutral label for models that must stay private.
 //   --viewport WxH CSS pixels (default 1280x720)
@@ -53,6 +54,7 @@
 //                        the fit distance)
 //   --timeout-min <n>    give up waiting for a load after n minutes (default 30)
 //   --no-warm      skip the reload-from-cache run
+//   --no-orbit     skip the orbits (load times and memory only)
 //   --profile      record a V8 CPU profile of the main thread during the fit
 //                  orbit, save it as .cpuprofile (open in DevTools) and print
 //                  the functions with the most self time. Function names are
@@ -81,6 +83,7 @@ function parseArgs(argv) {
     vsync: 'off',
     url: null,
     build: true,
+    port: 4173,
     label: null,
     viewport: [1280, 720],
     dpr: 1.5,
@@ -88,6 +91,7 @@ function parseArgs(argv) {
     closeScale: 0.3,
     timeoutMin: 30,
     warm: true,
+    orbit: true,
     profile: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -102,6 +106,7 @@ function parseArgs(argv) {
       case '--vsync': opts.vsync = next(); break;
       case '--url': opts.url = next(); break;
       case '--no-build': opts.build = false; break;
+      case '--port': opts.port = Number(next()); break;
       case '--label': opts.label = next(); break;
       case '--viewport': opts.viewport = next().split('x').map(Number); break;
       case '--dpr': opts.dpr = Number(next()); break;
@@ -109,6 +114,7 @@ function parseArgs(argv) {
       case '--close-scale': opts.closeScale = Number(next()); break;
       case '--timeout-min': opts.timeoutMin = Number(next()); break;
       case '--no-warm': opts.warm = false; break;
+      case '--no-orbit': opts.orbit = false; break;
       case '--profile': opts.profile = true; break;
       default:
         if (a.startsWith('--')) throw new Error(`Unknown option ${a}`);
@@ -168,23 +174,28 @@ async function waitForLoads(page, count, timeoutMs, events) {
   }
 }
 
+// Geometry-cache entries, counted only once the model file itself is saved
+// too (both happen after the load settles; a reload before either would
+// measure a full parse, or a missing file).
 const geometryCacheCount = () =>
   new Promise((resolve) => {
     const req = indexedDB.open('ifcviewer');
     req.onerror = () => resolve(-1);
     req.onsuccess = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains('geometry-cache')) {
+      if (!db.objectStoreNames.contains('geometry-index') || !db.objectStoreNames.contains('models')) {
         db.close();
         resolve(0);
         return;
       }
-      const c = db.transaction('geometry-cache', 'readonly').objectStore('geometry-cache').count();
-      c.onsuccess = () => {
+      const tx = db.transaction(['geometry-index', 'models'], 'readonly');
+      const entries = tx.objectStore('geometry-index').count();
+      const models = tx.objectStore('models').count();
+      tx.oncomplete = () => {
         db.close();
-        resolve(c.result);
+        resolve(models.result > 0 ? entries.result : 0);
       };
-      c.onerror = () => {
+      tx.onerror = () => {
         db.close();
         resolve(-1);
       };
@@ -202,7 +213,34 @@ function loadTimes(rec) {
     firstGeometryMs: rec.firstGeometryAt === null ? null : round(rec.firstGeometryAt - rec.startedAt, 0),
     // Settled and drawn: a cache restore settles a frame before it is drawn.
     loadedMs: round(Math.max(rec.settledAt, rec.firstGeometryAt ?? 0) - rec.startedAt, 0),
+    phases: phaseTable(rec),
   };
+}
+
+/**
+ * The load's timeline (src/core/LoadTimeline.ts) on the same clock as
+ * `firstGeometryMs` / `loadedMs`: marks as ms from the load's start, in time
+ * order, and spans as total ms.
+ */
+function phaseTable(rec) {
+  const p = rec.phases;
+  if (!p) return null;
+  const offset = p.startedAt - rec.startedAt;
+  const marks = Object.entries(p.marks)
+    .map(([name, ms]) => [name, round(ms + offset, 0)])
+    .sort((a, b) => a[1] - b[1]);
+  if (rec.firstGeometryAt !== null) marks.push(['drawn.firstGeometry', round(rec.firstGeometryAt - rec.startedAt, 0)]);
+  marks.sort((a, b) => a[1] - b[1]);
+  const spans = Object.entries(p.spans).map(([name, ms]) => [name, round(ms, 0)]);
+  return { marks: Object.fromEntries(marks), spans: Object.fromEntries(spans) };
+}
+
+function logPhases(title, phases) {
+  if (!phases) return;
+  log(`${title} — marks (ms from start):`);
+  for (const [name, ms] of Object.entries(phases.marks)) log(`  ${String(ms).padStart(7)}  ${name}`);
+  log(`${title} — time spent (ms, summed):`);
+  for (const [name, ms] of Object.entries(phases.spans)) log(`  ${String(ms).padStart(7)}  ${name}`);
 }
 
 /** Aggregate a V8 CPU profile's self time by function, largest first. */
@@ -312,7 +350,7 @@ async function main() {
       log('Building…');
       build();
     }
-    server = await startPreview();
+    server = await startPreview(opts.port);
     baseUrl = server.url;
   }
   const appUrl = new URL(baseUrl);
@@ -399,6 +437,7 @@ async function main() {
     const [cold] = await page.evaluate(() => window.__ifcPerf.loads);
     result.cold = { ...loadTimes(cold), wallMs: Date.now() - wallStart };
     log(`Cold load: first geometry ${result.cold.firstGeometryMs} ms, loaded ${result.cold.loadedMs} ms, ${cold.meshCount} meshes${cold.ok ? '' : ` — FAILED: ${cold.error}`}`);
+    logPhases('Cold load', result.cold.phases);
     if (!cold.ok) throw new Error(`Load failed: ${cold.error}`);
 
     const forced = await page.evaluate(() => window.__ifcPerf.render());
@@ -452,6 +491,7 @@ async function main() {
         far: o.far,
       };
     };
+    if (opts.orbit) {
     if (opts.profile) {
       await cdp.send('Profiler.enable');
       await cdp.send('Profiler.setSamplingInterval', { interval: 250 });
@@ -478,6 +518,7 @@ async function main() {
     log(`Orbit (fit, GPU-synced):   ${result.orbitFitSynced.syncedFps} fps (frame ${result.orbitFitSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitFitSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitFitSynced.gpuWaitMedianMs} ms)`);
     result.orbitCloseSynced = await orbit(opts.closeScale, true);
     log(`Orbit (close, GPU-synced): ${result.orbitCloseSynced.syncedFps} fps (frame ${result.orbitCloseSynced.syncedFrameMedianMs} ms median, p95 ${result.orbitCloseSynced.syncedFrameP95Ms} ms; GPU wait ${result.orbitCloseSynced.gpuWaitMedianMs} ms)`);
+    }
 
     // Private bytes per Chrome process: peak over the cold load and orbits,
     // and the level now that the model is loaded and has been drawn.
@@ -509,6 +550,7 @@ async function main() {
       const [warm] = await page.evaluate(() => window.__ifcPerf.loads);
       result.warm = { ...loadTimes(warm), note: 'times from navigation start (session restore)' };
       log(`Warm load (${warm.fromCache ? 'geometry cache' : 'full parse'}): first geometry ${result.warm.firstGeometryMs} ms, loaded ${result.warm.loadedMs} ms`);
+      logPhases('Warm load', result.warm.phases);
       result.processMemoryRun = memSnapshot();
       log(`Process memory (whole run): peak total ${result.processMemoryRun.peakTotalMB} MB`);
     }

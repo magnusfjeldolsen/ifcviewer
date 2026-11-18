@@ -77,32 +77,50 @@ export interface SessionState {
 const TOGGLE_KEY = 'ifcviewer:memoryEnabled';
 const SESSION_KEY = 'ifcviewer:session';
 const DB_NAME = 'ifcviewer';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
+
+/** How long to wait for the database before going on without it. */
+export const STORAGE_OPEN_TIMEOUT_MS = 4000;
+
+const BLOCKED_MESSAGE = 'storage is blocked by another tab of the viewer';
 const MODELS_STORE = 'models';
-const GEOMETRY_CACHE_STORE = 'geometry-cache';
+/** v3's single-record geometry cache. Dropped by the v4 upgrade. */
+const LEGACY_GEOMETRY_CACHE_STORE = 'geometry-cache';
 /** @deprecated v1 store name, used only during migration */
 const FILES_STORE = 'files';
 
-/**
- * Stored shape for cached parsed geometry. Defined here (rather than
- * imported from GeometryCache) so SessionStore stays free of typed-array
- * knowledge — it just round-trips opaque records.
- */
-export interface StoredCachedGeometry {
+
+const GEOMETRY_INDEX_STORE = 'geometry-index';
+
+/** One cached model: which part files hold its geometry. See geometryParts.ts. */
+export interface GeometryIndexRecord {
+  /** SHA-256 hex of the .ifc file. */
   hash: string;
+  /** The load's part directory. */
+  key: string;
+  /** Each worker's file and the size of every part in it. */
+  files: { worker: number; sizes: number[] }[];
+  parts: number;
+  sizeBytes: number;
   cachedAt: number;
   schemaVersion: number;
-  sizeBytes: number;
-  meshes: unknown[];
 }
 
-/** Lightweight metadata for the cached geometry eviction loop. */
-export interface CachedGeometryMeta {
-  hash: string;
-  cachedAt: number;
-  sizeBytes: number;
+
+function reqDone<T>(req: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
 
+function txDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error('transaction aborted'));
+  });
+}
 export class SessionStore {
   private dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -153,10 +171,66 @@ export class SessionStore {
 
   // ── IndexedDB file storage ───────────────────────────────
 
+  /**
+   * The database, or a rejection — never a wait without end. Opening can be
+   * **blocked**: a tab still running an older build holds the database at its
+   * version and has no reason to let go, so the upgrade this build needs never
+   * starts. Then every caller fails at once (models are not kept, the cache is
+   * not used, the session is not restored) and `onStorageBlocked` listeners
+   * are told, so the user can be asked to close the other tab. The open
+   * request stays pending; when the other tab goes, it completes and storage
+   * works again. A database that answers nothing at all is given up on after
+   * `STORAGE_OPEN_TIMEOUT_MS` for the same reason.
+   */
   private openDB(): Promise<IDBDatabase> {
+    if (this.db) return Promise.resolve(this.db);
+    if (this.blocked) return Promise.reject(new Error(BLOCKED_MESSAGE));
+    const opening = this.startOpen();
+    return new Promise<IDBDatabase>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('storage did not open in time')), STORAGE_OPEN_TIMEOUT_MS);
+      this.blockedWaiters.push(() => {
+        clearTimeout(timer);
+        reject(new Error(BLOCKED_MESSAGE));
+      });
+      opening.then(
+        (db) => {
+          clearTimeout(timer);
+          resolve(db);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  private db: IDBDatabase | null = null;
+  private blocked = false;
+  private blockedWaiters: Array<() => void> = [];
+  private blockedListeners: Array<() => void> = [];
+
+  /** Called when another tab blocks the database (see `openDB`). */
+  onStorageBlocked(listener: () => void): void {
+    this.blockedListeners.push(listener);
+  }
+
+  /** Whether another tab is blocking the database right now. */
+  isStorageBlocked(): boolean {
+    return this.blocked;
+  }
+
+  private startOpen(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
     this.dbPromise = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onblocked = () => {
+        this.blocked = true;
+        const waiters = this.blockedWaiters;
+        this.blockedWaiters = [];
+        for (const w of waiters) w();
+        for (const l of this.blockedListeners) l();
+      };
       req.onupgradeneeded = (event) => {
         const db = req.result;
         const oldVersion = event.oldVersion;
@@ -173,23 +247,44 @@ export class SessionStore {
           }
           // Old store will be deleted after data migration
         }
-        // v3: geometry-cache store. Runs for every upgrade path that hasn't
-        // yet seen it (fresh install, v1, or v2 → 3). Keyed by the SHA-256
-        // hex of the source .ifc buffer.
-        if (oldVersion < 3 && !db.objectStoreNames.contains(GEOMETRY_CACHE_STORE)) {
-          db.createObjectStore(GEOMETRY_CACHE_STORE, { keyPath: 'hash' });
+        // v4: the geometry cache is an index (by the .ifc's SHA-256) over
+        // part files the workers write (see geometryParts.ts). v3 kept each
+        // model as one record; those are dropped, not converted: the next
+        // load of each model writes it again in the new form.
+        if (oldVersion < 4) {
+          if (db.objectStoreNames.contains(LEGACY_GEOMETRY_CACHE_STORE)) {
+            db.deleteObjectStore(LEGACY_GEOMETRY_CACHE_STORE);
+          }
+          if (!db.objectStoreNames.contains(GEOMETRY_INDEX_STORE)) {
+            db.createObjectStore(GEOMETRY_INDEX_STORE, { keyPath: 'hash' });
+          }
         }
       };
       req.onsuccess = () => {
         const db = req.result;
+        this.blocked = false;
+        this.blockedWaiters = [];
+        // Another tab (a newer build) wants to upgrade: let it.
+        db.onversionchange = () => {
+          db.close();
+          this.db = null;
+          this.dbPromise = null;
+        };
+        const ready = (): void => {
+          this.db = db;
+          resolve(db);
+        };
         // Run v1 → v2 data migration if old files store still exists
         if (db.objectStoreNames.contains(FILES_STORE)) {
-          this.migrateV1ToV2(db).then(() => resolve(db)).catch(() => resolve(db));
+          this.migrateV1ToV2(db).then(ready).catch(ready);
         } else {
-          resolve(db);
+          ready();
         }
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => {
+        this.dbPromise = null;
+        reject(req.error);
+      };
     });
     return this.dbPromise;
   }
@@ -333,73 +428,33 @@ export class SessionStore {
     if (match) await this.removeModel(match.id);
   }
 
-  // ── Geometry cache (v3) ────────────────────────────────
+  // ── Geometry cache (v4) ────────────────────────────────
 
-  async saveCachedGeometry(record: StoredCachedGeometry): Promise<void> {
-    try {
-      const db = await this.openDB();
-      const tx = db.transaction(GEOMETRY_CACHE_STORE, 'readwrite');
-      tx.objectStore(GEOMETRY_CACHE_STORE).put(record);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (err) {
-      console.warn('SessionStore: failed to save cached geometry', err);
-    }
+  async putGeometryIndex(record: GeometryIndexRecord): Promise<void> {
+    const db = await this.openDB();
+    const tx = db.transaction(GEOMETRY_INDEX_STORE, 'readwrite');
+    tx.objectStore(GEOMETRY_INDEX_STORE).put(record);
+    await txDone(tx);
   }
 
-  async loadCachedGeometry(hash: string): Promise<StoredCachedGeometry | null> {
-    try {
-      const db = await this.openDB();
-      const tx = db.transaction(GEOMETRY_CACHE_STORE, 'readonly');
-      const req = tx.objectStore(GEOMETRY_CACHE_STORE).get(hash);
-      return await new Promise<StoredCachedGeometry | null>((resolve, reject) => {
-        req.onsuccess = () => resolve((req.result as StoredCachedGeometry) ?? null);
-        req.onerror = () => reject(req.error);
-      });
-    } catch (err) {
-      console.warn('SessionStore: failed to load cached geometry', err);
-      return null;
-    }
+  async getGeometryIndex(hash: string): Promise<GeometryIndexRecord | null> {
+    const db = await this.openDB();
+    const req = db.transaction(GEOMETRY_INDEX_STORE, 'readonly').objectStore(GEOMETRY_INDEX_STORE).get(hash);
+    return ((await reqDone(req)) as GeometryIndexRecord | undefined) ?? null;
   }
 
-  /**
-   * Return just the cap-relevant fields for every cached geometry record.
-   * Used by the eviction loop, which needs `sizeBytes` and `cachedAt` to
-   * pick victims but doesn't want to pay the cost of materializing every
-   * mesh array.
-   */
-  async getAllCachedGeometryMeta(): Promise<CachedGeometryMeta[]> {
-    try {
-      const db = await this.openDB();
-      const tx = db.transaction(GEOMETRY_CACHE_STORE, 'readonly');
-      const req = tx.objectStore(GEOMETRY_CACHE_STORE).getAll();
-      const all = await new Promise<StoredCachedGeometry[]>((resolve, reject) => {
-        req.onsuccess = () => resolve(req.result as StoredCachedGeometry[]);
-        req.onerror = () => reject(req.error);
-      });
-      return all.map(r => ({ hash: r.hash, cachedAt: r.cachedAt, sizeBytes: r.sizeBytes }));
-    } catch (err) {
-      console.warn('SessionStore: failed to enumerate cached geometry', err);
-      return [];
-    }
+  async getAllGeometryIndex(): Promise<GeometryIndexRecord[]> {
+    const db = await this.openDB();
+    const req = db.transaction(GEOMETRY_INDEX_STORE, 'readonly').objectStore(GEOMETRY_INDEX_STORE).getAll();
+    return (await reqDone(req)) as GeometryIndexRecord[];
   }
 
-  async removeCachedGeometry(hash: string): Promise<void> {
-    try {
-      const db = await this.openDB();
-      const tx = db.transaction(GEOMETRY_CACHE_STORE, 'readwrite');
-      tx.objectStore(GEOMETRY_CACHE_STORE).delete(hash);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (err) {
-      console.warn('SessionStore: failed to remove cached geometry', err);
-    }
+  async removeGeometryIndex(hash: string): Promise<void> {
+    const db = await this.openDB();
+    const tx = db.transaction(GEOMETRY_INDEX_STORE, 'readwrite');
+    tx.objectStore(GEOMETRY_INDEX_STORE).delete(hash);
+    await txDone(tx);
   }
-
   private async clearModels(): Promise<void> {
     try {
       const db = await this.openDB();
