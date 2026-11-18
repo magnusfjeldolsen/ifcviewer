@@ -39,6 +39,8 @@ import { Settings } from '../services/Settings';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
+import { ParametersPanel } from '../ui/ParametersPanel';
+import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
 import { buildContextMenuItems, shouldSuppressContextMenu } from '../ui/contextMenuItems';
@@ -132,6 +134,8 @@ export class App {
   // writes). The web-ifc parse itself is serialized inside the worker;
   // this chain only orders the App-level work around it.
   private loadChain = Promise.resolve();
+  /** Whether a model is loading: parameter discovery waits until none is. */
+  private loadGate = new LoadGate();
   private statusEl: HTMLElement | null;
   // Element selection (Phase 2 of the Inspector). Owns canvas pointer
   // listeners; defers to active tools and pivot picking via deps.
@@ -173,6 +177,7 @@ export class App {
   // bridge the basket to the SelectionManager. Persisted in the session.
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
+  private parametersPanel!: ParametersPanel;
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -419,6 +424,8 @@ export class App {
         this.modelTreePanel.removeModel(id);
         const record = this.modelRecords.get(id);
         this.modelRecords.delete(id);
+        // After the record is gone, so the panel can move on to another model.
+        this.parametersPanel?.onModelRemoved(id);
         this.bufferCache.delete(id);
         if (record) this.sessionStore.removeModel(record.id);
         this.scheduleSave();
@@ -431,6 +438,7 @@ export class App {
         const url = window.prompt('Enter URL to a remote .ifc file:');
         if (url) this.loadFromUrl(url);
       },
+      onShowParameters: (id) => this.parametersPanel?.open(id),
     });
 
     // Session persistence
@@ -626,6 +634,24 @@ export class App {
       onClear: () => this.selectionBasket.clear(),
     });
 
+    // Parameters panel (#67): which parameters a model has, opened from the
+    // model's row in the Models panel. Discovery runs in the worker, never
+    // during a load, over the elements the viewer draws — so its counts are
+    // of what can be selected and coloured.
+    this.parametersPanel = new ParametersPanel(appEl, {
+      getModels: () => [...this.modelRecords.values()]
+        .filter((r) => this.modelManager.getModel(r.id))
+        .map((r) => ({ id: r.id, name: r.name })),
+      describe: async (modelId, onProgress) => {
+        await this.loadGate.idle();
+        return this.propertyRepository.describeParameters(
+          modelId,
+          this.modelManager.elementIds(modelId),
+          onProgress,
+        );
+      },
+    });
+
     // Persist the basket on every content change (debounced via the same
     // scheduleSave path the camera/models use; honours the memory toggle).
     this.selectionBasket.onChange(() => this.scheduleSave());
@@ -753,7 +779,12 @@ export class App {
 
     // Restore session if memory is enabled
     if (this.sessionStore.isMemoryEnabled()) {
-      await this.restoreSession();
+      const endLoad = this.loadGate.begin();
+      try {
+        await this.restoreSession();
+      } finally {
+        endLoad();
+      }
     }
 
     // Auto-save camera state on changes (throttled to 1s)
@@ -1103,6 +1134,15 @@ export class App {
   }
 
   private async handleFile(file: LoadedFile, source?: ModelSource): Promise<void> {
+    const endLoad = this.loadGate.begin();
+    try {
+      await this.loadFile(file, source);
+    } finally {
+      endLoad();
+    }
+  }
+
+  private async loadFile(file: LoadedFile, source?: ModelSource): Promise<void> {
     // Tracks an in-progress streamed load so the catch block can drop a
     // partially-built model if the parse fails. Null before the stream
     // starts and once it completes.
@@ -1500,6 +1540,11 @@ export class App {
     // command it pushed, which is what we want for a full reset.)
     this.history.clear();
 
+    // Every model is closed and parsed again below: what the panel shows
+    // would be of models that no longer exist.
+    this.parametersPanel?.close();
+    const endLoad = this.loadGate.begin();
+
     // Remove all models and UI rows. propertyRepository.disposeModel posts
     // the `disposeModel` worker message, so we do not also call
     // parser.disposeModel here.
@@ -1535,6 +1580,8 @@ export class App {
         this.sceneBounds.removeModel(id);
       }
     }
+
+    endLoad();
 
     const box = this.modelManager.getBoundingBox();
     this.viewer.fitToBox(box);
@@ -1667,6 +1714,7 @@ export class App {
     this.modelTreePanel.dispose();
     if (this.inspectorPanel) this.inspectorPanel.dispose();
     if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
+    if (this.parametersPanel) this.parametersPanel.dispose();
     this.marqueeSelector.dispose();
     // Before toolManager.dispose (which disposes the measurement tool), so the
     // resolver's providers still point at live objects while they unhook.
