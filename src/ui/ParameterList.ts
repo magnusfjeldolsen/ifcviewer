@@ -64,6 +64,11 @@ export interface ParameterListOptions {
    * colour button beside its header.
    */
   onColourBy?(parameter: ParameterSummary): void;
+  /**
+   * Add this parameter to the Totals tab (#69). With it, each row has a Σ
+   * button beside its header (and beside the colour button).
+   */
+  onTotals?(parameter: ParameterSummary): void;
 }
 
 /** The colour button's tooltip: what a click will do. */
@@ -406,6 +411,19 @@ export class ParameterList {
       colour.setAttribute('aria-label', `Colour by ${p.key}`);
       colour.addEventListener('click', () => onColourBy(p));
       li.appendChild(colour);
+    }
+
+    const onTotals = this.options.onTotals;
+    if (onTotals) {
+      li.classList.add('totalable');
+      const sigma = document.createElement('button');
+      sigma.type = 'button';
+      sigma.className = 'param-totals-btn';
+      sigma.textContent = 'Σ';
+      sigma.title = 'Add to Totals: count, sum, min, max and average';
+      sigma.setAttribute('aria-label', `Totals of ${p.key}`);
+      sigma.addEventListener('click', () => onTotals(p));
+      li.appendChild(sigma);
     }
 
     if (open) {

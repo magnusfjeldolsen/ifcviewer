@@ -427,6 +427,14 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
     this.parser.getWorker().postMessage({ type: 'cancelColumn', reqId });
   }
 
+  /**
+   * The elements a model's columns are rows of (row i is element i), once
+   * its parameters have been asked for; undefined before.
+   */
+  scopeOf(modelId: string): Int32Array | undefined {
+    return this.scopes.get(modelId);
+  }
+
   /** Bytes held by a model's built columns, plus their shared scope once there is one. */
   columnMemory(modelId: string): { columns: number; bytes: number } {
     let bytes = 0;

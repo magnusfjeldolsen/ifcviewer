@@ -44,6 +44,8 @@ import { valueText } from '../ui/ParameterList';
 import { ColourByController, colourScopeFor, isColouringBy, type ColourScope } from '../inspector/ColourByController';
 import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
+import { TotalsController, type TotalsScope } from '../inspector/TotalsController';
+import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
@@ -192,6 +194,8 @@ ${key}`. */
   private colourBy!: ColourByController;
   private colourLegend!: ColourLegend;
   private parameterPicker!: ParameterPicker;
+  private totals!: TotalsController;
+  private totalsView!: TotalsView;
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -403,6 +407,7 @@ ${key}`. */
         this.measurementTool.setModelVisible(id, visible);
         this.positionTool.setModelVisible(id, visible);
         this.colourBy?.markStale();
+        this.totals?.invalidate();
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -427,6 +432,7 @@ ${key}`. */
         // Its elements leave the colouring by parameter (and the colouring
         // ends if it was this model's alone).
         this.colourBy?.onModelRemoved(id);
+        this.totals?.onModelRemoved(id);
         // Free memoized properties AND close the worker's model. The
         // repository's disposeModel posts the `disposeModel` worker
         // message, so we do NOT also call parser.disposeModel here.
@@ -652,11 +658,53 @@ ${key}`. */
       onClear: () => this.selectionBasket.clear(),
     });
 
+    // Totals (#69): count, sum, min, max and average of chosen parameters
+    // over the selection, or everything visible when nothing is selected.
+    // A tab of the Parameters panel; it reads the same value columns, and
+    // does nothing while the tab is closed.
+    const loadedModels = (): string[] =>
+      [...this.modelRecords.values()].filter((r) => this.modelManager.getModel(r.id)).map((r) => r.id);
+    this.totals = new TotalsController({
+      models: loadedModels,
+      isShown: (id) => this.modelManager.isVisible(id),
+      scope: () => this.totalsScope(),
+      visibility: (modelId) => this.modelManager.visibleElements(modelId, this.clippingTool.getClipPlane()),
+      describe: async (modelId, onProgress) => {
+        await this.loadGate.idle();
+        return this.propertyRepository.describeParameters(modelId, this.modelManager.elementIds(modelId), onProgress);
+      },
+      scopeIds: (modelId) => this.propertyRepository.scopeOf(modelId),
+      loadColumn: async (modelId, key, onProgress) => {
+        await this.loadGate.idle();
+        return this.propertyRepository.getColumn(modelId, key, onProgress);
+      },
+      // A build the Parameters list also got ready is the list's to give up.
+      releaseColumn: (modelId, key) => {
+        if (!this.preparedColumns.has(`${modelId}\n${key}`)) this.propertyRepository.releaseColumn(modelId, key);
+      },
+      select: (elements) =>
+        this.selectionManager.selectExactly(elements.map((e) => ({ ...e, ifcClass: '', ifcTypeCode: 0 }))),
+    });
+    this.totalsView = new TotalsView({
+      controller: this.totals,
+      picker: { open: (x, y, heading, rows, onPick) => this.parameterPicker.open(x, y, heading, rows, onPick) },
+      modelName: (id) => this.modelRecords.get(id)?.name ?? 'Model',
+    });
+    // The totals follow the selection and what can be seen (debounced).
+    const recount = (): void => this.totals.invalidate();
+    this.selectionManager.onChange(recount);
+    this.appearanceManager.onChange(recount);
+    this.clippingTool.onStateChange(recount);
+    this.clippingTool.onPlaneMoved(recount);
+    this.loadGate.onIdle(recount);
+
     // Parameters panel (#67): which parameters a model has, opened from the
     // model's row in the Models panel. Discovery runs in the worker, never
     // during a load, over the elements the viewer draws — so its counts are
     // of what can be selected and coloured.
     this.parametersPanel = new ParametersPanel(appEl, {
+      totals: this.totalsView,
+      addToTotals: (parameter) => this.totals.addRow(parameter.key),
       getModels: () => [...this.modelRecords.values()]
         .filter((r) => this.modelManager.getModel(r.id))
         .map((r) => ({ id: r.id, name: r.name })),
@@ -1591,6 +1639,7 @@ ${parameter.key}`);
         colourBy: () => void this.openColourPicker(x, y, state),
         clearColours: () => this.colourBy.clear(),
         refreshColours: () => this.colourBy.refresh(),
+        totals: () => this.parametersPanel.openTotals(),
       },
     );
 
@@ -1633,6 +1682,21 @@ ${parameter.key}`);
     return state.kind === 'single'
       ? { kind: 'single', identities: [enriched[0]] }
       : { ...state, identities: enriched };
+  }
+
+  // ── Totals (#69) ───────────────────────────────────────────
+
+  /** What the totals cover: the selection, or everything visible when nothing is selected. */
+  private totalsScope(): TotalsScope {
+    const state = this.selectionManager.getState();
+    if (state.kind === 'none') return { kind: 'visible' };
+    const elements = new Map<string, number[]>();
+    for (const { modelId, expressId } of state.identities) {
+      let ids = elements.get(modelId);
+      if (!ids) elements.set(modelId, (ids = []));
+      ids.push(expressId);
+    }
+    return { kind: 'selection', elements };
   }
 
   // ── Colour by parameter (#68) ──────────────────────────────
@@ -1765,6 +1829,7 @@ ${parameter.key}`);
     // Every model is closed and parsed again below: what the panel shows
     // would be of models that no longer exist.
     this.parametersPanel?.close();
+    for (const id of this.modelManager.getModelIds()) this.totals?.onModelRemoved(id);
     const endLoad = this.loadGate.begin();
 
     // Remove all models and UI rows. propertyRepository.disposeModel posts
@@ -1939,6 +2004,8 @@ ${parameter.key}`);
     if (this.parametersPanel) this.parametersPanel.dispose();
     if (this.colourLegend) this.colourLegend.dispose();
     if (this.parameterPicker) this.parameterPicker.dispose();
+    if (this.totals) this.totals.dispose();
+    if (this.totalsView) this.totalsView.dispose();
     this.marqueeSelector.dispose();
     // Before toolManager.dispose (which disposes the measurement tool), so the
     // resolver's providers still point at live objects while they unhook.
