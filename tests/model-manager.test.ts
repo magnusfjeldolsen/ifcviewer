@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import { ANCHOR_REACH, HIGHLIGHT_COLOR, SEE_THROUGH_SETTLE_MS, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
+import { ANCHOR_REACH, DATA_GLOW, HIGHLIGHT_COLOR, SEE_THROUGH_SETTLE_MS, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
 import { boxMesh, boxModel, cameraLookingAt, makeModelManager } from './helpers/models';
 
 /** Every chunk mesh of every model in the scene. */
@@ -958,5 +958,73 @@ describe('ModelBatch — freeing memory', () => {
     modelManager.removeModel('m');
     expect(disposed.geometries).toBe(geometries);
     expect(disposed.materials.size).toBe(2);
+  });
+});
+
+describe('ModelBatch — a colouring cleared leaves no trace', () => {
+  /** What the GPU is told about every piece, and the draw structure. */
+  function drawn(modelManager: ReturnType<typeof makeModelManager>['modelManager']) {
+    const batch = modelManager.getModel('m')!.batch;
+    const inner = batch as unknown as { stateData: Float32Array; count: number };
+    return {
+      state: Array.from(inner.stateData.slice(0, inner.count * 8)),
+      stats: batch.stats(),
+      bytes: batch.dataColorBytes,
+    };
+  }
+
+  /** The same changes to the model, with or without a colouring on top. */
+  function run(coloured: boolean) {
+    const { modelManager } = makeModelManager();
+    modelManager.beginStream('m');
+    modelManager.appendMeshes('m', [1, 2, 3, 4].map((id, i) => boxMesh(id, { at: [i * 2, 0, 0] })));
+    if (coloured) modelManager.setDataColors('m', [1, 2, 3, 4], new Float32Array(16).fill(0.3));
+    modelManager.setColor('m', [1], { r: 0, g: 0, b: 1 });
+    modelManager.setOpacity('m', [2], 0.4);
+    modelManager.setHidden('m', [3], true);
+    modelManager.setHighlighted('m', [4], true);
+    // More pieces stream in: a second piece of a coloured element, and a new element.
+    modelManager.appendMeshes('m', [boxMesh(1, { at: [20, 0, 0] }), boxMesh(5, { at: [30, 0, 0] })]);
+    if (coloured) modelManager.setDataColors('m', [1, 5], new Float32Array([0.9, 0, 0, 1, 0, 0.9, 0, 0.2]));
+    modelManager.endStream('m');
+    modelManager.setOpacity('m', [2], null);
+    modelManager.setColor('m', [1], null);
+    modelManager.setColor('m', [5], { r: 1, g: 1, b: 0 });
+    if (coloured) modelManager.clearDataColors('m');
+    return drawn(modelManager);
+  }
+
+  it('overrides changed and pieces streamed in while coloured: Clear restores exactly what was there', () => {
+    const plain = run(false);
+    const cleared = run(true);
+    expect(cleared).toEqual(plain);
+    expect(cleared.bytes).toBe(0);
+  });
+
+  it('a piece streamed in for a coloured element is coloured with it', () => {
+    const { modelManager } = makeModelManager();
+    modelManager.beginStream('m');
+    modelManager.appendMeshes('m', [boxMesh(1)]);
+    modelManager.setDataColors('m', [1], new Float32Array([0, 1, 0, 1]));
+    modelManager.appendMeshes('m', [boxMesh(1, { at: [5, 0, 0] })]);
+    const inner = modelManager.getModel('m')!.batch as unknown as { stateData: Float32Array };
+    // Second piece, colour texel: green.
+    expect(Array.from(inner.stateData.slice(8, 11))).toEqual([0, 1, 0]);
+  });
+});
+
+describe('ModelBatch — the shader', () => {
+  it('makes data colours glow, so the legend colour survives the lighting', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1])]);
+    const material = modelManager.getModel('m')!.batch.chunkMeshes()[0].material as THREE.Material;
+    const shader = {
+      uniforms: {},
+      defines: {},
+      vertexShader: '#include <common>\n#include <fog_vertex>',
+      fragmentShader: '#include <common>\n#include <color_fragment>\n#include <emissivemap_fragment>',
+    };
+    material.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    expect(shader.vertexShader).toContain('vPieceData = pieceFlags.b;');
+    expect(shader.fragmentShader).toContain(`totalEmissiveRadiance += vPieceData * ${DATA_GLOW.toFixed(2)} * vPieceColor.rgb;`);
   });
 });
