@@ -14,6 +14,7 @@
 
 import {
   barFractions,
+  distinctLabels,
   mean,
   NO_VALUE_LABEL,
   pieSlices,
@@ -197,6 +198,8 @@ export class TotalsView {
   /** What Copy puts on the clipboard: built with the tables, in their order. */
   private copyRows: (string | number)[][] = [];
   private copiedTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the rows were last drawn from: a change of progress alone is patched in place. */
+  private drawn: { rows: TotalsRow[]; groupBy: string | null; scope: TotalsState['scope'] } | null = null;
 
   constructor(private readonly deps: TotalsViewDeps) {
     this.root = el('div', 'totals');
@@ -232,7 +235,7 @@ export class TotalsView {
     this.root.append(head, this.rowsEl);
 
     this.unsubscribe = deps.controller.onChange(() => {
-      if (this.shown) this.render();
+      if (this.shown) this.update();
     });
   }
 
@@ -332,9 +335,40 @@ export class TotalsView {
     if (fraction !== null) this.progressFill.style.width = `${Math.round(fraction * 100)}%`;
   }
 
-  /** Draw the whole tab from the controller's state. */
-  render(): void {
+  /**
+   * The controller's state changed. When only reading progress moved, the
+   * progress is updated where it is drawn, so nothing is rebuilt under the
+   * keyboard; otherwise the tab is drawn again.
+   */
+  private update(): void {
     const s = this.deps.controller.getState();
+    const d = this.drawn;
+    const same =
+      d !== null &&
+      d.groupBy === s.groupBy &&
+      d.scope === s.scope &&
+      d.rows.length === s.rows.length &&
+      d.rows.every((r, i) => {
+        const n = s.rows[i];
+        return r.key === n.key && r.chart === n.chart && r.phase === n.phase && r.totals === n.totals && r.message === n.message;
+      });
+    if (!same) {
+      this.render();
+      return;
+    }
+    this.renderHead(s);
+    for (const row of s.rows) {
+      if (row.phase !== 'reading') continue;
+      const section = withData(this.rowsEl, '.totals-row', 'key', row.key);
+      const note = section?.querySelector('[data-progress="text"]');
+      const fill = section?.querySelector<HTMLElement>('[data-progress="fill"]');
+      if (note) note.textContent = readingText(row);
+      if (fill) fill.style.width = readingWidth(row);
+    }
+    this.drawn = { rows: s.rows, groupBy: s.groupBy, scope: s.scope };
+  }
+
+  private renderHead(s: TotalsState): void {
     this.scopeEl.textContent = scopeHeading(s.scope);
 
     const g = s.groupBy;
@@ -350,11 +384,18 @@ export class TotalsView {
     } else if (!this.statusEl.classList.contains('error')) this.setStatus('');
     const p = s.describing ?? s.groupReading;
     this.setProgress(p && p.total > 0 ? p.done / p.total : null);
+  }
 
-    // Keep the caret in a find box that is redrawn under it.
+  /** Draw the whole tab from the controller's state. */
+  render(): void {
+    const s = this.deps.controller.getState();
+    this.renderHead(s);
+
+    // The control that has the keyboard is drawn again: give it back the
+    // focus (and a find box its caret) once it is.
     const active = document.activeElement;
-    const focusKey = active instanceof HTMLInputElement && this.root.contains(active) ? active.dataset.table : undefined;
-    const caret = focusKey !== undefined ? (active as HTMLInputElement).selectionStart : null;
+    const focusKey = active instanceof HTMLElement && this.rowsEl.contains(active) ? active.dataset.focus : undefined;
+    const caret = active instanceof HTMLInputElement && focusKey !== undefined ? active.selectionStart : null;
 
     this.copyRows = [];
     this.rowsEl.replaceChildren();
@@ -368,14 +409,23 @@ export class TotalsView {
     }
     for (const row of s.rows) this.rowsEl.appendChild(this.rowEl(row, s));
     this.copyBtn.disabled = s.rows.length === 0;
+    this.drawn = { rows: s.rows, groupBy: s.groupBy, scope: s.scope };
 
-    if (focusKey !== undefined) {
-      const input = this.rowsEl.querySelector<HTMLInputElement>(`input[data-table="${CSS.escape(focusKey)}"]`);
-      if (input) {
-        input.focus();
-        if (caret !== null) input.setSelectionRange(caret, caret);
-      }
+    if (focusKey !== undefined) this.restoreFocus(focusKey, caret);
+  }
+
+  /**
+   * Focus the control drawn for `key`. A removed row's × hands the focus to
+   * the next row's ×, or to "Add parameter" when none is left.
+   */
+  private restoreFocus(key: string, caret: number | null): void {
+    let target = withData(this.rowsEl, '[data-focus]', 'focus', key);
+    if (!target && key.startsWith('remove:')) {
+      target = this.rowsEl.querySelector<HTMLElement>('.totals-row-remove') ?? this.root.querySelector<HTMLElement>('.totals-add');
     }
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    if (target instanceof HTMLInputElement && caret !== null) target.setSelectionRange(caret, caret);
   }
 
   private rowEl(row: TotalsRow, s: TotalsState): HTMLElement {
@@ -398,10 +448,12 @@ export class TotalsView {
       );
       toggle.setAttribute('aria-pressed', String(pie));
       toggle.setAttribute('aria-label', pie ? 'Show as a table' : 'Show as a share chart');
+      toggle.dataset.focus = `chart:${row.key}`;
       head.appendChild(toggle);
     }
     const remove = button('totals-row-remove', '×', 'Remove this row', () => this.deps.controller.removeRow(row.key));
     remove.setAttribute('aria-label', `Remove ${row.key}`);
+    remove.dataset.focus = `remove:${row.key}`;
     head.appendChild(remove);
     section.appendChild(head);
 
@@ -413,11 +465,13 @@ export class TotalsView {
       return section;
     }
     if (row.phase === 'reading' || !t) {
-      const text = row.total > 0 ? `Reading values… ${counts.format(row.done)} of ${counts.format(row.total)}` : 'Reading values…';
-      body.appendChild(el('div', 'totals-note', text));
+      const note = el('div', 'totals-note', readingText(row));
+      note.dataset.progress = 'text';
+      body.appendChild(note);
       const bar = el('div', 'params-panel-progress');
       const fill = el('div', 'params-panel-progress-fill');
-      fill.style.width = `${row.total > 0 ? Math.round((row.done / row.total) * 100) : 0}%`;
+      fill.dataset.progress = 'fill';
+      fill.style.width = readingWidth(row);
       bar.appendChild(fill);
       body.appendChild(bar);
       return section;
@@ -450,7 +504,16 @@ export class TotalsView {
 
   private numericBody(body: HTMLElement, row: TotalsRow, t: Totals, s: TotalsState): void {
     const several = t.numbers.length > 1;
-    if (!t.verdict.ok) body.appendChild(el('div', 'totals-note warn', sumVerdictText(t.verdict)));
+    if (!t.verdict.ok) {
+      // Say which units, naming the model of any it does not state.
+      const text =
+        t.verdict.reason === 'mixed-units'
+          ? `Values are in different units (${t.numbers
+              .map((u) => `${this.unitText(u, true) || 'no unit'} on ${counts.format(u.stats.count)}`)
+              .join(', ')}), so they are not added up`
+          : sumVerdictText(t.verdict);
+      body.appendChild(el('div', 'totals-note warn', text));
+    }
     for (const u of t.numbers) {
       const unit = this.unitText(u, several);
       const block = el('div', 'totals-unit');
@@ -460,9 +523,10 @@ export class TotalsView {
       this.copyRows.push([row.key, '', unit, u.stats.count, u.stats.sum, u.stats.min, u.stats.max, mean(u.stats), '']);
       if (u.groups && s.groupBy) {
         const tableKey = `${row.key}|${u.key}`;
-        if (row.chart === 'pie') block.appendChild(this.pieEl(u.groups, 'sum', unit, (line) => this.select(row.key, u.key, line)));
+        const lines = distinctLabels(u.groups, this.deps.modelName);
+        if (row.chart === 'pie') block.appendChild(this.pieEl(tableKey, lines, 'sum', unit, (line) => this.select(row.key, u.key, line)));
         block.appendChild(
-          this.tableEl(tableKey, u.groups, STAT_COLUMNS, 'sum', row.chart === 'pie', (line) => this.select(row.key, u.key, line), (line) =>
+          this.tableEl(tableKey, lines, STAT_COLUMNS, 'sum', row.chart === 'pie', (line) => this.select(row.key, u.key, line), (line) =>
             this.copyRows.push([
               row.key,
               line.label,
@@ -487,9 +551,10 @@ export class TotalsView {
     body.appendChild(line);
     this.copyRows.push([row.key, '', '', t.withValue, '', '', '', '', t.distinct]);
     if (t.groups && s.groupBy) {
-      if (row.chart === 'pie') body.appendChild(this.pieEl(t.groups, 'count', '', (l) => this.select(row.key, undefined, l)));
+      const lines = distinctLabels(t.groups, this.deps.modelName);
+      if (row.chart === 'pie') body.appendChild(this.pieEl(`${row.key}|`, lines, 'count', '', (l) => this.select(row.key, undefined, l)));
       body.appendChild(
-        this.tableEl(`${row.key}|`, t.groups, TEXT_COLUMNS, 'count', row.chart === 'pie', (l) => this.select(row.key, undefined, l), (l) =>
+        this.tableEl(`${row.key}|`, lines, TEXT_COLUMNS, 'count', row.chart === 'pie', (l) => this.select(row.key, undefined, l), (l) =>
           this.copyRows.push([row.key, l.label, '', l.stats.count, '', '', '', '', l.distinct ?? '']),
         ),
       );
@@ -529,6 +594,7 @@ export class TotalsView {
       find.placeholder = `Find one of ${counts.format(lines.length)} groups`;
       find.setAttribute('aria-label', 'Find a group');
       find.dataset.table = tableKey;
+      find.dataset.focus = `find:${tableKey}`;
       find.value = this.filters.get(tableKey) ?? '';
       find.addEventListener('input', () => {
         this.filters.set(tableKey, find.value);
@@ -559,6 +625,7 @@ export class TotalsView {
         },
       );
       h.setAttribute('aria-sort', active ? (sort.descending ? 'descending' : 'ascending') : 'none');
+      h.dataset.focus = `sort:${tableKey}:${c.by}`;
       header.appendChild(h);
     }
     wrap.appendChild(header);
@@ -571,6 +638,7 @@ export class TotalsView {
       const lineEl = el('div', line.label === NO_VALUE_LABEL ? 'totals-line none' : 'totals-line');
       lineEl.tabIndex = 0;
       lineEl.setAttribute('role', 'button');
+      lineEl.dataset.focus = `line:${tableKey}:${line.key}`;
       const value = columns === TEXT_COLUMNS ? line.stats.count : line.stats.sum;
       const share = total > 0 && value >= 0 ? ` (${percent.format(value / total)} of the whole)` : '';
       lineEl.title = `${line.label}: ${columns === TEXT_COLUMNS ? `${counts.format(value)} elements` : formatStat(value)}${share}. Click to select these elements.`;
@@ -602,7 +670,7 @@ export class TotalsView {
   }
 
   /** A donut of each group's share of the sum (numbers) or count (text), with its key. */
-  private pieEl(lines: GroupLine[], by: 'sum' | 'count', unit: string, onPick: (line: GroupLine) => void): HTMLElement {
+  private pieEl(tableKey: string, lines: GroupLine[], by: 'sum' | 'count', unit: string, onPick: (line: GroupLine) => void): HTMLElement {
     const slices = pieSlices(lines, by);
     if (!slices) {
       return el('div', 'totals-note', 'No share chart: some values are negative, or they add up to nothing.');
@@ -610,23 +678,47 @@ export class TotalsView {
     const wrap = el('div', 'totals-pie');
     wrap.appendChild(donut(slices, unit));
     const legend = el('ul', 'totals-pie-key');
-    const byLabel = new Map(lines.map((l) => [l.label, l]));
+    // By key: two groups can share a label.
+    const byKey = new Map(lines.map((l) => [l.key, l]));
     for (const s of slices) {
       const li = el('li', 'totals-pie-entry');
       li.title = `${s.label}: ${formatStat(s.value)}${unit ? ` ${unit}` : ''} (${percent.format(s.share)})`;
       const sw = el('span', 'totals-swatch');
       sw.style.background = sliceColour(s);
       li.append(sw, el('span', 'totals-pie-label', s.label), el('span', 'totals-pie-share', percent.format(s.share)));
-      const line = byLabel.get(s.label);
-      if (line && s.colour >= 0) {
+      const line = s.key !== undefined ? byKey.get(s.key) : undefined;
+      if (line) {
         li.classList.add('pickable');
+        li.tabIndex = 0;
+        li.setAttribute('role', 'button');
+        li.dataset.focus = `pie:${tableKey}:${line.key}`;
         li.addEventListener('click', () => onPick(line));
+        li.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onPick(line);
+          }
+        });
       }
       legend.appendChild(li);
     }
     wrap.appendChild(legend);
     return wrap;
   }
+}
+
+/** The element under `root` matching `selector` whose `data-<name>` is `value` (no CSS escaping needed). */
+function withData(root: HTMLElement, selector: string, name: string, value: string): HTMLElement | null {
+  for (const e of root.querySelectorAll<HTMLElement>(selector)) if (e.dataset[name] === value) return e;
+  return null;
+}
+
+function readingText(row: TotalsRow): string {
+  return row.total > 0 ? `Reading values… ${counts.format(row.done)} of ${counts.format(row.total)}` : 'Reading values…';
+}
+
+function readingWidth(row: TotalsRow): string {
+  return `${row.total > 0 ? Math.round((row.done / row.total) * 100) : 0}%`;
 }
 
 function stat(label: string, value: string, unit = ''): HTMLElement {

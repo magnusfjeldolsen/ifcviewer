@@ -258,6 +258,152 @@ describe('TotalsView', () => {
   });
 });
 
+/** Totals over several models: `models` maps a model to its element ids and columns. */
+function setupModels(models: Record<string, { ids: number[]; columns: Record<string, ColumnData> }>) {
+  const deps: TotalsDeps = {
+    models: () => Object.keys(models),
+    scope: () => ({ kind: 'visible' }),
+    describe: async (m): Promise<ModelParameters> => ({
+      modelId: m,
+      scopeSize: models[m].ids.length,
+      parameters: Object.keys(models[m].columns).map(summary),
+    }),
+    scopeIds: (m) => Int32Array.from(models[m].ids),
+    loadColumn: async (m, key): Promise<ParameterColumn> => ({ ...models[m].columns[key], modelId: m, ids: Int32Array.from(models[m].ids) }),
+    releaseColumn: () => {},
+    select: vi.fn(),
+    storage: null,
+    debounceMs: 0,
+  };
+  const controller = new TotalsController(deps);
+  const view = new TotalsView({ controller, picker: { open: vi.fn() }, modelName: (m) => `${m.toUpperCase()}.ifc` });
+  document.body.replaceChildren(view.getElement());
+  return { controller, view, deps, root: view.getElement() };
+}
+
+describe('TotalsView: look-alike groups and units', () => {
+  const unstated: UnitRef = { key: '?LENGTHUNIT', symbol: '' };
+  const two = () =>
+    setupModels({
+      a: { ids: [1], columns: { 'Q.Volume': numeric('Q.Volume', [1]), 'P.Len': numeric('P.Len', [3], [unstated]) } },
+      b: { ids: [2], columns: { 'Q.Volume': numeric('Q.Volume', [2]), 'P.Len': numeric('P.Len', [3], [unstated]) } },
+    });
+
+  it('names the model of each look-alike group, and a share-chart entry selects its own group', async () => {
+    const t = two();
+    t.controller.addRow('Q.Volume');
+    t.controller.setGroupBy('P.Len');
+    t.controller.setChart('Q.Volume', 'pie');
+    t.view.setShown(true);
+    await flush();
+    const labels = [...t.root.querySelectorAll('.totals-line:not(.totals-line-head) .totals-label')].map((e) => e.textContent);
+    expect(labels).toEqual(['3 (B.ifc)', '3 (A.ifc)']);
+    const entries = [...t.root.querySelectorAll<HTMLElement>('.totals-pie-entry')];
+    expect(entries.map((e) => e.querySelector('.totals-pie-label')!.textContent)).toEqual(['3 (B.ifc)', '3 (A.ifc)']);
+    entries[1].click();
+    expect(t.deps.select).toHaveBeenLastCalledWith([{ modelId: 'a', expressId: 1 }]);
+    entries[0].click();
+    expect(t.deps.select).toHaveBeenLastCalledWith([{ modelId: 'b', expressId: 2 }]);
+  });
+
+  it('names the models when it will not add up units they leave unstated', async () => {
+    const t = two();
+    t.controller.addRow('P.Len');
+    t.view.setShown(true);
+    await flush();
+    expect(t.root.querySelector('.totals-note.warn')!.textContent).toBe(
+      'Values are in different units (unit not stated (A.ifc) on 1, unit not stated (B.ifc) on 1), so they are not added up',
+    );
+  });
+});
+
+describe('TotalsView: the keyboard keeps its place', () => {
+  const cols = {
+    'Q.Volume': numeric('Q.Volume', [1, 2, 10, 4]),
+    'Q.Area': numeric('Q.Area', [1, 1, 1, 1]),
+    'Identity.IfcClass': discrete('Identity.IfcClass', ['IfcBeam', 'IfcSlab', 'IfcWall', 'IfcBeam']),
+  };
+
+  async function grouped() {
+    const t = setup(cols, [11, 12, 13, 14]);
+    t.controller.addRow('Q.Volume');
+    t.controller.addRow('Q.Area');
+    t.controller.setGroupBy('Identity.IfcClass');
+    t.view.setShown(true);
+    await flush();
+    return t;
+  }
+
+  const focused = (): string | undefined => (document.activeElement as HTMLElement | null)?.dataset.focus;
+
+  it('a sort header keeps the focus when the table is sorted', async () => {
+    const t = await grouped();
+    const n = [...t.root.querySelectorAll<HTMLButtonElement>('.totals-sort')].find((b) => b.textContent!.startsWith('n'))!;
+    n.focus();
+    n.click();
+    expect(focused()).toBe(n.dataset.focus);
+    expect(document.activeElement).not.toBe(n);
+  });
+
+  it('a group line keeps the focus when the totals are counted again', async () => {
+    const t = await grouped();
+    const line = t.root.querySelectorAll<HTMLElement>('.totals-line:not(.totals-line-head)')[1];
+    const key = line.dataset.focus;
+    line.focus();
+    t.controller.invalidate();
+    await flush();
+    expect(focused()).toBe(key);
+  });
+
+  it('the chart toggle keeps the focus when pressed', async () => {
+    const t = await grouped();
+    const toggle = t.root.querySelector<HTMLButtonElement>('.totals-chart-btn')!;
+    toggle.focus();
+    toggle.click();
+    await flush();
+    expect(focused()).toBe('chart:Q.Volume');
+  });
+
+  it('removing a row hands the focus to the next row', async () => {
+    const t = await grouped();
+    const remove = t.root.querySelector<HTMLButtonElement>('.totals-row-remove')!;
+    remove.focus();
+    remove.click();
+    await flush();
+    expect(focused()).toBe('remove:Q.Area');
+  });
+
+  it('reading progress is updated in place, without rebuilding under the keyboard', async () => {
+    const t = setup({ 'Q.Volume': numeric('Q.Volume', [1]), 'Q.Area': numeric('Q.Area', [2]) }, [1]);
+    const progress: ((d: number, total: number) => void)[] = [];
+    let finish!: () => void;
+    const area = t.deps.loadColumn;
+    t.deps.loadColumn = (m, key, onProgress) => {
+      if (key !== 'Q.Area') return area(m, key, onProgress);
+      progress.push(onProgress);
+      return new Promise((resolve) => (finish = () => void area(m, key, onProgress).then(resolve)));
+    };
+    t.controller.addRow('Q.Volume');
+    t.controller.addRow('Q.Area');
+    t.view.setShown(true);
+    await flush();
+    const remove = t.root.querySelector<HTMLButtonElement>('.totals-row-remove')!;
+    remove.focus();
+    progress[0](40, 100);
+    await flush();
+    expect(document.activeElement).toBe(remove);
+    const area0 = t.root.querySelectorAll('.totals-row')[1];
+    expect(area0.querySelector('[data-progress="text"]')!.textContent).toBe('Reading values… 40 of 100');
+    progress[0](80, 100);
+    await flush();
+    expect(t.root.querySelectorAll('.totals-row')[1]).toBe(area0);
+    expect(area0.querySelector<HTMLElement>('[data-progress="fill"]')!.style.width).toBe('80%');
+    finish();
+    await flush();
+    expect(document.activeElement).toBe(t.root.querySelector('[data-focus="remove:Q.Volume"]'));
+  });
+});
+
 describe('Parameters panel with a Totals tab', () => {
   const data: ModelParameters = { modelId: 'm', scopeSize: 1, parameters: [summary('Q.Volume')] };
 
@@ -298,6 +444,30 @@ describe('Parameters panel with a Totals tab', () => {
     t.p.openTotals();
     t.p.close();
     expect(last(t.totals.shown)).toBe(false);
+  });
+
+  it('moves between tabs with the arrow keys, Home and End', () => {
+    const t = panel();
+    t.p.open('m');
+    const tab = (name: string) => t.parent.querySelector<HTMLButtonElement>(`.params-panel-tab[data-tab="${name}"]`)!;
+    document.body.appendChild(t.parent);
+    expect(tab('parameters').tabIndex).toBe(0);
+    expect(tab('totals').tabIndex).toBe(-1);
+    const key = (k: string) => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+    tab('parameters').focus();
+    key('ArrowRight');
+    expect(t.p.currentTab()).toBe('totals');
+    expect(document.activeElement).toBe(tab('totals'));
+    expect(tab('totals').tabIndex).toBe(0);
+    key('ArrowRight');
+    expect(t.p.currentTab()).toBe('parameters');
+    key('End');
+    expect(t.p.currentTab()).toBe('totals');
+    key('Home');
+    expect(t.p.currentTab()).toBe('parameters');
+    key('ArrowLeft');
+    expect(t.p.currentTab()).toBe('totals');
+    t.parent.remove();
   });
 
   it('keeps the Totals tab open when the model shown is closed and others are left', () => {

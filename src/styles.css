@@ -2529,11 +2529,21 @@ html, body {
   right: calc(12px + 420px + 12px);
 }
 
-@media (max-width: 960px) {
+/* The wider tab needs the legend docked under it sooner: below about
+   1040 px (80 px more than for the Parameters tab) the legend beside it
+   would cover the inspector. */
+@media (max-width: 1040px) {
   .params-panel.totals-tab:not(.hidden) ~ .colour-legend {
+    top: auto;
     right: 12px;
+    bottom: calc(40px + var(--legend-clearance, 44px) + 6px);
     width: 420px;
     max-width: calc(100% - 24px);
+    max-height: calc((100% - 56px - 40px - var(--legend-clearance, 44px)) * 0.45);
+  }
+
+  #app:has(.colour-legend:not(.hidden)) .params-panel.totals-tab {
+    max-height: calc((100% - 56px - 40px - var(--params-clearance, 44px)) * 0.55 - 12px);
   }
 }
 

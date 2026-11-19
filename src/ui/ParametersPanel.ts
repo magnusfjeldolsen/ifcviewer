@@ -112,6 +112,21 @@ export class ParametersPanel {
         title.appendChild(b);
         this.tabButtons.set(tab, b);
       }
+      // The tabs pattern: one tab is in the Tab order; the arrow keys, Home
+      // and End move between tabs and show the one they land on.
+      title.addEventListener('keydown', (e) => {
+        const order: ParametersTab[] = ['parameters', 'totals'];
+        const i = order.indexOf(this.tab);
+        let next: ParametersTab | null = null;
+        if (e.key === 'ArrowRight') next = order[(i + 1) % order.length];
+        else if (e.key === 'ArrowLeft') next = order[(i + order.length - 1) % order.length];
+        else if (e.key === 'Home') next = order[0];
+        else if (e.key === 'End') next = order[order.length - 1];
+        if (next === null) return;
+        e.preventDefault();
+        this.showTab(next);
+        this.tabButtons.get(this.tab)?.focus();
+      });
     } else {
       title = document.createElement('span');
       title.className = 'params-panel-title';
