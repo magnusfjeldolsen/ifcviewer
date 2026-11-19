@@ -459,7 +459,8 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
     expect(batch.dataColorBytes).toBe(0);
     modelManager.setDataColors('m', [1, 999], new Float32Array([1, 1, 1, 1, 0, 0, 0, 1]));
     expect(batch.elementState(1)!.dataColored).toBe(true);
-    expect(batch.dataColorBytes).toBeGreaterThan(0);
+    // Four floats per piece, for the pieces there are.
+    expect(batch.dataColorBytes).toBe(16);
   });
 
   it('colours 20,000 elements, each its own colour, quickly', () => {

@@ -72,9 +72,11 @@ export interface AppearanceFlags {
  *
  * - **Selection present** → header (single element line, or "N elements") +
  *   Hide / Isolate / Show all (disabled iff nothing hidden) | Make transparent
- *   / Make opaque (disabled iff nothing transparent) | Add to basket (M+).
- * - **No selection but something hidden/transparent** → recovery only: Show all
- *   (iff hidden) / Clear transparency (iff transparent).
+ *   / Make opaque (disabled iff nothing transparent) | Colour by parameter…
+ *   (and Clear colours while a colouring is shown) | Add to basket (M+).
+ * - **No selection but something hidden/transparent/coloured** → recovery
+ *   only: Show all (iff hidden) / Clear transparency (iff transparent) /
+ *   Clear colours (iff coloured).
  * - **No selection and nothing active** → `null`.
  */
 export function buildContextMenuItems(

@@ -586,8 +586,8 @@ export class ModelBatch {
    * drawn in the highlight colour, so a selection shows on any data colour.
    */
   setDataColors(expressIds: ArrayLike<number>, rgba: Float32Array): void {
-    if (this.dataColor.length < this.flags.length * 4) {
-      this.dataColor = growFloat32(this.dataColor, this.flags.length * 4);
+    if (this.dataColor.length < this.count * 4) {
+      this.dataColor = growFloat32(this.dataColor, this.count * 4);
     }
     const data = this.dataColor;
     let changed = false;
@@ -831,7 +831,7 @@ export class ModelBatch {
       this.overrideColor.copyWithin(p * 3, sibling * 3, sibling * 3 + 3);
       this.overrideOpacity[p] = this.overrideOpacity[sibling];
       if (this.flags[p] & FLAG_DATA_COLOR) {
-        this.dataColor = growFloat32(this.dataColor, this.flags.length * 4);
+        this.dataColor = growFloat32(this.dataColor, this.count * 4);
         this.dataColor.copyWithin(p * 4, sibling * 4, sibling * 4 + 4);
         this.dataColored++;
       }

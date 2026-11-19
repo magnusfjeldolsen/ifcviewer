@@ -66,6 +66,11 @@ export interface ParameterListOptions {
   onColourBy?(parameter: ParameterSummary): void;
 }
 
+/** The colour button's tooltip: what a click will do. */
+function colourButtonTitle(on: boolean): string {
+  return on ? 'Coloured by this parameter: click to clear the colours' : 'Colour the elements by this parameter';
+}
+
 /** "412 of 1,235". */
 export function countText(p: ParameterSummary, scopeSize: number): string {
   return `${counts.format(p.count)} of ${counts.format(scopeSize)}`;
@@ -282,6 +287,7 @@ export class ParameterList {
       if (btn) {
         btn.classList.toggle('active', k === key);
         btn.setAttribute('aria-pressed', String(k === key));
+        (btn as HTMLElement).title = colourButtonTitle(k === key);
       }
     }
   }
@@ -396,7 +402,7 @@ export class ParameterList {
       const on = this.colouredKey === p.key;
       colour.className = on ? 'param-colour-btn active' : 'param-colour-btn';
       colour.setAttribute('aria-pressed', String(on));
-      colour.title = 'Colour the elements by this parameter';
+      colour.title = colourButtonTitle(on);
       colour.setAttribute('aria-label', `Colour by ${p.key}`);
       colour.addEventListener('click', () => onColourBy(p));
       li.appendChild(colour);

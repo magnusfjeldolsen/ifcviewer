@@ -700,7 +700,14 @@ ${parameter.key}`;
 ${parameter.key}`);
         this.propertyRepository.releaseColumn(modelId, parameter.key);
       },
-      colourBy: (modelId, parameter) => void this.colourByParameter(parameter.key, modelId),
+      // The button of the parameter coloured by now clears it again.
+      colourBy: (modelId, parameter) => {
+        const s = this.colourBy.getState();
+        const covers =
+          s.phase !== 'off' && (s.scope.kind === 'model' ? s.scope.modelId === modelId : s.scope.elements.has(modelId));
+        if (covers && s.key === parameter.key) this.colourBy.clear();
+        else void this.colourByParameter(parameter.key, modelId);
+      },
     });
 
     // Colour by parameter (#68). The colours read the same value columns as
