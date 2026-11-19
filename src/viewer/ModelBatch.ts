@@ -78,6 +78,8 @@ const FLAG_HIDDEN = 1;
 const FLAG_HIGHLIGHT = 2;
 const FLAG_COLOR = 4;
 const FLAG_OPACITY = 8;
+/** A data colour (colour by parameter) is set: it wins over the colour override. */
+const FLAG_DATA_COLOR = 16;
 
 export interface ModelBatchOptions {
   /** Vertices per chunk before it is split (tests use a small number). */
@@ -94,6 +96,8 @@ export interface ElementDrawState {
   color: { r: number; g: number; b: number };
   colorOverridden: boolean;
   opacityOverridden: boolean;
+  /** A data colour (colour by parameter) is drawn instead of the colour above. */
+  dataColored: boolean;
 }
 
 export interface PieceGeometry {
@@ -344,6 +348,14 @@ export class ModelBatch {
   private baseColor: Float32Array = new Float32Array(64 * 4);
   private overrideColor: Float32Array = new Float32Array(64 * 3);
   private overrideOpacity: Float32Array = new Float32Array(64);
+  /**
+   * Data colours (colour by parameter), three floats per piece. A layer of
+   * its own above the colour override, so clearing it returns every piece to
+   * exactly the colour it had, override or not. Empty until first used and
+   * again once cleared: it costs nothing while no colouring is shown.
+   */
+  private dataColor: Float32Array = new Float32Array(0);
+  private dataColored = 0;
   private flags: Uint8Array = new Uint8Array(64);
 
   private elements = new Map<number, number[]>();
@@ -478,6 +490,7 @@ export class ModelBatch {
       color: { r: d[o], g: d[o + 1], b: d[o + 2] },
       colorOverridden: (this.flags[p] & FLAG_COLOR) !== 0,
       opacityOverridden: (this.flags[p] & FLAG_OPACITY) !== 0,
+      dataColored: (this.flags[p] & FLAG_DATA_COLOR) !== 0,
     };
   }
 
@@ -547,6 +560,65 @@ export class ModelBatch {
       }
     }
     if (changed) this.uploadState();
+  }
+
+  /**
+   * Colour elements by data, each its own colour, in one pass: element
+   * `expressIds[i]` gets linear RGB `rgb[3i..3i+2]`, or loses its data colour
+   * when `rgb[3i]` is NaN. A data colour is drawn instead of the element's
+   * colour, overridden or not, and `clearDataColors` brings that colour back.
+   * Opacity, visibility and highlight are untouched.
+   */
+  setDataColors(expressIds: ArrayLike<number>, rgb: Float32Array): void {
+    if (this.dataColor.length < this.flags.length * 3) {
+      this.dataColor = growFloat32(this.dataColor, this.flags.length * 3);
+    }
+    const data = this.dataColor;
+    let changed = false;
+    for (let i = 0; i < expressIds.length; i++) {
+      const pieces = this.elements.get(expressIds[i]);
+      if (!pieces) continue;
+      const r = rgb[i * 3];
+      const on = !Number.isNaN(r);
+      for (const p of pieces) {
+        const had = (this.flags[p] & FLAG_DATA_COLOR) !== 0;
+        if (on) {
+          const o = p * 3;
+          if (had && data[o] === r && data[o + 1] === rgb[i * 3 + 1] && data[o + 2] === rgb[i * 3 + 2]) continue;
+          data[o] = r;
+          data[o + 1] = rgb[i * 3 + 1];
+          data[o + 2] = rgb[i * 3 + 2];
+          if (!had) this.dataColored++;
+          this.flags[p] |= FLAG_DATA_COLOR;
+        } else {
+          if (!had) continue;
+          this.flags[p] &= ~FLAG_DATA_COLOR;
+          this.dataColored--;
+        }
+        this.writeState(p);
+        changed = true;
+      }
+    }
+    if (changed) this.uploadState();
+  }
+
+  /** Remove every data colour: each element is drawn in the colour it had before. */
+  clearDataColors(): void {
+    if (this.dataColored > 0) {
+      for (let p = 0; p < this.count; p++) {
+        if (!(this.flags[p] & FLAG_DATA_COLOR)) continue;
+        this.flags[p] &= ~FLAG_DATA_COLOR;
+        this.writeState(p);
+      }
+      this.dataColored = 0;
+      this.uploadState();
+    }
+    this.dataColor = new Float32Array(0);
+  }
+
+  /** Bytes held for data colours (zero while none is shown). */
+  get dataColorBytes(): number {
+    return this.dataColor.byteLength;
   }
 
   /** Override elements' opacity (0..1), or `null` for their own. */
@@ -716,6 +788,11 @@ export class ModelBatch {
       this.flags[p] = this.flags[sibling];
       this.overrideColor.copyWithin(p * 3, sibling * 3, sibling * 3 + 3);
       this.overrideOpacity[p] = this.overrideOpacity[sibling];
+      if (this.flags[p] & FLAG_DATA_COLOR) {
+        this.dataColor = growFloat32(this.dataColor, this.flags.length * 3);
+        this.dataColor.copyWithin(p * 3, sibling * 3, sibling * 3 + 3);
+        this.dataColored++;
+      }
     }
     list.push(p);
     this.writeState(p);
@@ -850,6 +927,7 @@ export class ModelBatch {
     this.baseColor = growFloat32(this.baseColor, cap * 4);
     this.overrideColor = growFloat32(this.overrideColor, cap * 3);
     this.overrideOpacity = growFloat32(this.overrideOpacity, cap);
+    if (this.dataColor.length > 0) this.dataColor = growFloat32(this.dataColor, cap * 3);
     this.flags = growUint8(this.flags, cap);
   }
 
@@ -873,7 +951,11 @@ export class ModelBatch {
     const d = this.stateData;
     const o = p * FLOATS_PER_PIECE;
     const f = this.flags[p];
-    if (f & FLAG_COLOR) {
+    if (f & FLAG_DATA_COLOR) {
+      d[o] = this.dataColor[p * 3];
+      d[o + 1] = this.dataColor[p * 3 + 1];
+      d[o + 2] = this.dataColor[p * 3 + 2];
+    } else if (f & FLAG_COLOR) {
       d[o] = this.overrideColor[p * 3];
       d[o + 1] = this.overrideColor[p * 3 + 1];
       d[o + 2] = this.overrideColor[p * 3 + 2];

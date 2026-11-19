@@ -190,6 +190,20 @@ export class ModelManager {
     this.apply(modelId, (b) => b.setColor(expressIds, color));
   }
 
+  /**
+   * Colour elements of one model by data, each its own colour (see
+   * `ModelBatch.setDataColors`): `rgb` holds linear RGB per element, NaN for
+   * none. Drawn above any colour override, which `clearDataColors` restores.
+   */
+  setDataColors(modelId: string, expressIds: ArrayLike<number>, rgb: Float32Array): void {
+    this.apply(modelId, (b) => b.setDataColors(expressIds, rgb));
+  }
+
+  /** Remove every data colour of one model. */
+  clearDataColors(modelId: string): void {
+    this.apply(modelId, (b) => b.clearDataColors());
+  }
+
   /** Turn the selection highlight on or off for elements of one model. */
   setHighlighted(modelId: string, expressIds: Iterable<number>, highlighted: boolean): void {
     this.apply(modelId, (b) => b.setHighlighted(expressIds, highlighted));

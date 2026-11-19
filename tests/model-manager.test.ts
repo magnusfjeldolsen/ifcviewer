@@ -380,6 +380,70 @@ describe('ModelBatch — element appearance', () => {
   });
 });
 
+describe('ModelBatch — data colours (colour by parameter)', () => {
+  const red = { r: 1, g: 0, b: 0, a: 1 };
+
+  it('gives each element its own colour in one call, on every piece', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1, 1, 2, 3], { color: red })]);
+    const rgb = new Float32Array([0, 1, 0, 0, 0, 1, NaN, 0, 0]);
+    modelManager.setDataColors('m', [1, 2, 3], rgb);
+    const batch = modelManager.getModel('m')!.batch;
+    expect(batch.elementState(1)).toMatchObject({ color: { r: 0, g: 1, b: 0 }, dataColored: true });
+    expect(batch.elementState(2)!.color).toEqual({ r: 0, g: 0, b: 1 });
+    // NaN: no data colour, the element's own.
+    expect(batch.elementState(3)).toMatchObject({ color: { r: 1, g: 0, b: 0 }, dataColored: false });
+  });
+
+  it('is a layer above the colour override: clearing it brings the override back', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1, 2], { color: red })]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setColor('m', [1], { r: 0, g: 0, b: 1 });
+    modelManager.setDataColors('m', [1, 2], new Float32Array([0, 1, 0, 0, 1, 0]));
+    expect(batch.elementState(1)!.color).toEqual({ r: 0, g: 1, b: 0 });
+    modelManager.clearDataColors('m');
+    expect(batch.elementState(1)).toMatchObject({ color: { r: 0, g: 0, b: 1 }, colorOverridden: true, dataColored: false });
+    expect(batch.elementState(2)).toMatchObject({ color: { r: 1, g: 0, b: 0 }, colorOverridden: false });
+    expect(batch.dataColorBytes).toBe(0);
+  });
+
+  it('leaves hidden, see-through and highlighted elements as they are', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1, 2, 3])]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setHidden('m', [1], true);
+    modelManager.setOpacity('m', [2], 0.25);
+    modelManager.setHighlighted('m', [3], true);
+    modelManager.setDataColors('m', [1, 2, 3], new Float32Array(9).fill(0.5));
+    expect(batch.elementState(1)!.hidden).toBe(true);
+    expect(batch.elementState(2)!.opacity).toBe(0.25);
+    expect(batch.elementState(3)!.highlighted).toBe(true);
+    modelManager.clearDataColors('m');
+    expect(batch.elementState(1)!.hidden).toBe(true);
+    expect(batch.elementState(2)!.opacity).toBe(0.25);
+    expect(batch.elementState(3)!.highlighted).toBe(true);
+  });
+
+  it('holds no memory until used, and ignores elements the model does not have', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1])]);
+    const batch = modelManager.getModel('m')!.batch;
+    expect(batch.dataColorBytes).toBe(0);
+    modelManager.setDataColors('m', [1, 999], new Float32Array([1, 1, 1, 0, 0, 0]));
+    expect(batch.elementState(1)!.dataColored).toBe(true);
+    expect(batch.dataColorBytes).toBeGreaterThan(0);
+  });
+
+  it('colours 20,000 elements, each its own colour, quickly', () => {
+    const meshes = Array.from({ length: 20000 }, (_, i) => boxMesh(i + 1, { at: [i % 200, Math.floor(i / 200), 0] }));
+    const { modelManager } = makeModelManager([{ id: 'm', meshes }]);
+    const ids = Int32Array.from(modelManager.elementIds('m'));
+    const rgb = new Float32Array(ids.length * 3);
+    for (let i = 0; i < ids.length; i++) rgb[i * 3] = i / ids.length;
+    const t0 = performance.now();
+    modelManager.setDataColors('m', ids, rgb);
+    modelManager.clearDataColors('m');
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+});
+
 describe('ModelBatch — picking', () => {
   it('resolves a hit to its model and element, with the hit point in world space', () => {
     const { scene } = makeModelManager([boxModel('m', [10, 20, 30])]);
