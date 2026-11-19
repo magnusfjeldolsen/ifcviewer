@@ -15,6 +15,7 @@ import {
   columnUnits,
   columnValueCounts,
   columnBytes,
+  columnTransferables,
   type ColumnData,
   type ParameterColumn,
 } from '../src/inspector/parameterColumn';
@@ -297,5 +298,70 @@ describe('building a value column in the worker', () => {
     // A column build stops at once, without finishing its step on a closed model.
     expect(h.log).toEqual(['read 1']);
     expect(h.d.isRunning('m')).toBe(false);
+  });
+});
+
+describe('column builds sharing one read', () => {
+  it('keeps the units of numbers among text, so a scope of only those numbers can be added up', () => {
+    const c = build('Q.N', [
+      props(1, [row('Q.N', single('n/a'))]),
+      props(2, [row('Q.N', single(4), { unit: 'm', unitKey: 'si:m' })]),
+      props(3, [row('Q.N', single(5), { unit: 'mm', unitKey: 'si:mm' })]),
+    ]);
+    if (c.type !== 'discrete') throw new Error('expected a discrete column');
+    expect(c.units).toEqual([
+      { key: 'si:m', symbol: 'm' },
+      { key: 'si:mm', symbol: 'mm' },
+    ]);
+    expect([...c.unitIndex!]).toEqual([0, 0, 1]);
+    expect(columnTransferables(c)).toHaveLength(2);
+  });
+
+  it('a column asked for while an element is being read starts with that element and reads round', async () => {
+    const reads: number[] = [];
+    let joined = false;
+    const h = harness((id) => {
+      reads.push(id);
+      if (id === 2 && !joined) {
+        joined = true;
+        // Arrives while element 2 is being read.
+        h.d.requestColumn(2, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'Q.B');
+      }
+      return props(id, [row('Q.A', single(id)), row('Q.B', single(id * 10))]);
+    });
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'Q.A');
+    const a = await h.reply(1);
+    const b = await h.reply(2);
+    if (a.msg.type !== 'column' || b.msg.type !== 'column') throw new Error('expected columns');
+    if (b.msg.column.type !== 'numeric') throw new Error('expected numbers');
+    expect([...b.msg.column.values]).toEqual([10, 20, 30, 40, 50]);
+    // Once round for A, and B round again to element 1, which it missed.
+    expect(reads).toEqual([1, 2, 3, 4, 5, 1]);
+  });
+
+  it('closing the model stops every column of a shared read and tells each caller', async () => {
+    const h = harness();
+    h.setDuring(() => {
+      h.open.delete('m');
+      h.d.drop('m');
+    });
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'P.X');
+    h.d.requestColumn(2, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'P.Y');
+    const a = await h.reply(1);
+    const b = await h.reply(2);
+    expect(a.msg).toMatchObject({ type: 'error', message: expect.stringMatching(/closed/) });
+    expect(b.msg).toMatchObject({ type: 'error', message: expect.stringMatching(/closed/) });
+    expect(h.d.isRunning('m')).toBe(false);
+  });
+
+  it('a column asked for over other elements of the model supersedes the one over the old elements', async () => {
+    const h = harness();
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3]), 'P.X');
+    h.d.requestColumn(2, 'm', Int32Array.from([1, 2]), 'P.X');
+    const old = await h.reply(1);
+    const fresh = await h.reply(2);
+    expect(old.msg).toMatchObject({ type: 'error', message: 'Superseded by a newer request' });
+    if (fresh.msg.type !== 'column') throw new Error('expected a column');
+    expect(fresh.msg.column.count).toBe(2);
   });
 });
