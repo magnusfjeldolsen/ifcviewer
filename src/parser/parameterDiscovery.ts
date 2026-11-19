@@ -19,13 +19,13 @@
  *    per model and dropped with the model, together with its property cache.
  *    Asking again while a job runs joins that job.
  *
- * The same steps build a value column (`requestColumn`): one parameter's
+ * The same steps build value columns (`requestColumn`): one parameter's
  * value for every element of the scope, sent back in typed arrays that are
  * transferred, not copied. Columns are kept on the main thread, not here.
  */
 
 import { ParameterFold } from '../inspector/parameterFold';
-import { ColumnBuilder, columnTransferables, type ColumnData } from '../inspector/parameterColumn';
+import { ColumnBuilder, columnTransferables } from '../inspector/parameterColumn';
 import type { ElementProperties, ModelParameters } from '../inspector/types';
 import type { FromWorker } from './ifcMessages';
 import type { SerialQueue } from './serialQueue';
@@ -106,8 +106,38 @@ interface Kept {
   result: ModelParameters;
 }
 
+/** One column being built in a batch, and who waits for it. */
+interface ColumnRider {
+  path: string;
+  builder: ColumnBuilder;
+  waiters: number[];
+  /** Elements of the scope this column has been handed (read or unreadable). */
+  seen: number;
+  urgent: boolean;
+  lastProgressAt: number;
+}
+
+/** Columns of one model over one scope, built in one read of its elements. */
+interface ColumnBatch {
+  key: string;
+  modelId: string;
+  ids: ArrayLike<number>;
+  scope: string;
+  /** Bound by the first step. */
+  webIfcId: number | undefined;
+  /** The next row to read; wraps round to 0 for columns that joined late. */
+  cursor: number;
+  riders: ColumnRider[];
+  stopped: boolean;
+}
+
+function newRider(path: string, size: number, reqId: number, urgent: boolean): ColumnRider {
+  return { path, builder: new ColumnBuilder(path, size), waiters: [reqId], seen: 0, urgent, lastProgressAt: -Infinity };
+}
+
 export class ParameterDiscoveries {
   private jobs = new Map<string, Job>();
+  private batches = new Map<string, ColumnBatch>();
   private kept = new Map<string, Kept>();
 
   constructor(
@@ -145,6 +175,12 @@ export class ParameterDiscoveries {
    * `expressIds[i]`. Same background steps as `request`; replies with one
    * `column` message whose arrays are transferred. Not kept here: the main
    * thread keeps it, so asking twice (after the first answer) reads twice.
+   *
+   * Columns of one model over one scope share a single read (#69): a column
+   * asked for while another is being built rides along with it, so each
+   * element is read once for all of them rather than once per column. One
+   * that joins part-way carries on round to the start of the scope after the
+   * others are done, so it costs only the elements it missed.
    */
   requestColumn(
     reqId: number,
@@ -153,18 +189,40 @@ export class ParameterDiscoveries {
     path: string,
     urgent = false,
   ): void {
-    const builder = new ColumnBuilder(path, expressIds.length);
-    let column: ColumnData | null = null;
-    this.start(reqId, modelId, expressIds, `${modelId}|column|${path}`, {
-      add: (props, index) => builder.add(index, props),
-      reply: (r, job) => {
-        column ??= builder.finish();
-        // The last waiter is handed the arrays; any before it (rare: the main
-        // thread asks once per column) get a copy, sent while they still exist.
-        const last = job.waiters[job.waiters.length - 1] === r;
-        this.host.post({ type: 'column', reqId: r, column }, last ? columnTransferables(column) : []);
-      },
-    }, undefined, urgent);
+    const scope = scopeFingerprint(expressIds);
+    // The same column over another scope of the model: the newer request wins.
+    for (const other of [...this.batches.values()]) {
+      if (other.modelId !== modelId || other.scope === scope) continue;
+      const rider = other.riders.find((r) => r.path === path);
+      if (rider) this.failRider(other, rider, 'Superseded by a newer request');
+    }
+    const key = `${modelId}|columns|${scope}`;
+    const running = this.batches.get(key);
+    if (running) {
+      const rider = running.riders.find((r) => r.path === path);
+      if (rider) {
+        rider.waiters.push(reqId);
+        if (urgent) rider.urgent = true;
+      } else {
+        running.riders.push(newRider(path, expressIds.length, reqId, urgent));
+      }
+      return;
+    }
+    const batch: ColumnBatch = {
+      key,
+      modelId,
+      ids: expressIds,
+      scope,
+      webIfcId: undefined,
+      cursor: 0,
+      riders: [newRider(path, expressIds.length, reqId, urgent)],
+      stopped: false,
+    };
+    this.batches.set(key, batch);
+    this.host.queue.enqueueBackground(
+      () => this.stepBatch(batch),
+      (err) => this.failBatch(batch, err instanceof Error ? err.message : 'Reading the values failed'),
+    );
   }
 
   /**
@@ -181,6 +239,15 @@ export class ParameterDiscoveries {
       if (job.waiters.length === 0) this.end(job);
       return;
     }
+    for (const batch of this.batches.values()) {
+      for (const rider of batch.riders) {
+        const i = rider.waiters.indexOf(reqId);
+        if (i < 0) continue;
+        rider.waiters.splice(i, 1);
+        if (rider.waiters.length === 0) this.dropRider(batch, rider);
+        return;
+      }
+    }
   }
 
   /**
@@ -191,6 +258,9 @@ export class ParameterDiscoveries {
     for (const job of this.jobs.values()) {
       if (job.waiters.includes(reqId)) job.urgent = true;
     }
+    for (const batch of this.batches.values()) {
+      for (const rider of batch.riders) if (rider.waiters.includes(reqId)) rider.urgent = true;
+    }
   }
 
   /** The model was closed: stop its jobs and forget its result. */
@@ -199,17 +269,24 @@ export class ParameterDiscoveries {
     for (const job of [...this.jobs.values()]) {
       if (job.modelId === modelId) this.fail(job, 'The model was closed');
     }
+    for (const batch of [...this.batches.values()]) {
+      if (batch.modelId === modelId) this.failBatch(batch, 'The model was closed');
+    }
   }
 
   /** web-ifc was torn down: stop everything and forget everything. */
   clear(): void {
     for (const job of [...this.jobs.values()]) this.fail(job, 'The model was closed');
+    for (const batch of [...this.batches.values()]) this.failBatch(batch, 'The model was closed');
     this.kept.clear();
   }
 
   /** Whether any job is running for `modelId` (tests). */
   isRunning(modelId: string): boolean {
-    return [...this.jobs.values()].some((j) => j.modelId === modelId);
+    return (
+      [...this.jobs.values()].some((j) => j.modelId === modelId) ||
+      [...this.batches.values()].some((b) => b.modelId === modelId)
+    );
   }
 
   private start(
@@ -311,8 +388,105 @@ export class ParameterDiscoveries {
     return false;
   }
 
+  /**
+   * One step of a column batch: bind or re-check the model, read up to a
+   * chunk of elements once each and hand every one to each column still
+   * short of it, then answer the columns that have seen the whole scope.
+   * True while any column is left.
+   */
+  private async stepBatch(batch: ColumnBatch): Promise<boolean> {
+    if (batch.stopped) return false;
+    if (!batch.riders.some((r) => r.urgent) && this.anyUrgent()) return true;
+    const open = this.host.openId(batch.modelId);
+    if (batch.webIfcId === undefined) {
+      if (open === undefined) {
+        this.failBatch(batch, `Model "${batch.modelId}" is not open`);
+        return false;
+      }
+      batch.webIfcId = open;
+      if (this.host.prepare && batch.ids.length > 0) {
+        await this.host.prepare(batch.modelId, open);
+        return true;
+      }
+    } else if (open !== batch.webIfcId) {
+      this.failBatch(batch, 'The model was closed');
+      return false;
+    }
+
+    const total = batch.ids.length;
+    let left = 0;
+    for (const r of batch.riders) left = Math.max(left, total - r.seen);
+    const n = Math.min(this.chunkSize, left);
+    for (let k = 0; k < n && !batch.stopped; k++) {
+      const index = batch.cursor;
+      batch.cursor = index + 1 < total ? index + 1 : 0;
+      let props: ElementProperties | null;
+      try {
+        props = await this.host.read(batch.modelId, batch.webIfcId, batch.ids[index]);
+      } catch {
+        // Unreadable: no value in any column, rows stay aligned.
+        props = null;
+      }
+      // Riders are looked at after the read: one that joined meanwhile
+      // starts with this element.
+      for (const r of batch.riders) {
+        if (r.seen >= total) continue;
+        if (props) r.builder.add(index, props);
+        r.seen++;
+      }
+    }
+    if (batch.stopped) return false;
+
+    const now = (this.host.now ?? Date.now)();
+    for (const r of batch.riders) {
+      if (r.seen < total && now - r.lastProgressAt < PROGRESS_MIN_INTERVAL_MS) continue;
+      r.lastProgressAt = now;
+      for (const reqId of r.waiters) this.host.post({ type: 'progress', reqId, done: r.seen, total });
+    }
+
+    // Answered in order of need: someone waiting on a pick hears first.
+    const done = batch.riders.filter((r) => r.seen >= total).sort((a, b) => Number(b.urgent) - Number(a.urgent));
+    if (done.length > 0) batch.riders = batch.riders.filter((r) => r.seen < total);
+    if (batch.riders.length === 0) this.endBatch(batch);
+    for (const r of done) {
+      const column = r.builder.finish();
+      // The last waiter is handed the arrays; any before it (rare: the main
+      // thread asks once per column) get a copy, sent while they still exist.
+      r.waiters.forEach((reqId, i) => {
+        const last = i === r.waiters.length - 1;
+        this.host.post({ type: 'column', reqId, column }, last ? columnTransferables(column) : []);
+      });
+    }
+    return batch.riders.length > 0;
+  }
+
+  /** A column nobody waits for any more leaves its batch; an empty batch stops. */
+  private dropRider(batch: ColumnBatch, rider: ColumnRider): void {
+    batch.riders = batch.riders.filter((r) => r !== rider);
+    if (batch.riders.length === 0) this.endBatch(batch);
+  }
+
+  private failRider(batch: ColumnBatch, rider: ColumnRider, message: string): void {
+    this.dropRider(batch, rider);
+    for (const reqId of rider.waiters) this.host.post({ type: 'error', reqId, message });
+  }
+
+  private endBatch(batch: ColumnBatch): void {
+    batch.stopped = true;
+    if (this.batches.get(batch.key) === batch) this.batches.delete(batch.key);
+  }
+
+  private failBatch(batch: ColumnBatch, message: string): void {
+    if (batch.stopped) return;
+    this.endBatch(batch);
+    for (const rider of batch.riders) {
+      for (const reqId of rider.waiters) this.host.post({ type: 'error', reqId, message });
+    }
+  }
+
   private anyUrgent(): boolean {
     for (const j of this.jobs.values()) if (j.urgent && !j.stopped) return true;
+    for (const b of this.batches.values()) if (!b.stopped && b.riders.some((r) => r.urgent)) return true;
     return false;
   }
 

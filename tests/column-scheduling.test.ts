@@ -99,6 +99,48 @@ describe('column jobs in the worker', () => {
     expect(order).toHaveLength(3);
   });
 
+  it('columns asked for together are built in one read of the elements', async () => {
+    const w = worker();
+    w.d.requestColumn(1, 'm', Int32Array.from(SCOPE), 'P.A');
+    w.d.requestColumn(2, 'm', Int32Array.from(SCOPE), 'P.B');
+    w.d.requestColumn(3, 'm', Int32Array.from(SCOPE), 'P.C');
+    await w.settled();
+    const replies = w.posted.filter((m) => m.type === 'column');
+    expect(replies.map((m) => (m as { column: { key: string } }).column.key).sort()).toEqual(['P.A', 'P.B', 'P.C']);
+    for (const m of replies) {
+      const values = [...(m as { column: { values: Float64Array } }).column.values];
+      expect(values).toEqual(SCOPE);
+    }
+    expect(w.reads()).toBe(SCOPE.length);
+  });
+
+  it('a column that joins part-way reads round to what it missed, and no more', async () => {
+    const w = worker();
+    w.d.requestColumn(1, 'm', Int32Array.from(SCOPE), 'P.A');
+    // Three steps of four elements.
+    for (let i = 0; i < 3; i++) await tick();
+    const before = w.reads();
+    expect(before).toBeGreaterThan(0);
+    expect(before).toBeLessThan(SCOPE.length);
+    w.d.requestColumn(2, 'm', Int32Array.from(SCOPE), 'P.B');
+    await w.settled();
+    const b = w.posted.find((m) => m.type === 'column' && m.reqId === 2) as { column: { values: Float64Array } };
+    expect([...b.column.values]).toEqual(SCOPE);
+    // A once over the scope, and B round again to where it joined.
+    expect(w.reads()).toBe(SCOPE.length + before);
+  });
+
+  it('cancelling one column of a shared read leaves the others answered', async () => {
+    const w = worker();
+    w.d.requestColumn(1, 'm', Int32Array.from(SCOPE), 'P.A');
+    w.d.requestColumn(2, 'm', Int32Array.from(SCOPE), 'P.B');
+    await tick();
+    w.d.cancel(1);
+    await w.settled();
+    expect(w.posted.filter((m) => m.type === 'column').map((m) => (m as { reqId: number }).reqId)).toEqual([2]);
+    expect(w.reads()).toBe(SCOPE.length);
+  });
+
   it('hurrying a running job puts it first from its next step', async () => {
     const w = worker();
     w.d.requestColumn(1, 'm', Int32Array.from(SCOPE), 'P.A');

@@ -294,7 +294,8 @@ describe('building a value column in the worker', () => {
     const { msg } = await h.reply(1);
     expect(msg).toMatchObject({ type: 'error', message: expect.stringMatching(/closed/) });
     await new Promise((res) => setTimeout(res, 10));
-    expect(h.log).toEqual(['read 1', 'read 2']);
+    // A column build stops at once, without finishing its step on a closed model.
+    expect(h.log).toEqual(['read 1']);
     expect(h.d.isRunning('m')).toBe(false);
   });
 });
