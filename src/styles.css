@@ -2065,3 +2065,419 @@ html, body {
     width: auto;
   }
 }
+
+/* ── Colour by parameter (#68) ─────────────────────────────── */
+
+/* The colour button on a parameter row: a small swatch of the scale, at the
+   row's top right, beside (not inside) the row's header button. */
+.param-row.colourable {
+  position: relative;
+}
+
+.param-row.colourable > .param-head {
+  padding-right: 34px;
+}
+
+.param-colour-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background:
+    linear-gradient(135deg, #d73027 0%, #fdae61 35%, #a6d96a 65%, #1a9850 100%) content-box;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.param-colour-btn:hover,
+.param-colour-btn:focus-visible,
+.param-colour-btn.active {
+  opacity: 1;
+}
+
+.param-colour-btn.active {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
+
+/* The legend: top right under the memory toggle; left of the Parameters
+   panel while that is open, so it covers neither it nor the inspector. */
+.colour-legend {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  width: 260px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 64px - 40px - 12px - var(--legend-clearance, 44px));
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.params-panel:not(.hidden) ~ .colour-legend {
+  right: calc(12px + 340px + 12px);
+}
+
+.colour-legend.hidden {
+  display: none;
+}
+
+.colour-legend-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
+}
+
+.colour-legend-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  flex-shrink: 0;
+}
+
+.colour-legend-param {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.colour-legend-group {
+  color: #9ca3af;
+}
+
+.colour-legend-name {
+  font-weight: 600;
+}
+
+.colour-legend-close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 16px;
+  cursor: pointer;
+  color: #6b7280;
+}
+
+.colour-legend-close:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.colour-legend-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.colour-legend-scope,
+.colour-legend-status,
+.colour-legend-note {
+  padding: 6px 10px 0;
+  color: #6b7280;
+  flex-shrink: 0;
+}
+
+.colour-legend-status.error {
+  color: #b91c1c;
+}
+
+.colour-legend-note {
+  color: #92400e;
+}
+
+.colour-legend-scale {
+  padding: 8px 10px 0;
+  flex-shrink: 0;
+}
+
+.colour-legend-bar {
+  height: 10px;
+  border-radius: 3px;
+}
+
+.colour-legend-ends {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  color: #4b5563;
+  font-variant-numeric: tabular-nums;
+}
+
+.colour-legend-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 4px;
+  flex-shrink: 0;
+}
+
+.colour-legend-btn {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.colour-legend-btn:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.colour-legend-btn:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.colour-legend-palette {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 1px 2px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.colour-legend-entries {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 4px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.colour-legend-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 10px;
+  min-width: 0;
+}
+
+.colour-legend-entry input {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.colour-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.colour-legend-entry.off .colour-legend-swatch {
+  opacity: 0.25;
+}
+
+.colour-legend-label {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 4px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.colour-legend-label:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.colour-legend-entry.off .colour-legend-label,
+.colour-legend-entry.off .colour-legend-count {
+  color: #9ca3af;
+}
+
+.colour-legend-entry[data-kind='none'] .colour-legend-label,
+.colour-legend-entry[data-kind='other'] .colour-legend-label {
+  font-style: italic;
+}
+
+.colour-legend-count {
+  flex-shrink: 0;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
+.colour-legend-label:focus-visible,
+.colour-legend-btn:focus-visible,
+.param-picker-row.active {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+
+.colour-legend-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 10px 8px;
+  border-top: 1px solid #f3f4f6;
+  flex-shrink: 0;
+}
+
+/* The right-click "Colour by parameter…" picker. */
+.param-picker {
+  position: fixed;
+  z-index: 100;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  max-height: min(420px, calc(100vh - 16px));
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0;
+  background: rgba(255, 255, 255, 0.98);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.param-picker-title {
+  padding: 2px 10px 6px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.param-picker-filter {
+  margin: 0 10px 4px;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+}
+
+.param-picker-status {
+  padding: 0 10px;
+  color: #6b7280;
+}
+
+.param-picker-status:empty {
+  display: none;
+}
+
+.param-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.param-picker-row {
+  display: flex;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.param-picker-row:hover,
+.param-picker-row.active {
+  background: #eff6ff;
+}
+
+.param-picker-key {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.param-picker-group {
+  color: #9ca3af;
+}
+
+.param-picker-value {
+  flex-shrink: 1;
+  max-width: 45%;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* "No value" is near white: a dashed edge keeps the swatch visible. */
+.colour-legend-entry[data-kind='none'] .colour-legend-swatch {
+  border: 1px dashed #6b7280;
+}
+
+/* Below about 960 px there is no room for the legend between the inspector
+   (left) and the Parameters panel (right). The two then share the right
+   edge: the panel keeps the top part, the legend docks under it, above the
+   action tray, at the panel's width. */
+@media (max-width: 960px) {
+  .params-panel:not(.hidden) ~ .colour-legend {
+    top: auto;
+    right: 12px;
+    bottom: calc(40px + var(--legend-clearance, 44px) + 6px);
+    width: 340px;
+    max-height: calc((100% - 56px - 40px - var(--legend-clearance, 44px)) * 0.45);
+  }
+
+  #app:has(.colour-legend:not(.hidden)) .params-panel {
+    max-height: calc((100% - 56px - 40px - var(--params-clearance, 44px)) * 0.55 - 12px);
+  }
+}
+
+/* Refresh, left of Clear; a dot when what can be seen has changed since the
+   colours were worked out. */
+.colour-legend-footer {
+  justify-content: space-between;
+}
+
+.colour-legend-refresh.stale {
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.colour-legend-refresh.stale::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #f59e0b;
+  vertical-align: 1px;
+}
+
+/* With many values: find one. */
+.colour-legend-filter {
+  margin: 4px 10px 2px;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  flex-shrink: 0;
+}

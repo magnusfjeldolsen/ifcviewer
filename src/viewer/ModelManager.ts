@@ -171,6 +171,19 @@ export class ModelManager {
     return this.models.get(modelId)?.batch.elementState(expressId) ?? null;
   }
 
+  /**
+   * Which elements of a model can be seen: the model is shown, the element
+   * is not hidden, and it is not wholly cut away by `clipPlane` (judged by
+   * bounding boxes). Null when the model is not loaded.
+   */
+  visibleElements(modelId: string, clipPlane: Readonly<THREE.Plane> | null = null): ((expressId: number) => boolean) | null {
+    const entry = this.models.get(modelId);
+    if (!entry) return null;
+    if (!entry.visible) return () => false;
+    const batch = entry.batch;
+    return (expressId) => !batch.isHidden(expressId) && !(clipPlane && batch.isCutAway(expressId, clipPlane));
+  }
+
   /** Hide or show elements of one model. */
   setHidden(modelId: string, expressIds: Iterable<number>, hidden: boolean): void {
     this.apply(modelId, (b) => b.setHidden(expressIds, hidden));
@@ -188,6 +201,21 @@ export class ModelManager {
     color: { r: number; g: number; b: number } | null,
   ): void {
     this.apply(modelId, (b) => b.setColor(expressIds, color));
+  }
+
+  /**
+   * Colour elements of one model by data, each its own colour (see
+   * `ModelBatch.setDataColors`): `rgba` holds linear RGBA per element, NaN
+   * for none; an alpha below 1 ghosts the element. Drawn above any colour
+   * override, which `clearDataColors` restores.
+   */
+  setDataColors(modelId: string, expressIds: ArrayLike<number>, rgba: Float32Array): void {
+    this.apply(modelId, (b) => b.setDataColors(expressIds, rgba));
+  }
+
+  /** Remove every data colour of one model. */
+  clearDataColors(modelId: string): void {
+    this.apply(modelId, (b) => b.clearDataColors());
   }
 
   /** Turn the selection highlight on or off for elements of one model. */

@@ -73,11 +73,22 @@ const STATE_TEXTURE_WIDTH = 1024;
 /** Highlight: the brand blue at 0.3, added as emissive light. */
 export const HIGHLIGHT_COLOR = 0x3b82f6;
 export const HIGHLIGHT_INTENSITY = 0.3;
+/**
+ * Data colours (colour by parameter) glow by this share of themselves. The
+ * lighting draws a face at 30–45 % of its colour, which turns a legend's red
+ * into maroon; with the glow a face shows 75–95 % of it, close enough to the
+ * legend to read, while the shading still shows the shape.
+ */
+export const DATA_GLOW = 0.55;
+/** The highlight colour in the renderer's linear space, for a selected element drawn in it. */
+const HIGHLIGHT_LINEAR = new THREE.Color(HIGHLIGHT_COLOR);
 
 const FLAG_HIDDEN = 1;
 const FLAG_HIGHLIGHT = 2;
 const FLAG_COLOR = 4;
 const FLAG_OPACITY = 8;
+/** A data colour (colour by parameter) is set: it wins over the colour override. */
+const FLAG_DATA_COLOR = 16;
 
 export interface ModelBatchOptions {
   /** Vertices per chunk before it is split (tests use a small number). */
@@ -94,6 +105,8 @@ export interface ElementDrawState {
   color: { r: number; g: number; b: number };
   colorOverridden: boolean;
   opacityOverridden: boolean;
+  /** A data colour (colour by parameter) is drawn instead of the colour above. */
+  dataColored: boolean;
 }
 
 export interface PieceGeometry {
@@ -262,6 +275,7 @@ attribute float pieceIndex;
 uniform highp sampler2D pieceState;
 varying vec4 vPieceColor;
 varying float vPieceHighlight;
+varying float vPieceData;
 `;
 
 const VERTEX_MAIN = /* glsl */ `
@@ -272,6 +286,7 @@ const VERTEX_MAIN = /* glsl */ `
   vec4 pieceFlags = texelFetch( pieceState, ivec2( ( pieceTexel + 1 ) % stateWidth, ( pieceTexel + 1 ) / stateWidth ), 0 );
   vPieceColor = pieceColor;
   vPieceHighlight = pieceFlags.g;
+  vPieceData = pieceFlags.b;
   bool pieceSkipped = pieceFlags.r > 0.5;
   #if PIECE_PASS == 0
     // The opaque pass leaves see-through pieces to the overlay.
@@ -286,6 +301,7 @@ const VERTEX_MAIN = /* glsl */ `
 const FRAGMENT_DECLARATIONS = /* glsl */ `
 varying vec4 vPieceColor;
 varying float vPieceHighlight;
+varying float vPieceData;
 uniform vec3 highlightEmissive;
 `;
 
@@ -314,7 +330,8 @@ function makePieceMaterial(pass: 'opaque' | 'transparent', uniforms: SharedUnifo
       .replace('#include <color_fragment>', '#include <color_fragment>\n\tdiffuseColor *= vPieceColor;')
       .replace(
         '#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += vPieceHighlight * highlightEmissive;',
+        '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += vPieceHighlight * highlightEmissive;' +
+          `\n\ttotalEmissiveRadiance += vPieceData * ${DATA_GLOW.toFixed(2)} * vPieceColor.rgb;`,
       );
   };
   material.customProgramCacheKey = () => `ifc-piece-${pass}`;
@@ -344,6 +361,14 @@ export class ModelBatch {
   private baseColor: Float32Array = new Float32Array(64 * 4);
   private overrideColor: Float32Array = new Float32Array(64 * 3);
   private overrideOpacity: Float32Array = new Float32Array(64);
+  /**
+   * Data colours (colour by parameter), three floats per piece. A layer of
+   * its own above the colour override, so clearing it returns every piece to
+   * exactly the colour it had, override or not. Empty until first used and
+   * again once cleared: it costs nothing while no colouring is shown.
+   */
+  private dataColor: Float32Array = new Float32Array(0);
+  private dataColored = 0;
   private flags: Uint8Array = new Uint8Array(64);
 
   private elements = new Map<number, number[]>();
@@ -463,6 +488,27 @@ export class ModelBatch {
   }
 
   /**
+   * True when every piece of the element lies wholly on the negative side of
+   * `plane` (what a section cut removes), judged by the pieces' bounding
+   * boxes: an element the plane passes through is not cut away.
+   */
+  isCutAway(expressId: number, plane: Readonly<THREE.Plane>): boolean {
+    const pieces = this.elements.get(expressId);
+    if (!pieces) return false;
+    const { x: nx, y: ny, z: nz } = plane.normal;
+    const b = this.pieceBox;
+    for (const p of pieces) {
+      if (this.pieceIndexCount[p] === 0) continue;
+      const o = p * 6;
+      // The box corner furthest along the normal.
+      const far =
+        nx * (nx >= 0 ? b[o + 3] : b[o]) + ny * (ny >= 0 ? b[o + 4] : b[o + 1]) + nz * (nz >= 0 ? b[o + 5] : b[o + 2]);
+      if (far + plane.constant >= 0) return false;
+    }
+    return true;
+  }
+
+  /**
    * How an element is drawn right now (read from its first piece; every
    * piece of an element is always set together), or null if it has none.
    */
@@ -478,6 +524,7 @@ export class ModelBatch {
       color: { r: d[o], g: d[o + 1], b: d[o + 2] },
       colorOverridden: (this.flags[p] & FLAG_COLOR) !== 0,
       opacityOverridden: (this.flags[p] & FLAG_OPACITY) !== 0,
+      dataColored: (this.flags[p] & FLAG_DATA_COLOR) !== 0,
     };
   }
 
@@ -547,6 +594,94 @@ export class ModelBatch {
       }
     }
     if (changed) this.uploadState();
+  }
+
+  /**
+   * Colour elements by data, each its own colour, in one pass: element
+   * `expressIds[i]` gets linear RGBA `rgba[4i..4i+3]`, or loses its data
+   * colour when `rgba[4i]` is NaN. A data colour is drawn instead of the
+   * element's colour, overridden or not, and `clearDataColors` brings that
+   * colour back. Its alpha only ever makes an element more see-through (a
+   * ghost): the element is drawn at the lower of it and its own opacity.
+   * Visibility and the highlight are untouched; a highlighted element is
+   * drawn in the highlight colour, so a selection shows on any data colour.
+   */
+  setDataColors(expressIds: ArrayLike<number>, rgba: Float32Array): void {
+    if (this.dataColor.length < this.count * 4) {
+      this.dataColor = growFloat32(this.dataColor, this.count * 4);
+    }
+    const data = this.dataColor;
+    let changed = false;
+    let overlays = false;
+    for (let i = 0; i < expressIds.length; i++) {
+      const pieces = this.elements.get(expressIds[i]);
+      if (!pieces) continue;
+      const s = i * 4;
+      const on = !Number.isNaN(rgba[s]);
+      for (const p of pieces) {
+        const had = (this.flags[p] & FLAG_DATA_COLOR) !== 0;
+        const o = p * 4;
+        if (on) {
+          if (had && data[o] === rgba[s] && data[o + 1] === rgba[s + 1] && data[o + 2] === rgba[s + 2] && data[o + 3] === rgba[s + 3]) {
+            continue;
+          }
+        } else if (!had) {
+          continue;
+        }
+        const seeThrough = this.effectiveAlpha(p) < OPAQUE_ALPHA;
+        if (on) {
+          data[o] = rgba[s];
+          data[o + 1] = rgba[s + 1];
+          data[o + 2] = rgba[s + 2];
+          data[o + 3] = rgba[s + 3];
+          if (!had) this.dataColored++;
+          this.flags[p] |= FLAG_DATA_COLOR;
+        } else {
+          this.flags[p] &= ~FLAG_DATA_COLOR;
+          this.dataColored--;
+        }
+        if (this.markOverlay(p, seeThrough)) overlays = true;
+        this.writeState(p);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    if (overlays) for (const chunk of this.chunks) if (chunk.overlayDirty) this.rebuildOverlay(chunk);
+    this.uploadState();
+  }
+
+  /** Remove every data colour: each element is drawn as it was before. */
+  clearDataColors(): void {
+    if (this.dataColored > 0) {
+      let overlays = false;
+      for (let p = 0; p < this.count; p++) {
+        if (!(this.flags[p] & FLAG_DATA_COLOR)) continue;
+        const seeThrough = this.effectiveAlpha(p) < OPAQUE_ALPHA;
+        this.flags[p] &= ~FLAG_DATA_COLOR;
+        if (this.markOverlay(p, seeThrough)) overlays = true;
+        this.writeState(p);
+      }
+      this.dataColored = 0;
+      if (overlays) for (const chunk of this.chunks) if (chunk.overlayDirty) this.rebuildOverlay(chunk);
+      this.uploadState();
+    }
+    this.dataColor = new Float32Array(0);
+  }
+
+  /** Bytes held for data colours (zero while none is shown). */
+  get dataColorBytes(): number {
+    return this.dataColor.byteLength;
+  }
+
+  /**
+   * After piece `p`'s opacity may have changed: if it crossed into or out of
+   * see-through, its opaque chunk's overlay must be rebuilt. True if so.
+   */
+  private markOverlay(p: number, wasSeeThrough: boolean): boolean {
+    const chunk = this.pieceChunk[p];
+    if (!chunk || chunk.transparent || wasSeeThrough === this.effectiveAlpha(p) < OPAQUE_ALPHA) return false;
+    chunk.overlayDirty = true;
+    return true;
   }
 
   /** Override elements' opacity (0..1), or `null` for their own. */
@@ -716,6 +851,11 @@ export class ModelBatch {
       this.flags[p] = this.flags[sibling];
       this.overrideColor.copyWithin(p * 3, sibling * 3, sibling * 3 + 3);
       this.overrideOpacity[p] = this.overrideOpacity[sibling];
+      if (this.flags[p] & FLAG_DATA_COLOR) {
+        this.dataColor = growFloat32(this.dataColor, this.count * 4);
+        this.dataColor.copyWithin(p * 4, sibling * 4, sibling * 4 + 4);
+        this.dataColored++;
+      }
     }
     list.push(p);
     this.writeState(p);
@@ -850,6 +990,7 @@ export class ModelBatch {
     this.baseColor = growFloat32(this.baseColor, cap * 4);
     this.overrideColor = growFloat32(this.overrideColor, cap * 3);
     this.overrideOpacity = growFloat32(this.overrideOpacity, cap);
+    if (this.dataColor.length > 0) this.dataColor = growFloat32(this.dataColor, cap * 4);
     this.flags = growUint8(this.flags, cap);
   }
 
@@ -862,7 +1003,10 @@ export class ModelBatch {
   }
 
   private effectiveAlpha(p: number): number {
-    return this.flags[p] & FLAG_OPACITY ? this.overrideOpacity[p] : this.baseColor[p * 4 + 3];
+    const f = this.flags[p];
+    const own = f & FLAG_OPACITY ? this.overrideOpacity[p] : this.baseColor[p * 4 + 3];
+    // A data colour can ghost an element, never make it more opaque.
+    return f & FLAG_DATA_COLOR ? Math.min(own, this.dataColor[p * 4 + 3]) : own;
   }
 
   // ── Internals: state texture ─────────────────────────────────
@@ -873,7 +1017,17 @@ export class ModelBatch {
     const d = this.stateData;
     const o = p * FLOATS_PER_PIECE;
     const f = this.flags[p];
-    if (f & FLAG_COLOR) {
+    if (f & FLAG_DATA_COLOR && f & FLAG_HIGHLIGHT) {
+      // A selected element in a coloured view is drawn in the highlight
+      // colour: the usual emissive tint is lost on a saturated data colour.
+      d[o] = HIGHLIGHT_LINEAR.r;
+      d[o + 1] = HIGHLIGHT_LINEAR.g;
+      d[o + 2] = HIGHLIGHT_LINEAR.b;
+    } else if (f & FLAG_DATA_COLOR) {
+      d[o] = this.dataColor[p * 4];
+      d[o + 1] = this.dataColor[p * 4 + 1];
+      d[o + 2] = this.dataColor[p * 4 + 2];
+    } else if (f & FLAG_COLOR) {
       d[o] = this.overrideColor[p * 3];
       d[o + 1] = this.overrideColor[p * 3 + 1];
       d[o + 2] = this.overrideColor[p * 3 + 2];
@@ -885,6 +1039,7 @@ export class ModelBatch {
     d[o + 3] = this.effectiveAlpha(p);
     d[o + 4] = f & FLAG_HIDDEN ? 1 : 0;
     d[o + 5] = f & FLAG_HIGHLIGHT ? 1 : 0;
+    d[o + 6] = f & FLAG_DATA_COLOR ? 1 : 0;
     this.dirtyRows.add(Math.floor((p * TEXELS_PER_PIECE) / STATE_TEXTURE_WIDTH));
   }
 

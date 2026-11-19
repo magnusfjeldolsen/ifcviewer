@@ -49,6 +49,8 @@ export interface ParametersPanelDeps {
   prepare?(modelId: string, parameter: ParameterSummary): void;
   /** The parameter was closed again before a value was picked: what `prepare` started can stop. */
   release?(modelId: string, parameter: ParameterSummary): void;
+  /** Colour the elements by this parameter (#68). */
+  colourBy?(modelId: string, parameter: ParameterSummary): void;
 }
 
 const counts = new Intl.NumberFormat('en-US');
@@ -62,6 +64,8 @@ export class ParametersPanel {
   private progressFill: HTMLElement;
   private list: ParameterList;
   private modelId: string | null = null;
+  /** The parameter elements are coloured by, and the models that colouring covers. */
+  private coloured: { key: string; models: ReadonlySet<string> } | null = null;
   /** Bumped on every open: replies for an earlier one are dropped. */
   private generation = 0;
   private clearanceObserver: ResizeObserver | null = null;
@@ -132,6 +136,11 @@ export class ParametersPanel {
           }
         : undefined,
       onClose: deps.release ? (parameter, modelId) => deps.release!(modelId, parameter) : undefined,
+      onColourBy: deps.colourBy
+        ? (parameter) => {
+            if (this.modelId !== null) deps.colourBy!(this.modelId, parameter);
+          }
+        : undefined,
     });
     parent.appendChild(this.container);
   }
@@ -143,6 +152,7 @@ export class ParametersPanel {
     this.container.classList.remove('hidden');
     this.refreshModels();
     this.list.setData(null);
+    this.markColoured();
     this.setProgress(null);
     this.statusEl.classList.remove('error');
     this.statusEl.textContent = this.deps.isLoading?.() ? 'Waiting for the load to finish…' : 'Reading parameters…';
@@ -191,6 +201,20 @@ export class ParametersPanel {
 
   isOpen(): boolean {
     return !this.container.classList.contains('hidden');
+  }
+
+  /**
+   * Mark the parameter the elements are coloured by, on the rows of the
+   * models it covers; null when nothing is coloured.
+   */
+  setColoured(coloured: { key: string; models: ReadonlySet<string> } | null): void {
+    this.coloured = coloured;
+    this.markColoured();
+  }
+
+  private markColoured(): void {
+    const c = this.coloured;
+    this.list.setColouredKey(c && this.modelId !== null && c.models.has(this.modelId) ? c.key : null);
   }
 
   /** The model shown, or null when closed. */

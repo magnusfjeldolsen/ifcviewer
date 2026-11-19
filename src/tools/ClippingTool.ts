@@ -212,6 +212,24 @@ export class ClippingTool implements Tool {
     };
   }
 
+  /**
+   * The clip plane in world space, or null. What lies on its negative side
+   * (\distanceToPoint < 0\) is cut away. Read-only: move it with the handle.
+   */
+  getClipPlane(): Readonly<THREE.Plane> | null {
+    return this.clipPlane;
+  }
+
+  /** Subscribe to the plane being moved (fires once a handle drag ends). */
+  onPlaneMoved(cb: () => void): () => void {
+    this.movedListeners.push(cb);
+    return () => {
+      this.movedListeners = this.movedListeners.filter((l) => l !== cb);
+    };
+  }
+
+  private movedListeners: Array<() => void> = [];
+
   private notifyStateChange(): void {
     // The clip-plane create/remove transition affects geometry visibility
     // even when the camera is idle — request a frame before listeners run.
@@ -481,5 +499,6 @@ export class ClippingTool implements Tool {
     this.dragPointerId = null;
     this.deps.canvas.style.cursor = '';
     if (this.deps.canvas.hasPointerCapture?.(id)) this.deps.canvas.releasePointerCapture(id);
+    for (const cb of this.movedListeners) cb();
   }
 }
