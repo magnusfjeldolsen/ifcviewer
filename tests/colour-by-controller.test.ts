@@ -1,5 +1,7 @@
+import * as THREE from 'three';
 import { describe, it, expect, vi } from 'vitest';
 import { ColourByController, colourScopeFor, isColouringBy, type ColourByDeps } from '../src/inspector/ColourByController';
+import type { ModelManager } from '../src/viewer/ModelManager';
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
 import { makeModelManager, boxModel } from './helpers/models';
 
@@ -208,5 +210,134 @@ describe('what a colouring covers', () => {
     expect(isColouringBy(controller.getState(), 'k', 'a')).toBe(true);
     expect(isColouringBy(controller.getState(), 'other', 'a')).toBe(false);
     expect(isColouringBy(controller.getState(), 'k', 'b')).toBe(false);
+  });
+});
+describe('colouring what is visible', () => {
+  function numberColumn(modelId: string, ids: number[], values: number[]): ParameterColumn {
+    return {
+      type: 'numeric',
+      key: 'k',
+      count: values.length,
+      values: Float64Array.from(values),
+      units: [{ key: 'LENGTHUNIT:MILLI:METRE', symbol: 'mm' }],
+      unitIndex: null,
+      modelId,
+      ids: Int32Array.from(ids),
+    };
+  }
+
+  function visibleSetup(columns: Record<string, ParameterColumn>, modelManager: ModelManager) {
+    const controller = new ColourByController({
+      loadColumn: async (modelId) => columns[modelId],
+      paint: modelManager,
+      visibility: (modelId) => modelManager.visibleElements(modelId),
+    });
+    return controller;
+  }
+
+  it('hidden elements are not counted, do not set the scale and keep their own colour when shown', async () => {
+    const { modelManager } = makeModelManager([boxModel('a', [1, 2, 3, 4], { color: RED })]);
+    const ids = [1, 2, 3, 4];
+    const values = [1, 2, 3, 1000];
+    const controller = visibleSetup({ a: numberColumn('a', ids, values) }, modelManager);
+    modelManager.setHidden('a', [4], true);
+    await controller.colourBy('k', { kind: 'model', modelId: 'a' });
+    const s = controller.getState();
+    if (s.phase !== 'shown') throw new Error('not shown');
+    // 1000 is hidden: it is not one of the values.
+    expect(s.plan.entries.map((e) => e.label)).toEqual(['1 mm', '2 mm', '3 mm']);
+    expect([s.plan.scopeSize, s.total]).toEqual([3, 4]);
+    // Shown again: its own colour, not "no value", until a refresh.
+    modelManager.setHidden('a', [4], false);
+    expect(modelManager.getElementState('a', 4)).toMatchObject({ dataColored: false, color: { r: 1, g: 0, b: 0 } });
+  });
+
+  it('Refresh works the colouring out again over what is visible now, keeping ticks of values still there', async () => {
+    const { modelManager } = makeModelManager([boxModel('a', [1, 2, 3], { color: RED })]);
+    const controller = visibleSetup({ a: textColumn('a', [1, 2, 3], ['x', 'y', 'z']) }, modelManager);
+    modelManager.setHidden('a', [3], true);
+    await controller.colourBy('k', { kind: 'model', modelId: 'a' });
+    controller.setTicked(1, false); // 'y'
+    modelManager.setHidden('a', [3], false);
+    modelManager.setHidden('a', [1], true);
+    controller.markStale();
+    const before = controller.getState();
+    expect(before.phase === 'shown' && before.stale).toBe(true);
+
+    controller.refresh();
+    const s = controller.getState();
+    if (s.phase !== 'shown') throw new Error('not shown');
+    expect(s.stale).toBe(false);
+    expect(s.plan.entries.map((e) => e.label).sort()).toEqual(['y', 'z']);
+    expect(s.ticked[s.plan.entries.findIndex((e) => e.label === 'y')]).toBe(false);
+    expect(s.ticked[s.plan.entries.findIndex((e) => e.label === 'z')]).toBe(true);
+    // Hidden now: its colour was taken off.
+    expect(modelManager.getElementState('a', 1)!.dataColored).toBe(false);
+    expect(modelManager.getElementState('a', 3)!.dataColored).toBe(true);
+  });
+
+  it('Refresh of a selection keeps to the selected elements, those of them visible now', async () => {
+    const { modelManager } = makeModelManager([boxModel('a', [1, 2, 3, 4])]);
+    const controller = visibleSetup({ a: textColumn('a', [1, 2, 3, 4], ['x', 'x', 'x', 'x']) }, modelManager);
+    modelManager.setHidden('a', [2], true);
+    await controller.colourBy('k', { kind: 'selection', elements: new Map([['a', [1, 2, 3]]]) });
+    let s = controller.getState();
+    expect(s.phase === 'shown' && [s.plan.scopeSize, s.total]).toEqual([2, 3]);
+    modelManager.setHidden('a', [2], false);
+    controller.refresh();
+    s = controller.getState();
+    expect(s.phase === 'shown' && [s.plan.scopeSize, s.total]).toEqual([3, 3]);
+    // Element 4 was never selected.
+    expect(modelManager.getElementState('a', 4)!.dataColored).toBe(false);
+  });
+
+  it('nothing is recoloured until Refresh: marking stale only says so', async () => {
+    const { modelManager } = makeModelManager([boxModel('a', [1, 2])]);
+    const controller = visibleSetup({ a: textColumn('a', [1, 2], ['x', 'y']) }, modelManager);
+    await controller.colourBy('k', { kind: 'model', modelId: 'a' });
+    const plan = controller.getState().phase === 'shown' ? (controller.getState() as { plan: unknown }).plan : null;
+    modelManager.setHidden('a', [1], true);
+    controller.markStale();
+    expect((controller.getState() as { plan: unknown }).plan).toBe(plan);
+    controller.clear();
+    controller.markStale();
+    expect(controller.getState().phase).toBe('off');
+  });
+
+  it('a model switched off is not visible; elements wholly behind the section plane are not either', async () => {
+    const { modelManager } = makeModelManager([boxModel('a', [1, 2, 3])]); // boxes at x = 0, 2, 4
+    // Keep x > 3: everything at x < 3 is cut away.
+    const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), -3);
+    const visible = modelManager.visibleElements('a', plane)!;
+    expect([1, 2, 3].map(visible)).toEqual([false, false, true]);
+    // A plane through an element leaves it visible.
+    const through = modelManager.visibleElements('a', new THREE.Plane(new THREE.Vector3(1, 0, 0), -2))!;
+    expect(through(2)).toBe(true);
+    modelManager.setVisible('a', false);
+    expect(modelManager.visibleElements('a')!(3)).toBe(false);
+  });
+});
+
+describe('how many values get their own colour', () => {
+  it('every value its own colour: 100 values, 100 colours, no "other"', async () => {
+    const values = Array.from({ length: 100 }, (_, i) => `Type ${i}`);
+    const ids = values.map((_, i) => i + 1);
+    const column = textColumn('a', ids, values);
+    const { modelManager } = makeModelManager([boxModel('a', ids)]);
+    const controller = new ColourByController({ loadColumn: async () => column, paint: modelManager }, { maxValues: 12 });
+    await controller.colourBy('k', { kind: 'model', modelId: 'a' });
+    let s = controller.getState();
+    expect(s.phase === 'shown' && s.plan.entries.length).toBe(13);
+    controller.setTicked(0, false);
+    controller.setMaxValues(Infinity);
+    s = controller.getState();
+    if (s.phase !== 'shown') throw new Error('not shown');
+    expect(s.plan.entries).toHaveLength(100);
+    expect(s.plan.entries.some((e) => e.kind === 'other')).toBe(false);
+    const colours = new Set(s.plan.entries.map((e) => `${e.color.r.toFixed(3)},${e.color.g.toFixed(3)},${e.color.b.toFixed(3)}`));
+    expect(colours.size).toBe(100);
+    // The tick of a value that is still there is kept.
+    expect(s.ticked[0]).toBe(false);
+    expect(controller.getMaxValues()).toBe(Infinity);
   });
 });

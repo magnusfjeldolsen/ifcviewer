@@ -11,7 +11,7 @@ import {
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
 import type { ParameterValue } from '../src/inspector/types';
 import type { UnitRef } from '../src/inspector/units';
-import { DEFAULT_GRADIENT, NO_VALUE_COLOUR, NO_VALUE_OPACITY, hexToRgb, sampleGradient, toLinear } from '../src/viewer/colourPalettes';
+import { DEFAULT_GRADIENT, categoryColour, rgbToHex, NO_VALUE_COLOUR, NO_VALUE_OPACITY, hexToRgb, sampleGradient, toLinear } from '../src/viewer/colourPalettes';
 
 const MM: UnitRef = { key: 'LENGTHUNIT:MILLI:METRE', symbol: 'mm' };
 const M: UnitRef = { key: 'LENGTHUNIT::METRE', symbol: 'm' };
@@ -283,3 +283,44 @@ describe('colour by parameter — values that show the same', () => {
     expect(Number.isFinite(g.models[0].rgba[0])).toBe(true);
   });
 });
+describe('colour by parameter — values outside the scope', () => {
+  it('a value only elements outside the scope have is not listed', () => {
+    const column = discrete('a', [0, 1, 2], ['x', 'y', 'z']);
+    const plan = buildColourPlan('k', [{ column, rows: Int32Array.from([0, 1]) }], opts);
+    expect(plan.entries.map((e) => e.label)).toEqual(['x', 'y']);
+  });
+});
+
+describe('colours for many values', () => {
+  it('hundreds of distinct colours, none of them the selection blue', () => {
+    const hex = new Set<string>();
+    for (let i = 0; i < 300; i++) {
+      const c = categoryColour(i);
+      hex.add(rgbToHex(c));
+      const selectionLike = nearSelectionBlue(c);
+      expect(selectionLike, `colour ${i} ${rgbToHex(c)}`).toBe(false);
+    }
+    expect(hex.size).toBe(300);
+  });
+
+  it('neighbours in the list differ visibly', () => {
+    for (let i = 12; i < 200; i++) {
+      const a = categoryColour(i);
+      const b = categoryColour(i + 1);
+      const d = Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+      expect(d, `colours ${i} and ${i + 1}`).toBeGreaterThan(0.25);
+    }
+  });
+});
+/** A saturated, mid-light blue like the selection colour (#3b82f6, hue 217°). */
+function nearSelectionBlue(c: { r: number; g: number; b: number }): boolean {
+  const max = Math.max(c.r, c.g, c.b);
+  const min = Math.min(c.r, c.g, c.b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return false;
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h = max === c.r ? ((c.g - c.b) / d) % 6 : max === c.g ? (c.b - c.r) / d + 2 : (c.r - c.g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  return h >= 200 && h <= 235 && s > 0.5 && l > 0.3 && l < 0.7;
+}

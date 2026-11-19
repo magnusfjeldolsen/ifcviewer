@@ -488,6 +488,27 @@ export class ModelBatch {
   }
 
   /**
+   * True when every piece of the element lies wholly on the negative side of
+   * `plane` (what a section cut removes), judged by the pieces' bounding
+   * boxes: an element the plane passes through is not cut away.
+   */
+  isCutAway(expressId: number, plane: Readonly<THREE.Plane>): boolean {
+    const pieces = this.elements.get(expressId);
+    if (!pieces) return false;
+    const { x: nx, y: ny, z: nz } = plane.normal;
+    const b = this.pieceBox;
+    for (const p of pieces) {
+      if (this.pieceIndexCount[p] === 0) continue;
+      const o = p * 6;
+      // The box corner furthest along the normal.
+      const far =
+        nx * (nx >= 0 ? b[o + 3] : b[o]) + ny * (ny >= 0 ? b[o + 4] : b[o + 1]) + nz * (nz >= 0 ? b[o + 5] : b[o + 2]);
+      if (far + plane.constant >= 0) return false;
+    }
+    return true;
+  }
+
+  /**
    * How an element is drawn right now (read from its first piece; every
    * piece of an element is always set together), or null if it has none.
    */

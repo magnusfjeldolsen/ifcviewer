@@ -67,6 +67,35 @@ export const CATEGORY_COLOURS: readonly string[] = [
   '#f99379', // salmon
 ];
 
+/**
+ * The colour of the `i`-th distinct value: the hand-picked colours first,
+ * then as many more as wanted, spread round the colour wheel by the golden
+ * angle so each new hue lands far from the last ones, with lightness and
+ * saturation alternating so neighbours in the list differ even where hues
+ * come close. Hues near the selection blue are skipped.
+ */
+export function categoryColour(i: number): Rgb {
+  if (i < CATEGORY_COLOURS.length) return hexToRgb(CATEGORY_COLOURS[i]);
+  const n = i - CATEGORY_COLOURS.length;
+  // The selection blue is about 217°: hues are spread over the 300° of the
+  // wheel left once 195–255° is taken out.
+  let hue = (20 + n * 137.508 * (300 / 360)) % 300;
+  if (hue >= 195) hue += 60;
+  // Every third value lighter, every third darker; a slow drift on top so
+  // the hundredth value is not the twentieth again.
+  const lightness = [0.5, 0.36, 0.64][n % 3] + ((Math.floor(n / 3) % 5) - 2) * 0.025;
+  const saturation = [0.75, 0.55][n % 2];
+  return hslToRgb(hue, saturation, lightness);
+}
+
+/** HSL (hue in degrees, saturation and lightness 0..1) → sRGB. */
+export function hslToRgb(h: number, s: number, l: number): Rgb {
+  const k = (m: number): number => (m + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (m: number): number => l - a * Math.max(-1, Math.min(k(m) - 3, 9 - k(m), 1));
+  return { r: f(0), g: f(8), b: f(4) };
+}
+
 /** The values past the most common ones, sharing one colour: a light warm grey. */
 export const OTHER_COLOUR = '#bdb5ab';
 

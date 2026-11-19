@@ -7,14 +7,19 @@
  * colours — with All / None above the list. Clicking an entry's text
  * selects its elements. Clear ends the colouring.
  *
+ * Below the list: Refresh, which works the colours out again over what is
+ * visible now (marked when what can be seen has changed), and Clear. For
+ * text, a choice of how many of the most common values get a colour of
+ * their own, up to every value; for numbers, a choice of colour scale.
+ *
  * Sits at the top right, under the memory toggle, and moves left of the
  * Parameters panel while that is open (in CSS), so it covers neither the
- * panel nor the inspector. The list is never longer than the plan's
- * entries, which the plan caps (see `colourByPlan.ts`), so nothing here
- * grows with the number of elements.
+ * panel nor the inspector. However many values there are, at most
+ * `ENTRIES_SHOWN` rows are drawn; past `FILTER_FROM` a filter finds the
+ * rest, so nothing here grows with the number of elements.
  */
 
-import type { ColourByController, ColourByState, ColourScope } from '../inspector/ColourByController';
+import { DEFAULT_MAX_VALUES, type ColourByController, type ColourByState, type ColourScope } from '../inspector/ColourByController';
 import { GRADIENTS, gradientCss, rgbToHex } from '../viewer/colourPalettes';
 import { formatNumber } from '../inspector/format';
 
@@ -31,6 +36,44 @@ const FOCUS_NEIGHBOUR: Record<string, string[]> = {
   all: ['none', 'box-0'],
   none: ['all', 'box-0'],
 };
+
+/** The choices for how many values get a colour of their own. */
+export const VALUE_COUNT_CHOICES: readonly number[] = [6, 12, 24, 50, 100, Infinity];
+
+/** A legend with more entries than this gets a filter. */
+export const FILTER_FROM = 20;
+
+/** Rows drawn at once; the filter finds the rest. */
+export const ENTRIES_SHOWN = 200;
+
+const VALUE_COUNT_STORAGE = 'ifcviewer:colourValueCount';
+
+/** The count of values with their own colour chosen last, or the default. */
+export function loadColourValueCount(): number {
+  try {
+    const raw = localStorage.getItem(VALUE_COUNT_STORAGE);
+    if (raw === 'all') return Infinity;
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : DEFAULT_MAX_VALUES;
+  } catch {
+    return DEFAULT_MAX_VALUES;
+  }
+}
+
+/** Remember the chosen count for the next colouring (this browser only). */
+export function saveColourValueCount(n: number): void {
+  try {
+    localStorage.setItem(VALUE_COUNT_STORAGE, n === Infinity ? 'all' : String(n));
+  } catch {
+    // Storage blocked: the choice lasts until the page is reloaded.
+  }
+}
+
+/** "1,235 elements", or "412 of 1,235 visible" when some could not be seen. */
+export function countsText(coloured: number, total: number): string {
+  if (coloured === total) return `${counts.format(total)} element${total === 1 ? '' : 's'}`;
+  return `${counts.format(coloured)} of ${counts.format(total)} visible`;
+}
 
 /** "Whole model · Tower", or "Selection · 2 models". */
 export function scopeText(scope: ColourScope, modelName: (id: string) => string): string {
@@ -114,6 +157,7 @@ export class ColourLegend {
     // the keyboard back there when it is cleared.
     if (state.phase === 'reading' && this.phase !== 'reading' && !inLegend) {
       this.origin = active instanceof HTMLElement && active !== document.body ? active : null;
+      this.filter = '';
     }
     this.phase = state.phase;
     // The legend is rebuilt on every change; keep the keyboard where it was.
@@ -131,6 +175,8 @@ export class ColourLegend {
       const el = this.container.querySelector<HTMLElement>(`[data-focus="${key}"]`);
       if (el && !(el as HTMLButtonElement).disabled) {
         el.focus();
+        // A text box keeps typing at its end.
+        if (el instanceof HTMLInputElement && el.type === 'search') el.setSelectionRange(el.value.length, el.value.length);
         return;
       }
     }
@@ -195,7 +241,7 @@ export class ColourLegend {
   private renderShown(state: Extract<ColourByState, { phase: 'shown' }>, scopeEl: HTMLElement): void {
     const { plan, ticked, palette } = state;
     const controller = this.deps.controller;
-    scopeEl.textContent += ` · ${counts.format(plan.scopeSize)} element${plan.scopeSize === 1 ? '' : 's'}`;
+    scopeEl.textContent += ` · ${countsText(plan.scopeSize, state.total)}`;
 
     if (plan.mode === 'gradient' && plan.range) {
       const scale = document.createElement('div');
@@ -247,12 +293,70 @@ export class ColourLegend {
       select.dataset.focus = 'palette';
       select.addEventListener('change', () => controller.setPalette(select.value));
       controls.appendChild(select);
+    } else {
+      // How many values get a colour of their own; the rest share one.
+      const select = document.createElement('select');
+      select.className = 'colour-legend-palette colour-legend-count-choice';
+      select.setAttribute('aria-label', 'Values with a colour of their own');
+      select.title = 'How many of the most common values get a colour of their own; the rest share one';
+      for (const n of VALUE_COUNT_CHOICES) {
+        const opt = document.createElement('option');
+        opt.value = String(n);
+        opt.textContent = n === Infinity ? 'All values' : `${n} most common`;
+        select.appendChild(opt);
+      }
+      const current = state.maxValues;
+      if (!VALUE_COUNT_CHOICES.includes(current)) {
+        const opt = document.createElement('option');
+        opt.value = String(current);
+        opt.textContent = `${current} most common`;
+        select.appendChild(opt);
+      }
+      select.value = String(current);
+      select.dataset.focus = 'values';
+      select.addEventListener('change', () => {
+        const n = Number(select.value);
+        saveColourValueCount(n);
+        controller.setMaxValues(n);
+      });
+      controls.appendChild(select);
     }
     this.body.appendChild(controls);
 
+    // With many entries, a filter, and at most ENTRIES_SHOWN rows drawn.
+    let shownIndices = plan.entries.map((_, i) => i);
+    if (plan.entries.length > FILTER_FROM) {
+      const filter = document.createElement('input');
+      filter.type = 'search';
+      filter.className = 'colour-legend-filter';
+      filter.placeholder = `Find one of ${counts.format(plan.entries.length)} values`;
+      filter.setAttribute('aria-label', 'Find a value in the legend');
+      filter.value = this.filter;
+      filter.dataset.focus = 'filter';
+      filter.addEventListener('input', () => {
+        this.filter = filter.value;
+        this.render();
+      });
+      this.body.appendChild(filter);
+      const needle = this.filter.trim().toLowerCase();
+      if (needle) shownIndices = shownIndices.filter((i) => plan.entries[i].label.toLowerCase().includes(needle));
+    }
+    const matching = shownIndices.length;
+    shownIndices = shownIndices.slice(0, ENTRIES_SHOWN);
+    if (matching > shownIndices.length || (matching === 0 && plan.entries.length > 0)) {
+      this.body.appendChild(
+        this.status(
+          matching === 0
+            ? 'No value matches'
+            : `Showing ${counts.format(shownIndices.length)} of ${counts.format(matching)}; type to find the rest`,
+        ),
+      );
+    }
+
     const list = document.createElement('ul');
     list.className = 'colour-legend-entries';
-    plan.entries.forEach((entry, i) => {
+    for (const i of shownIndices) {
+      const entry = plan.entries[i];
       const li = document.createElement('li');
       li.className = ticked[i] ? 'colour-legend-entry' : 'colour-legend-entry off';
       li.dataset.kind = entry.kind;
@@ -277,14 +381,31 @@ export class ColourLegend {
       count.textContent = counts.format(entry.count);
       li.append(box, swatch, text, count);
       list.appendChild(li);
-    });
+    }
     this.body.appendChild(list);
 
     const footer = document.createElement('div');
     footer.className = 'colour-legend-footer';
-    footer.appendChild(this.button('Clear colours', 'Every element back to its own colour', () => controller.clear()));
+    const refresh = this.button(
+      'Refresh',
+      state.stale
+        ? 'What can be seen has changed since these colours were worked out: refresh to colour by what is visible now'
+        : 'Work the colours out again over what is visible now',
+      () => controller.refresh(),
+    );
+    refresh.dataset.focus = 'refresh';
+    refresh.classList.add('colour-legend-refresh');
+    if (state.stale) {
+      refresh.classList.add('stale');
+      refresh.setAttribute('aria-label', 'Refresh (out of date)');
+    }
+    const clear = this.button('Clear colours', 'Every element back to its own colour', () => controller.clear());
+    footer.append(refresh, clear);
     this.body.appendChild(footer);
   }
+
+  /** The legend's value filter, kept while the legend is redrawn. */
+  private filter = '';
 
   private button(label: string, title: string, onClick: () => void): HTMLButtonElement {
     const b = document.createElement('button');

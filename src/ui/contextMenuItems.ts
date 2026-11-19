@@ -56,6 +56,8 @@ export interface ContextMenuActions {
   colourBy?: () => void;
   /** End the colouring shown now. */
   clearColours?: () => void;
+  /** Work the colouring shown now out again over what is visible. */
+  refreshColours?: () => void;
 }
 
 export interface AppearanceFlags {
@@ -108,6 +110,7 @@ export function buildContextMenuItems(
   // Colour by parameter.
   if (actions.colourBy) {
     items.push({ label: 'Colour by parameter…', onClick: actions.colourBy });
+    if (flags.hasColouring && actions.refreshColours) items.push({ label: 'Refresh colours', onClick: actions.refreshColours });
     if (flags.hasColouring && actions.clearColours) items.push({ label: 'Clear colours', onClick: actions.clearColours });
     items.push({ separator: true });
   }
@@ -144,6 +147,7 @@ function buildRecoveryOnly(flags: AppearanceFlags, actions: ContextMenuActions):
     items.push({ label: 'Clear transparency', onClick: actions.clearTransparency });
   }
   if (colouring) {
+    if (actions.refreshColours) items.push({ label: 'Refresh colours', onClick: actions.refreshColours });
     items.push({ label: 'Clear colours', onClick: actions.clearColours });
   }
   return items;

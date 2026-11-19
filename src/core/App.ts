@@ -42,7 +42,7 @@ import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
 import { ColourByController, colourScopeFor, isColouringBy, type ColourScope } from '../inspector/ColourByController';
-import { ColourLegend } from '../ui/ColourLegend';
+import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
@@ -402,6 +402,7 @@ ${key}`. */
         // measurement spanning two models hides while either is hidden.
         this.measurementTool.setModelVisible(id, visible);
         this.positionTool.setModelVisible(id, visible);
+        this.colourBy?.markStale();
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -721,7 +722,16 @@ ${parameter.key}`);
       paint: this.modelManager,
       select: (elements) =>
         this.selectionManager.selectExactly(elements.map((e) => ({ ...e, ifcClass: '', ifcTypeCode: 0 }))),
-    });
+      // Only what can be seen is coloured: not hidden, its model shown, and
+      // not wholly behind the section plane.
+      visibility: (modelId) => this.modelManager.visibleElements(modelId, this.clippingTool.getClipPlane()),
+    }, { maxValues: loadColourValueCount() });
+    // Anything that changes what can be seen may leave the colours out of
+    // date: the legend says so, and Refresh works them out again.
+    const stale = (): void => this.colourBy.markStale();
+    this.appearanceManager.onChange(stale);
+    this.clippingTool.onStateChange(stale);
+    this.clippingTool.onPlaneMoved(stale);
     // Appended after the Parameters panel: the stylesheet moves the legend
     // left of the panel while the panel is open (a sibling selector).
     this.colourLegend = new ColourLegend(appEl, {
@@ -1580,6 +1590,7 @@ ${parameter.key}`);
         },
         colourBy: () => void this.openColourPicker(x, y, state),
         clearColours: () => this.colourBy.clear(),
+        refreshColours: () => this.colourBy.refresh(),
       },
     );
 

@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ColourByController } from '../src/inspector/ColourByController';
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
-import { ColourLegend, scopeText } from '../src/ui/ColourLegend';
+import { ColourLegend, ENTRIES_SHOWN, countsText, loadColourValueCount, scopeText } from '../src/ui/ColourLegend';
 import { ParameterPicker, filterPickerRows } from '../src/ui/ParameterPicker';
 import { ParameterList } from '../src/ui/ParameterList';
 import { buildContextMenuItems, type ContextMenuActions } from '../src/ui/contextMenuItems';
@@ -71,8 +71,9 @@ describe('colour legend', () => {
       ['EI 30', '1'],
       ['No value', '1'],
     ]);
-    // Text has no scale to choose.
-    expect(el.querySelector('.colour-legend-palette')).toBeNull();
+    // Text has no scale to choose; it has a choice of how many values get their own colour.
+    expect(el.querySelector('select[aria-label="Colour scale"]')).toBeNull();
+    expect(el.querySelector('.colour-legend-count-choice')).not.toBeNull();
   });
 
   it('ticks and unticks entries, all / none, and repaints each time', async () => {
@@ -362,5 +363,115 @@ describe('parameter picker for screen readers and the keyboard', () => {
     expect(document.activeElement).not.toBe(before);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     expect(document.activeElement).toBe(before);
+  });
+});
+describe('colour legend: how many values, many values, refresh', () => {
+  beforeEach(() => {
+    try {
+      localStorage.clear();
+    } catch {
+      // no storage
+    }
+  });
+
+  function manyValues(n: number): ParameterColumn {
+    return textColumn('m', Array.from({ length: n * 2 }, (_, i) => `Type ${String(i % n).padStart(4, '0')}`));
+  }
+
+  it('chooses how many values get their own colour, and remembers it', async () => {
+    const { controller } = makeController(manyValues(30));
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    const el = legend.getContainer();
+    expect(el.querySelectorAll('.colour-legend-entry')).toHaveLength(13); // 12 + other
+    const choice = el.querySelector<HTMLSelectElement>('.colour-legend-count-choice')!;
+    choice.value = 'Infinity';
+    choice.dispatchEvent(new Event('change'));
+    expect(el.querySelectorAll('.colour-legend-entry')).toHaveLength(30);
+    expect(loadColourValueCount()).toBe(Infinity);
+    choice.value = '6';
+    el.querySelector<HTMLSelectElement>('.colour-legend-count-choice')!.value = '6';
+    el.querySelector<HTMLSelectElement>('.colour-legend-count-choice')!.dispatchEvent(new Event('change'));
+    expect(loadColourValueCount()).toBe(6);
+  });
+
+  it('with a thousand values: draws at most a page of rows, and a filter finds the rest', async () => {
+    const { controller } = makeController(manyValues(1000));
+    controller.setMaxValues(Infinity);
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    const el = legend.getContainer();
+    expect(el.querySelectorAll('.colour-legend-entry')).toHaveLength(ENTRIES_SHOWN);
+    expect(el.querySelector('.colour-legend-status')!.textContent).toMatch(/Showing 200 of 1,000/);
+    const filter = el.querySelector<HTMLInputElement>('.colour-legend-filter')!;
+    filter.focus();
+    filter.value = '0999';
+    filter.dispatchEvent(new Event('input'));
+    const rows = el.querySelectorAll('.colour-legend-entry');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].querySelector('.colour-legend-label')!.textContent).toBe('Type 0999');
+    // Typing keeps the keyboard in the filter.
+    expect(document.activeElement).toBe(el.querySelector('.colour-legend-filter'));
+    // Ticking the row found ticks that value, not the first row's.
+    const box = rows[0].querySelector<HTMLInputElement>('input')!;
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    const s = controller.getState();
+    if (s.phase !== 'shown') throw new Error('not shown');
+    expect(s.ticked[s.plan.entries.findIndex((e) => e.label === 'Type 0999')]).toBe(false);
+    expect(s.ticked.filter((t) => !t)).toHaveLength(1);
+  });
+
+  it('a thousand-value legend is drawn quickly', async () => {
+    const { controller } = makeController(manyValues(1000));
+    controller.setMaxValues(Infinity);
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    const t0 = performance.now();
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    controller.setTicked(5, false);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(legend.isOpen()).toBe(true);
+  });
+
+  it('says how many of the elements were visible, and marks Refresh when out of date', async () => {
+    const column = textColumn('m', ['a', 'b', 'a', 'b']);
+    const paint = { setDataColors: vi.fn(), clearDataColors: vi.fn() };
+    let hidden = new Set([4]);
+    const controller = new ColourByController({
+      loadColumn: async () => column,
+      paint,
+      visibility: () => (id) => !hidden.has(id),
+    });
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    const el = legend.getContainer();
+    expect(el.querySelector('.colour-legend-scope')!.textContent).toBe('Whole model · Tower · 3 of 4 visible');
+    const refresh = (): HTMLButtonElement => el.querySelector<HTMLButtonElement>('.colour-legend-refresh')!;
+    expect(refresh().classList.contains('stale')).toBe(false);
+    hidden = new Set();
+    controller.markStale();
+    expect(refresh().classList.contains('stale')).toBe(true);
+    refresh().click();
+    expect(el.querySelector('.colour-legend-scope')!.textContent).toBe('Whole model · Tower · 4 elements');
+    expect(refresh().classList.contains('stale')).toBe(false);
+  });
+
+  it('counts text', () => {
+    expect(countsText(1235, 1235)).toBe('1,235 elements');
+    expect(countsText(412, 1235)).toBe('412 of 1,235 visible');
+  });
+
+  it('the right-click menu offers Refresh colours while a colouring is shown', () => {
+    const calls: string[] = [];
+    const noop = () => {};
+    const actions = {
+      hide: noop, isolate: noop, showAll: noop, transparent: noop, opaque: noop, clearTransparency: noop,
+      addToBasket: noop, selectSimilarCategory: noop, selectSimilarType: noop,
+      colourBy: noop, clearColours: noop, refreshColours: () => void calls.push('refresh'),
+    };
+    const items = buildContextMenuItems({ kind: 'none' }, { hasHidden: false, hasTransparent: false, hasColouring: true }, actions)!;
+    expect(items.map((i) => i.label)).toEqual(['Refresh colours', 'Clear colours']);
+    items[0].onClick!();
+    expect(calls).toEqual(['refresh']);
   });
 });

@@ -2449,3 +2449,35 @@ html, body {
     max-height: calc((100% - 56px - 40px - var(--params-clearance, 44px)) * 0.55 - 12px);
   }
 }
+
+/* Refresh, left of Clear; a dot when what can be seen has changed since the
+   colours were worked out. */
+.colour-legend-footer {
+  justify-content: space-between;
+}
+
+.colour-legend-refresh.stale {
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.colour-legend-refresh.stale::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #f59e0b;
+  vertical-align: 1px;
+}
+
+/* With many values: find one. */
+.colour-legend-filter {
+  margin: 4px 10px 2px;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  flex-shrink: 0;
+}

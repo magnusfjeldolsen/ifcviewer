@@ -171,6 +171,19 @@ export class ModelManager {
     return this.models.get(modelId)?.batch.elementState(expressId) ?? null;
   }
 
+  /**
+   * Which elements of a model can be seen: the model is shown, the element
+   * is not hidden, and it is not wholly cut away by `clipPlane` (judged by
+   * bounding boxes). Null when the model is not loaded.
+   */
+  visibleElements(modelId: string, clipPlane: Readonly<THREE.Plane> | null = null): ((expressId: number) => boolean) | null {
+    const entry = this.models.get(modelId);
+    if (!entry) return null;
+    if (!entry.visible) return () => false;
+    const batch = entry.batch;
+    return (expressId) => !batch.isHidden(expressId) && !(clipPlane && batch.isCutAway(expressId, clipPlane));
+  }
+
   /** Hide or show elements of one model. */
   setHidden(modelId: string, expressIds: Iterable<number>, hidden: boolean): void {
     this.apply(modelId, (b) => b.setHidden(expressIds, hidden));

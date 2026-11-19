@@ -20,6 +20,15 @@
  *
  * Unticking a legend entry gives its elements back their own colours (they
  * are not hidden): what is left coloured is what is ticked.
+ *
+ * Only what can be seen when the colouring is worked out is coloured:
+ * hidden elements, elements of a hidden model and elements wholly cut away
+ * by the section plane are not counted, do not set a scale's ends and do not
+ * take one of the colours. Something shown later keeps its own colour.
+ * `refresh` works the same colouring out again over what is visible then
+ * (for a selection: the same selected elements, those of them visible now);
+ * `markStale` only says it may be out of date, so nothing recolours by
+ * surprise.
  */
 
 import type { ParameterColumn } from './parameterColumn';
@@ -71,7 +80,20 @@ export function isColouringBy(state: ColourByState, key: string, modelId: string
 export type ColourByState =
   | { phase: 'off' }
   | { phase: 'reading'; key: string; scope: ColourScope; done: number; total: number }
-  | { phase: 'shown'; key: string; scope: ColourScope; plan: ColourPlan; ticked: boolean[]; palette: GradientPalette }
+  | {
+      phase: 'shown';
+      key: string;
+      scope: ColourScope;
+      plan: ColourPlan;
+      ticked: boolean[];
+      palette: GradientPalette;
+      /** How many values get a colour of their own (Infinity: all). */
+      maxValues: number;
+      /** Elements in the scope, visible or not; \plan.scopeSize\ is those coloured. */
+      total: number;
+      /** What can be seen has changed since the colours were worked out. */
+      stale: boolean;
+    }
   | { phase: 'failed'; key: string; scope: ColourScope; message: string };
 
 export interface ColourByDeps {
@@ -87,6 +109,29 @@ export interface ColourByDeps {
   };
   /** Select exactly these elements (one undo step). */
   select?(elements: { modelId: string; expressId: number }[]): void;
+  /**
+   * Which of a model's elements can be seen now; null or absent for all.
+   * Only these are coloured, counted, and set a scale's ends.
+   */
+  visibility?(modelId: string): ((expressId: number) => boolean) | null;
+}
+
+/** Values that get a colour of their own, unless told otherwise. */
+export const DEFAULT_MAX_VALUES = 12;
+
+/**
+ * Ticks carried from one plan to the next (another count of values, another
+ * scale, a refresh): an entry keeps its tick when the new plan has an entry
+ * with the same text; new entries start ticked.
+ */
+export function carryTicks(before: ColourPlan, ticked: readonly boolean[], after: ColourPlan): boolean[] {
+  const was = new Map<string, boolean>();
+  before.entries.forEach((e, i) => was.set(tickKey(e), ticked[i]));
+  return after.entries.map((e) => was.get(tickKey(e)) ?? true);
+}
+
+function tickKey(e: { kind: string; label: string }): string {
+  return e.kind === 'other' || e.kind === 'none' ? e.kind : `value:${e.label}`;
 }
 
 /** Timings of the last apply and clear, in ms, for the benchmark. */
@@ -98,8 +143,10 @@ export interface ColourByTimings {
 
 export class ColourByController {
   private state: ColourByState = { phase: 'off' };
+  /** Per model in the scope: its value column, and the scope's rows of it (null: all). */
   private inputs: PlanModelInput[] = [];
   private palette: GradientPalette = DEFAULT_GRADIENT;
+  private maxValues: number;
   /** Bumped by every start and clear: replies for an earlier colouring are dropped. */
   private generation = 0;
   private listeners: Array<() => void> = [];
@@ -107,7 +154,12 @@ export class ColourByController {
   private scratch = new Map<string, Float32Array>();
   readonly timings: ColourByTimings = { planMs: 0, paintMs: 0, clearMs: 0 };
 
-  constructor(private readonly deps: ColourByDeps) {}
+  constructor(
+    private readonly deps: ColourByDeps,
+    options: { maxValues?: number } = {},
+  ) {
+    this.maxValues = options.maxValues ?? DEFAULT_MAX_VALUES;
+  }
 
   getState(): ColourByState {
     return this.state;
@@ -123,6 +175,11 @@ export class ColourByController {
     return this.state.phase === 'off' ? null : this.state.key;
   }
 
+  /** How many values get a colour of their own (Infinity: all). */
+  getMaxValues(): number {
+    return this.maxValues;
+  }
+
   onChange(listener: () => void): () => void {
     this.listeners.push(listener);
     return () => {
@@ -131,8 +188,9 @@ export class ColourByController {
   }
 
   /**
-   * Colour by `key` over `scope`, ending any colouring shown now. Resolves
-   * once the colours are on screen, or the reading failed or was overtaken.
+   * Colour by `key` over the visible elements of `scope`, ending any
+   * colouring shown now. Resolves once the colours are on screen, or the
+   * reading failed or was overtaken.
    */
   async colourBy(key: string, scope: ColourScope): Promise<void> {
     this.unpaint();
@@ -170,6 +228,31 @@ export class ColourByController {
     this.show(key, scope, null);
   }
 
+  /**
+   * Work the same colouring out again over what is visible now: same
+   * parameter, same elements, scale and count of values; an entry whose
+   * value is still there keeps its tick. The value columns are already
+   * read, so this is as quick as the first colouring's last step.
+   */
+  refresh(): void {
+    const s = this.state;
+    if (s.phase !== 'shown') return;
+    // Elements no longer visible lose their colour; the rest are repainted.
+    this.unpaint();
+    this.show(s.key, s.scope, s);
+  }
+
+  /**
+   * What can be seen has changed (hidden, shown, isolated, cut): the colours
+   * may be out of date. Only says so; `refresh` recolours.
+   */
+  markStale(): void {
+    const s = this.state;
+    if (s.phase !== 'shown' || s.stale) return;
+    this.state = { ...s, stale: true };
+    this.emit();
+  }
+
   /** Tick or untick one legend entry. */
   setTicked(entry: number, on: boolean): void {
     if (this.state.phase !== 'shown' || this.state.ticked[entry] === on) return;
@@ -187,9 +270,18 @@ export class ColourByController {
   /** Change the colour scale of a numeric colouring. */
   setPalette(id: string): void {
     this.palette = gradientById(id);
-    if (this.state.phase !== 'shown') return;
-    const { key, scope, ticked } = this.state;
-    this.show(key, scope, ticked);
+    const s = this.state;
+    if (s.phase === 'shown') this.show(s.key, s.scope, s, false);
+  }
+
+  /**
+   * How many of the most common values get a colour of their own; the rest
+   * share one. Infinity gives every value its own colour.
+   */
+  setMaxValues(n: number): void {
+    this.maxValues = n;
+    const s = this.state;
+    if (s.phase === 'shown') this.show(s.key, s.scope, s, false);
   }
 
   /** Select the elements of one legend entry. */
@@ -233,22 +325,73 @@ export class ColourByController {
     // Recount without painting the closed model: the others are repainted
     // with the new plan, which may differ (a range can move).
     for (const p of s.plan.models) if (p.modelId !== modelId) this.deps.paint.clearDataColors(p.modelId);
-    this.show(s.key, { kind: 'selection', elements }, null);
+    this.show(s.key, { kind: 'selection', elements }, s);
   }
 
   // ── internals ──────────────────────────────────────────────
 
-  /** Build the plan for the current inputs and paint it. */
-  private show(key: string, scope: ColourScope, ticked: boolean[] | null): void {
+  /** The scope's rows that are visible now, and how many rows the scope has in all. */
+  private visibleInputs(): { inputs: PlanModelInput[]; total: number } {
+    let total = 0;
+    const inputs = this.inputs.map((input) => {
+      const { column, rows } = input;
+      const n = rows ? rows.length : column.ids.length;
+      total += n;
+      const visible = this.deps.visibility?.(column.modelId);
+      if (!visible) return input;
+      const out = new Int32Array(n);
+      let k = 0;
+      for (let i = 0; i < n; i++) {
+        const row = rows ? rows[i] : i;
+        if (visible(column.ids[row])) out[k++] = row;
+      }
+      return k === n ? input : { column, rows: out.slice(0, k) };
+    });
+    return { inputs, total };
+  }
+
+  /**
+   * Build the plan over what is visible and paint it. `previous` carries its
+   * ticks over; `revisit` false keeps the elements as they are (only the
+   * colours change: another scale or count of values).
+   */
+  private show(
+    key: string,
+    scope: ColourScope,
+    previous: Extract<ColourByState, { phase: 'shown' }> | null,
+    revisit = true,
+  ): void {
     const t0 = performance.now();
-    const plan = buildColourPlan(key, this.inputs, { palette: this.palette });
+    let inputs: PlanModelInput[];
+    let total: number;
+    if (revisit || !previous) {
+      ({ inputs, total } = this.visibleInputs());
+      this.shownInputs = inputs;
+    } else {
+      inputs = this.shownInputs;
+      total = previous.total;
+    }
+    const plan = buildColourPlan(key, inputs, { palette: this.palette, maxCategories: this.maxValues });
     const t1 = performance.now();
     this.timings.planMs = t1 - t0;
     measure('colour-by: plan', t0, t1);
-    const keep = ticked && ticked.length === plan.entries.length ? ticked : plan.entries.map(() => true);
-    this.state = { phase: 'shown', key, scope, plan, ticked: keep, palette: this.palette };
+    const ticked = previous ? carryTicks(previous.plan, previous.ticked, plan) : plan.entries.map(() => true);
+    this.state = {
+      phase: 'shown',
+      key,
+      scope,
+      plan,
+      ticked,
+      palette: this.palette,
+      maxValues: this.maxValues,
+      total,
+      stale: revisit ? false : (previous?.stale ?? false),
+    };
     this.repaint();
   }
+
+  /** The inputs the shown plan was built from (the visible rows). */
+  private shownInputs: PlanModelInput[] = [];
 
   /** Paint the shown plan, entries that are not ticked in their own colours. */
   private repaint(): void {

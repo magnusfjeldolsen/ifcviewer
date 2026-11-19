@@ -42,6 +42,7 @@ import { isNotStated, type UnitRef } from './units';
 import type { ParameterValue } from './types';
 import {
   CATEGORY_COLOURS,
+  categoryColour,
   NO_VALUE_COLOUR,
   NO_VALUE_OPACITY,
   OTHER_COLOUR,
@@ -71,7 +72,7 @@ export interface ModelPaint {
   modelId: string;
   ids: Int32Array;
   /** Index into `ColourPlan.entries`. */
-  entry: Uint8Array;
+  entry: Uint32Array;
   /** Linear RGBA, four per element (alpha below 1 would ghost it; see NO_VALUE_OPACITY). */
   rgba: Float32Array;
 }
@@ -231,7 +232,7 @@ function paintsFor(inputs: readonly PlanModelInput[]): ModelPaint[] {
     const { rows, column } = input;
     if (rows) for (let i = 0; i < n; i++) ids[i] = column.ids[rows[i]];
     else ids.set(column.ids);
-    return { modelId: column.modelId, ids, entry: new Uint8Array(n), rgba: new Float32Array(n * 4) };
+    return { modelId: column.modelId, ids, entry: new Uint32Array(n), rgba: new Float32Array(n * 4) };
   });
 }
 
@@ -439,12 +440,14 @@ function categoriesPlan(
   // order is the same every time.
   const order = labels
     .map((_, i) => i)
+    // A dictionary value no element in the scope has is not a value here.
+    .filter((i) => counts[i] > 0)
     .sort((a, b) => counts[b] - counts[a] || (labels[a] < labels[b] ? -1 : labels[a] > labels[b] ? 1 : a - b));
   const coloured = order.length > maxCategories ? order.slice(0, maxCategories) : order;
   const entryOf = new Int32Array(labels.length).fill(-1);
   const entries: LegendEntry[] = coloured.map((cat, i) => {
     entryOf[cat] = i;
-    return { label: labels[cat], color: hexToRgb(CATEGORY_COLOURS[i % CATEGORY_COLOURS.length]), count: counts[cat], kind: 'value' };
+    return { label: labels[cat], color: categoryColour(i), count: counts[cat], kind: 'value' };
   });
   let note: string | undefined;
   if (order.length > coloured.length) {
