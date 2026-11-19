@@ -2431,3 +2431,21 @@ html, body {
 .colour-legend-entry[data-kind='none'] .colour-legend-swatch {
   border: 1px dashed #6b7280;
 }
+
+/* Below about 960 px there is no room for the legend between the inspector
+   (left) and the Parameters panel (right). The two then share the right
+   edge: the panel keeps the top part, the legend docks under it, above the
+   action tray, at the panel's width. */
+@media (max-width: 960px) {
+  .params-panel:not(.hidden) ~ .colour-legend {
+    top: auto;
+    right: 12px;
+    bottom: calc(40px + var(--legend-clearance, 44px) + 6px);
+    width: 340px;
+    max-height: calc((100% - 56px - 40px - var(--legend-clearance, 44px)) * 0.45);
+  }
+
+  #app:has(.colour-legend:not(.hidden)) .params-panel {
+    max-height: calc((100% - 56px - 40px - var(--params-clearance, 44px)) * 0.55 - 12px);
+  }
+}
