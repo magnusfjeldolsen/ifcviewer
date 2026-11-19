@@ -15,7 +15,7 @@ import {
   fetchElementProperties,
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
-import { buildUnitTable } from '../src/inspector/format';
+import { ModelUnits } from '../src/inspector/units';
 
 /** What a minified build turns `class IfcSlab` into. */
 class lg {
@@ -89,7 +89,7 @@ describe('fetchElementProperties — IfcClass', () => {
       },
     };
     const props = await fetchElementProperties(
-      api, 0, 'm', 1, buildUnitTable([]), undefined, createIfcClassNamer(fakeApi),
+      api, 0, 'm', 1, ModelUnits.none(), undefined, createIfcClassNamer(fakeApi),
     );
     expect(props.identity.ifcClass).toBe('IfcSlab');
   });

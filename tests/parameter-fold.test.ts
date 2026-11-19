@@ -116,12 +116,52 @@ describe('ParameterFold', () => {
     expect(p.unitsDiffer).toBeUndefined();
   });
 
-  it('notes when the unit differs between elements', () => {
+  it('notes when the unit differs between elements, and counts each unit', () => {
     const fold = new ParameterFold();
-    fold.add(props([row('Q.L', single(1), { unit: 'mm' })]));
-    fold.add(props([row('Q.L', single(2), { unit: 'm' })]));
+    fold.add(props([row('Q.L', single(1), { unit: 'mm', unitKey: 'si:mm' })]));
+    fold.add(props([row('Q.L', single(2), { unit: 'm', unitKey: 'si:m' })]));
+    fold.add(props([row('Q.L', single(3), { unit: 'm', unitKey: 'si:m' })]));
+    const [p] = fold.result('m', 3).parameters;
+    expect(p.unitsDiffer).toBe(true);
+    // No single unit to show when they differ.
+    expect(p.unit).toBeUndefined();
+    expect(p.units).toEqual([
+      { key: 'si:m', symbol: 'm', count: 2 },
+      { key: 'si:mm', symbol: 'mm', count: 1 },
+    ]);
+  });
+
+  it('tells units apart by key, not by symbol', () => {
+    const fold = new ParameterFold();
+    fold.add(props([row('Q.L', single(1), { unit: 'ft', unitKey: 'conv:foot*0.3048 si:m' })]));
+    fold.add(props([row('Q.L', single(2), { unit: 'ft', unitKey: 'conv:foot*0.3048006 si:m' })]));
+    expect(fold.result('m', 2).parameters[0].unitsDiffer).toBe(true);
+  });
+
+  it('keeps a unit the model does not state apart from a stated one', () => {
+    const fold = new ParameterFold();
+    fold.add(props([row('Q.T', single(1), { unitKey: '?TIMEUNIT' })]));
+    fold.add(props([row('Q.T', single(2), { unitKey: '?TIMEUNIT' })]));
     const [p] = fold.result('m', 2).parameters;
-    expect(p).toMatchObject({ unit: 'mm', unitsDiffer: true });
+    expect(p.units).toEqual([{ key: '?TIMEUNIT', symbol: '', count: 2 }]);
+    expect(p.unit).toBeUndefined();
+    expect(p.unitsDiffer).toBeUndefined();
+  });
+
+  it('counts units over numbers only: text has no unit', () => {
+    const fold = new ParameterFold();
+    fold.add(props([row('P.X', single('a'))]));
+    fold.add(props([row('P.X', single(2), { unit: 'mm', unitKey: 'si:mm' })]));
+    const [p] = fold.result('m', 2).parameters;
+    expect(p.kind).toBe('mixed');
+    expect(p.units).toEqual([{ key: 'si:mm', symbol: 'mm', count: 1 }]);
+    expect(fold.result('m', 2).parameters.every((x) => x.unitsDiffer === undefined)).toBe(true);
+  });
+
+  it('has no units for a text parameter', () => {
+    const fold = new ParameterFold();
+    fold.add(props([row('P.X', single('a'))]));
+    expect(fold.result('m', 1).parameters[0].units).toBeUndefined();
   });
 
   it('lists distinct values most common first, up to the cap', () => {

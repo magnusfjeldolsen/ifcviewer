@@ -41,7 +41,9 @@ import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
-import type { ParameterValue } from '../inspector/types';
+import type { ParameterSummary, ParameterValue } from '../inspector/types';
+import type { UnitRef } from '../inspector/units';
+import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
 import { ContextMenu } from '../ui/ContextMenu';
@@ -180,6 +182,9 @@ export class App {
   private selectionBasket: SelectionBasket;
   private selectionBasketPanel!: SelectionBasketPanel;
   private parametersPanel!: ParametersPanel;
+  /** Columns asked for because their parameter is open: `${modelId}
+${key}`. */
+  private preparedColumns = new Set<string>();
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -654,17 +659,37 @@ export class App {
         );
       },
       isLoading: () => this.loadGate.busy,
+      // Values and selection both read the parameter's value column: built
+      // once in the worker (in the background, when the row is opened) and
+      // then answered on this thread without asking the worker again.
       loadValues: async (modelId, key, onProgress) => {
         await this.loadGate.idle();
-        return this.propertyRepository.parameterValues(
-          modelId,
-          this.modelManager.elementIds(modelId),
-          key,
-          onProgress,
-        );
+        return columnValueCounts(await this.propertyRepository.getColumn(modelId, key, onProgress));
       },
-      selectValue: (modelId, parameter, value, additive) =>
-        void this.selectParameterValue(modelId, parameter.key, value, additive),
+      selectValue: (modelId, parameter, value, additive, unit) =>
+        void this.selectParameterValue(modelId, parameter, value, additive, unit),
+      // Opening a parameter builds its column in case a value is picked;
+      // closing it again (or opening another) gives that build up, so
+      // browsing the list never leaves scans running that nobody needs.
+      prepare: (modelId, parameter) => {
+        const wanted = `${modelId}
+${parameter.key}`;
+        this.preparedColumns.add(wanted);
+        void this.loadGate
+          .idle()
+          .then(() => {
+            // Closed again while a load was running: never started.
+            if (!this.preparedColumns.has(wanted)) return;
+            return this.propertyRepository.getColumn(modelId, parameter.key);
+          })
+          // Given up, or failed: picking a value asks again and reports a failure then.
+          .catch(() => {});
+      },
+      release: (modelId, parameter) => {
+        this.preparedColumns.delete(`${modelId}
+${parameter.key}`);
+        this.propertyRepository.releaseColumn(modelId, parameter.key);
+      },
     });
 
     // Persist the basket on every content change (debounced via the same
@@ -1369,11 +1394,13 @@ export class App {
   }
 
   /**
-   * The Parameters list's "select the elements with this value": the same
-   * worker predicate and bulk read as select-similar (`findMatching`), with
-   * the value compared the way the list counted it and the elements the
-   * viewer draws as candidates — so the count shown next to the value is the
-   * number selected. Like select-similar, hidden elements are selected too.
+   * The Parameters list's "select the elements with this value", read from
+   * the parameter's value column: the elements of the scope the list
+   * counted whose value is `value`, compared the way the list counted it —
+   * so the count shown next to the value is the number selected. The column
+   * is built once (usually already, when the row was opened); every later
+   * pick is a scan of a typed array on this thread, with the worker free.
+   * Like select-similar, hidden elements are selected too.
    *
    * `additive` (Ctrl/Shift) adds to the selection through the ordinary
    * `applyMany('add')`, which keeps the single-model lock; otherwise the
@@ -1381,22 +1408,30 @@ export class App {
    */
   private async selectParameterValue(
     modelId: string,
-    key: string,
+    parameter: ParameterSummary,
     value: ParameterValue,
     additive: boolean,
+    /** For a mixed-unit parameter: the unit of the value picked. Only values in it are selected. */
+    valueUnit?: UnitRef,
   ): Promise<void> {
+    const key = parameter.key;
+    // An inspector reduction for the previous selection would only hold up
+    // the column behind it in the worker's queue.
     this.propertyRepository.cancelBulk();
-    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}` };
+    const symbol = valueUnit ? valueUnit.symbol : parameter.unit;
+    const unit = typeof value === 'number' && symbol ? ` ${symbol}` : '';
+    const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}` };
     this.setStatus(`Finding ${query.label}…`);
     try {
-      const ids = await this.propertyRepository.findMatching(
+      // Urgent: a column built in case goes ahead of any other background
+      // work now that someone is waiting on it, and is no longer given up.
+      const column = await this.propertyRepository.getColumn(
         modelId,
-        null,
-        { path: key },
-        { kind: 'parameter-value', value },
+        key,
         (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
-        this.modelManager.elementIds(modelId),
+        { urgent: true },
       );
+      const ids = columnIdsWithValue(column, value, valueUnit?.key);
       // The class of each match is not known here: the inspector fills it in,
       // as it does for an all-products select-similar.
       const identities = ids.map((expressId) => ({ modelId, expressId, ifcClass: '', ifcTypeCode: 0 }));

@@ -10,6 +10,9 @@
  * Each row says what the parameter is (its path), how many of the scope's
  * elements carry it ("412 of 1,235"), what kind of values it holds, its
  * unit, and either its numeric range or how many distinct values it has.
+ * The unit is the one the model states, "unit not stated" when it states
+ * none, or "mixed units" when the values are in more than one: an opened
+ * row then says which units and that the values are not added up.
  * Opening a row lists its values with element counts, most common first;
  * picking a value hands it to `onPickValue`.
  *
@@ -18,6 +21,7 @@
  */
 
 import { formatNumber } from '../inspector/format';
+import { canSum, isNotStated, sumVerdictText, unitLabel, type UnitRef } from '../inspector/units';
 import type { ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 
@@ -38,8 +42,23 @@ export interface ParameterListOptions {
    * its values are not available.
    */
   loadValues?(key: string, onProgress: (done: number, total: number) => void): Promise<ValueCount[]>;
-  /** A value was picked. `additive` when Ctrl, Shift or Cmd was held. */
-  onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
+  /**
+   * A value was picked. `additive` when Ctrl, Shift or Cmd was held. `unit`
+   * is set for a parameter whose numbers are in more than one unit: the
+   * value picked is the value in that unit only.
+   */
+  onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean, unit?: UnitRef): void;
+  /**
+   * A row was opened: a value is likely to be picked next, so whatever
+   * picking needs can start getting ready.
+   */
+  onOpen?(parameter: ParameterSummary): void;
+  /**
+   * The open row closed: by a second click, by another row opening, or by
+   * the list being given another model's data or none. Whatever `onOpen`
+   * got ready for it can be given up. `modelId` is the model it belonged to.
+   */
+  onClose?(parameter: ParameterSummary, modelId: string): void;
 }
 
 /** "412 of 1,235". */
@@ -58,9 +77,15 @@ export function kindText(p: ParameterSummary): string {
   return KIND_TEXT[p.kind];
 }
 
-/** The unit as the inspector shows it, or "mixed units" when elements differ. */
+/**
+ * The unit of a parameter's numbers: its symbol, "unit not stated" when the
+ * model gives none, "mixed units" when they are in more than one, and
+ * nothing for text or plain numbers.
+ */
 export function unitText(p: ParameterSummary): string {
   if (p.unitsDiffer) return 'mixed units';
+  const only = p.units?.length === 1 ? p.units[0] : undefined;
+  if (only && isNotStated(only.key)) return 'unit not stated';
   return p.unit ?? '';
 }
 
@@ -79,6 +104,8 @@ export function spreadText(p: ParameterSummary): string {
   if (p.uniquePerElement) return 'unique per element';
   if (p.kind === 'numeric' && p.numeric) {
     const { min, max } = p.numeric;
+    // The same number in different units is not one value.
+    if (min === max && p.unitsDiffer) return `${formatNumber(min)} in ${p.units?.length ?? 2} units`;
     return min === max ? `all ${formatNumber(min)}` : `${formatNumber(min)} – ${formatNumber(max)}`;
   }
   if (p.distinct === null) return 'more than 200 values';
@@ -195,6 +222,7 @@ export class ParameterList {
    */
   setData(data: ModelParameters | null): void {
     if (data?.modelId !== this.data?.modelId || data === null) {
+      this.closed(this.openKey);
       this.openKey = null;
       this.valueFilter = '';
       this.fetched.clear();
@@ -221,15 +249,27 @@ export class ParameterList {
   /** Open one row (or close all with null), as a click on its header does. */
   open(key: string | null): void {
     const previous = this.openKey;
+    if (previous !== key) this.closed(previous);
     this.openKey = key;
     this.valueFilter = '';
     this.refreshOpen = null;
     if (previous !== null) this.rebuildRow(previous);
-    if (key !== null) this.rebuildRow(key);
+    if (key !== null) {
+      this.rebuildRow(key);
+      const p = this.data?.parameters.find((x) => x.key === key);
+      if (p) this.options.onOpen?.(p);
+    }
   }
 
   openRow(): string | null {
     return this.openKey;
+  }
+
+  /** Tell `onClose` that row `key` (of the data shown now) is no longer open. */
+  private closed(key: string | null): void {
+    if (key === null || !this.data) return;
+    const p = this.data.parameters.find((x) => x.key === key);
+    if (p) this.options.onClose?.(p, this.data.modelId);
   }
 
   getContainer(): HTMLElement {
@@ -349,6 +389,14 @@ export class ParameterList {
       body.appendChild(range);
     }
 
+    const unitNote = unitNoteText(p);
+    if (unitNote) {
+      const note = document.createElement('div');
+      note.className = 'param-units-note';
+      note.textContent = unitNote;
+      body.appendChild(note);
+    }
+
     if (p.uniquePerElement) {
       const note = document.createElement('div');
       note.className = 'param-values-note';
@@ -419,7 +467,7 @@ export class ParameterList {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'param-value';
-        const text = `${valueText(v.value)}${typeof v.value === 'number' ? unit : ''}`;
+        const text = `${valueText(v.value)}${v.unit ? entryUnitText(v.unit) : typeof v.value === 'number' ? unit : ''}`;
         b.title = this.options.onPickValue
           ? `${text}: select the ${counts.format(v.count)} element${v.count === 1 ? '' : 's'} (Ctrl or Shift adds to the selection)`
           : text;
@@ -433,7 +481,7 @@ export class ParameterList {
         b.appendChild(count);
         if (this.options.onPickValue) {
           b.addEventListener('click', (e) => {
-            this.options.onPickValue?.(p, v.value, e.ctrlKey || e.shiftKey || e.metaKey);
+            this.options.onPickValue?.(p, v.value, e.ctrlKey || e.shiftKey || e.metaKey, v.unit);
           });
         } else {
           b.disabled = true;
@@ -453,7 +501,9 @@ export class ParameterList {
    * otherwise fetched once through `loadValues` (and redrawn as it reports).
    */
   private valuesFor(p: ParameterSummary): ValuesState {
-    if (p.values) return { values: p.values, progress: null, error: null };
+    // A mixed-unit parameter's description counts 3 mm and 3 m as one value;
+    // its values come from the column, which keeps them apart.
+    if (p.values && !p.unitsDiffer) return { values: p.values, progress: null, error: null };
     let state = this.fetched.get(p.key);
     if (state) return state;
     state = { values: null, progress: null, error: null };
@@ -486,4 +536,23 @@ export class ParameterList {
       );
     return s;
   }
+}
+
+/**
+ * What an opened numeric row says about its unit, when there is something
+ * to say: that the values are in different units and are not added up
+ * (with which units), or that the model does not state their unit.
+ */
+export function unitNoteText(p: ParameterSummary): string {
+  if (!p.units || p.units.length === 0) return '';
+  const verdict = canSum(p);
+  if (!verdict.ok && verdict.reason === 'mixed-units') return sumVerdictText(verdict);
+  if (verdict.ok && !verdict.unitStated) return 'The model does not state the unit of these values';
+  return '';
+}
+
+/** The unit after a value in a mixed-unit list: " mm", or " (unit not stated)". */
+function entryUnitText(u: UnitRef): string {
+  if (isNotStated(u.key)) return ` (${unitLabel(u)})`;
+  return u.symbol ? ` ${u.symbol}` : ' (no unit)';
 }

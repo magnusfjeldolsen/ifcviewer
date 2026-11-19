@@ -20,6 +20,8 @@
  *  - `findMatching` — run a value-match predicate, reply with ids only.
  *  - `describeParameters` — which parameters exist across a model, in
  *                     background steps (see `parameterDiscovery.ts`).
+ *  - `parameterColumn` — one parameter's value for every element, as typed
+ *                     arrays, in the same background steps.
  *  - `cancel`      — abandon an in-flight bulk job (NOT queued — see below).
  *  - `disposeModel` — close a model and free its per-model caches.
  *  - `dispose`      — tear down the whole web-ifc instance.
@@ -44,8 +46,8 @@ import * as WebIFC from 'web-ifc';
 
 import { fetchElementProperties } from '../inspector/repository/fetchElementProperties';
 import { ModelPropertyCaches, type ModelPropertyCache } from '../inspector/repository/modelPropertyCache';
-import { computeUnitTable } from '../inspector/repository/unitTable';
-import { buildUnitTable, DEFAULT_UNITS, type UnitTable } from '../inspector/format';
+import { readModelUnits } from '../inspector/repository/unitTable';
+import { ModelUnits } from '../inspector/units';
 import {
   intersectSeed,
   intersectStep,
@@ -86,8 +88,8 @@ let initPromise: Promise<WebIFC.IfcAPI> | null = null;
 
 /** App UUID → numeric web-ifc model id. The worker is the sole owner. */
 const modelIds = new Map<string, number>();
-/** App UUID → per-model unit table (lazily computed on first property query). */
-const unitTables = new Map<string, UnitTable>();
+/** App UUID → the model's units (read on first property query). */
+const modelUnits = new Map<string, ModelUnits>();
 /**
  * App UUID → per-model property cache (relationship index + resolved type
  * objects). Created by the first bulk read, used by every read after it, and
@@ -116,15 +118,15 @@ const discoveries = new ParameterDiscoveries({
   openId: (id) => modelIds.get(id),
   read: async (id, modelID, expressId) => {
     const ifc = await getApi();
-    const unitTable = await ensureUnitTable(ifc, id, modelID);
-    return getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.for(id, ifc, modelID));
+    const units = await ensureUnits(ifc, id, modelID);
+    return getOne(ifc, modelID, id, expressId, units, propertyCaches.for(id, ifc, modelID));
   },
   prepare: async (id, modelID) => {
     const ifc = await getApi();
-    await ensureUnitTable(ifc, id, modelID);
+    await ensureUnits(ifc, id, modelID);
     propertyCaches.for(id, ifc, modelID).usable();
   },
-  post: (msg) => post(msg),
+  post: (msg, transfer) => post(msg, transfer),
 });
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
@@ -347,7 +349,7 @@ function wasmHeapMB(ifc: WebIFC.IfcAPI): number {
 function closeModel(id: string, modelID: number): void {
   if (modelIds.get(id) === modelID) {
     modelIds.delete(id);
-    unitTables.delete(id);
+    modelUnits.delete(id);
     propertyCaches.drop(id);
     discoveries.drop(id);
   }
@@ -526,27 +528,24 @@ async function handleOpenForProps(id: string, token: number, buffer: ArrayBuffer
 }
 
 /**
- * Resolve the per-model unit table, computing and caching it on first use.
- * Extracted so `getOne` and `readProps` share the same lazy-cache path.
+ * The model's units, read and kept on first use. Extracted so `getOne` and
+ * `readProps` share the same lazy-cache path.
  */
-async function ensureUnitTable(
+async function ensureUnits(
   ifc: WebIFC.IfcAPI,
   id: string,
   modelID: number,
-): Promise<UnitTable> {
-  const cached = unitTables.get(id);
+): Promise<ModelUnits> {
+  const cached = modelUnits.get(id);
   if (cached) return cached;
-  let unitTable: UnitTable;
+  let units: ModelUnits;
   try {
-    unitTable = await computeUnitTable(
-      ifc as unknown as Parameters<typeof computeUnitTable>[0],
-      modelID,
-    );
+    units = await readModelUnits(ifc as unknown as Parameters<typeof readModelUnits>[0], modelID);
   } catch {
-    unitTable = buildUnitTable([]);
+    units = ModelUnits.none();
   }
-  unitTables.set(id, unitTable);
-  return unitTable;
+  modelUnits.set(id, units);
+  return units;
 }
 
 /**
@@ -565,7 +564,7 @@ async function getOne(
   modelID: number,
   id: string,
   expressId: number,
-  unitTable: UnitTable,
+  units: ModelUnits,
   cache: ModelPropertyCache | undefined,
 ): Promise<ElementProperties> {
   if (classNamer?.ifc !== ifc) classNamer = { ifc, name: createIfcClassNamer(ifc) };
@@ -574,7 +573,7 @@ async function getOne(
     modelID,
     id,
     expressId,
-    unitTable,
+    units,
     cache,
     classNamer.name,
   );
@@ -594,8 +593,8 @@ async function handleGetProps(reqId: number, id: string, expressId: number): Pro
   if (modelID === undefined) {
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
-  const unitTable = await ensureUnitTable(ifc, id, modelID);
-  const props = await getOne(ifc, modelID, id, expressId, unitTable, propertyCaches.peek(id));
+  const units = await ensureUnits(ifc, id, modelID);
+  const props = await getOne(ifc, modelID, id, expressId, units, propertyCaches.peek(id));
   post({ type: 'props', reqId, props });
 }
 
@@ -687,7 +686,7 @@ async function readProps(
   id: string,
   expressIds: readonly number[],
   reqId: number,
-  unitTable: UnitTable,
+  units: ModelUnits,
   onEach: (props: ElementProperties) => void,
 ): Promise<boolean> {
   const total = expressIds.length;
@@ -700,7 +699,7 @@ async function readProps(
 
     const end = Math.min(start + INTERSECT_CHUNK, total);
     for (let i = start; i < end; i++) {
-      onEach(await getOne(ifc, modelID, id, expressIds[i], unitTable, cache));
+      onEach(await getOne(ifc, modelID, id, expressIds[i], units, cache));
       done++;
     }
 
@@ -746,7 +745,7 @@ async function handleIntersect(
     return;
   }
 
-  const unitTable = await ensureUnitTable(ifc, id, modelID);
+  const units = await ensureUnits(ifc, id, modelID);
 
   // Held in a box rather than a bare `let` so the fold state is visibly
   // owned by this call and not re-narrowed by the closure below.
@@ -757,7 +756,7 @@ async function handleIntersect(
     id,
     expressIds,
     reqId,
-    unitTable,
+    units,
     (props) => {
       acc.running = acc.running === null ? intersectSeed(props) : intersectStep(acc.running, props);
     },
@@ -833,8 +832,10 @@ async function handleGetLengthUnit(reqId: number, id: string): Promise<void> {
   if (modelID === undefined) {
     throw new Error(`ifcWorker: unknown modelId "${id}"`);
   }
-  const unitTable = await ensureUnitTable(ifc, id, modelID);
-  post({ type: 'lengthUnit', reqId, symbol: unitTable.get('length') ?? DEFAULT_UNITS.length });
+  const units = await ensureUnits(ifc, id, modelID);
+  // Coordinates are metres in the scene, so metres is the honest fallback
+  // here (not an invented unit for a property value).
+  post({ type: 'lengthUnit', reqId, symbol: units.projectUnit('LENGTHUNIT')?.symbol || 'm' });
 }
 
 async function handleFindMatching(
@@ -858,7 +859,7 @@ async function handleFindMatching(
     return;
   }
 
-  const unitTable = await ensureUnitTable(ifc, id, modelID);
+  const units = await ensureUnits(ifc, id, modelID);
 
   const matches: number[] = [];
   const completed = await readProps(
@@ -867,7 +868,7 @@ async function handleFindMatching(
     id,
     candidates,
     reqId,
-    unitTable,
+    units,
     (props) => {
       if (elementMatches(props, selector, value)) matches.push(props.identity.expressId);
     },
@@ -894,7 +895,7 @@ function makeEmpty(modelId: string): ElementProperties {
 function handleDisposeModel(id: string): void {
   const modelID = modelIds.get(id);
   modelIds.delete(id);
-  unitTables.delete(id);
+  modelUnits.delete(id);
   propertyCaches.drop(id);
   discoveries.drop(id);
   if (modelID !== undefined && api) {
@@ -918,7 +919,7 @@ function handleDispose(): void {
   api = null;
   initPromise = null;
   modelIds.clear();
-  unitTables.clear();
+  modelUnits.clear();
   propertyCaches.clear();
   discoveries.clear();
 }
@@ -1035,8 +1036,17 @@ self.onmessage = (event: MessageEvent<ToWorker>): void => {
       discoveries.request(msg.reqId, msg.id, msg.expressIds);
       break;
 
-    case 'parameterValues':
-      discoveries.requestValues(msg.reqId, msg.id, msg.expressIds, msg.path);
+    case 'parameterColumn':
+      discoveries.requestColumn(msg.reqId, msg.id, msg.expressIds, msg.path, msg.urgent === true);
+      break;
+
+    // NOT enqueued: they act on background jobs between their steps.
+    case 'cancelColumn':
+      discoveries.cancel(msg.reqId);
+      break;
+
+    case 'hurryColumn':
+      discoveries.hurry(msg.reqId);
       break;
 
     // NOT enqueued — deliberately. The job being cancelled is at the head

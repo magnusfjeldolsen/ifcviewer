@@ -21,7 +21,7 @@
 
 import { IFCELEMENTQUANTITY, IFCPROPERTYSET } from '../ifcTypeCodes';
 
-import type { UnitTable } from '../format';
+import type { ModelUnits } from '../units';
 import type { ElementProperties, PropertyGroup } from '../types';
 import {
   buildDirect,
@@ -101,8 +101,8 @@ export interface PropertyApi {
  * @param webIfcId   Numeric web-ifc model id (resolved by the caller).
  * @param modelId    App UUID — embedded into the returned identity.
  * @param expressId  IFC line id of the element.
- * @param unitTable  The model's effective unit table (computed once by
- *                   the caller and reused across elements).
+ * @param units      The model's units (read once by the caller and reused
+ *                   across elements; see `units.ts`).
  * @param cache      Per-model relationship cache, when the caller has one.
  * @param className  Type code → IFC class name (`IfcSlab`). The worker passes
  *                   one built on web-ifc's `GetNameFromTypeCode`; see
@@ -113,7 +113,7 @@ export async function fetchElementProperties(
   webIfcId: number,
   modelId: string,
   expressId: number,
-  unitTable: UnitTable,
+  units: ModelUnits,
   cache?: ModelPropertyCache,
   className?: (typeCode: number) => string,
 ): Promise<ElementProperties> {
@@ -132,7 +132,7 @@ export async function fetchElementProperties(
   const identity = { ...buildIdentity(modelId, expressId, item, className), typeName };
   const direct = buildDirect(identity, item);
 
-  const { psets, qtos } = buildPsetAndQtoGroups(rawGroups, unitTable);
+  const { psets, qtos } = buildPsetAndQtoGroups(rawGroups, units);
 
   const materials = buildMaterials(materialsRaw);
 
@@ -240,14 +240,14 @@ function mergeRawGroups(instanceRaw: unknown[], typeRaw: unknown[]): RawProperty
 /** Split a merged list of raw psets/qtos into our typed groups, tagging type-inherited ones. */
 function buildPsetAndQtoGroups(
   rawGroups: RawPropertyGroup[],
-  unitTable: UnitTable | null,
+  units: ModelUnits | null,
 ): { psets: PropertyGroup[]; qtos: PropertyGroup[] } {
   const psets: PropertyGroup[] = [];
   const qtos: PropertyGroup[] = [];
   for (const { raw, inheritedFromType } of rawGroups) {
     const typeCode = getRawTypeCode(raw);
     if (typeCode === IFCELEMENTQUANTITY) {
-      const group = buildQuantityGroup(raw, unitTable);
+      const group = buildQuantityGroup(raw, units);
       if (group) {
         if (inheritedFromType) {
           group.inheritedFromType = true;
@@ -256,7 +256,7 @@ function buildPsetAndQtoGroups(
         qtos.push(group);
       }
     } else if (typeCode === IFCPROPERTYSET) {
-      const group = buildPsetGroup(raw, unitTable);
+      const group = buildPsetGroup(raw, units);
       if (group) {
         if (inheritedFromType) {
           group.inheritedFromType = true;

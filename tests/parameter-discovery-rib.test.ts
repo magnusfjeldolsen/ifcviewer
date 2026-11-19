@@ -22,11 +22,17 @@ import {
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
 import { ModelPropertyCache, type CacheableApi } from '../src/inspector/repository/modelPropertyCache';
-import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { firstRowPerPath } from '../src/inspector/repository/flatRows';
-import { parameterValueOf, type ValueCount } from '../src/inspector/parameterFold';
+import { parameterValueOf } from '../src/inspector/parameterFold';
+import {
+  columnIdsWithValue,
+  columnUnits,
+  columnValueCounts,
+  type ParameterColumn,
+} from '../src/inspector/parameterColumn';
 import { elementMatches } from '../src/inspector/matchValue';
-import type { UnitTable } from '../src/inspector/format';
+import type { ModelUnits } from '../src/inspector/units';
 import type { ModelParameters, ParameterValue } from '../src/inspector/types';
 import { createIfcClassNamer } from '../src/parser/ifcClassNames';
 import { geometryProductIds } from '../src/parser/geometryProducts';
@@ -42,7 +48,7 @@ const FILE_PRESENT = existsSync(IFC_PATH);
 describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
   let api: IfcAPI;
   let modelID: number;
-  let unitTable: UnitTable;
+  let unitTable: ModelUnits;
   let className: (code: number) => string;
   /** The elements the viewer draws: those that stream geometry. */
   let scope: number[];
@@ -70,7 +76,7 @@ describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
     api = new IfcAPI();
     await api.Init();
     modelID = api.OpenModel(new Uint8Array(await fs.readFile(IFC_PATH)));
-    unitTable = await computeUnitTable(api as unknown as Parameters<typeof computeUnitTable>[0], modelID);
+    unitTable = await readModelUnits(api as unknown as Parameters<typeof readModelUnits>[0], modelID);
     className = createIfcClassNamer(api);
     const drawn = new Set<number>();
     api.StreamMeshes(modelID, geometryProductIds(api, modelID), (m) => {
@@ -132,40 +138,47 @@ describe.skipIf(!FILE_PRESENT)('parameter discovery on RIB.ifc', () => {
     expect(byKey.get('Identity.GlobalId')).toMatchObject({ count: scope.length, uniquePerElement: true });
   });
 
-  it('the count next to every value is the number of elements picking it selects', async () => {
+  it('picking a value selects from its column exactly the elements the matcher selects, as many as counted', async () => {
     const all = await discover(scope);
-    // What the worker's findMatching does with the drawn elements as
+    // What the worker's findMatching did with the drawn elements as
     // candidates: read each (as a click would) and run the same predicate.
     const elements = await Promise.all(scope.map((id) => inspect(id)));
     let checked = 0;
     for (const p of all.parameters) {
-      const values = p.values ?? (await discoverValues(p.key));
+      const column = await discoverColumn(p.key);
+      const values = p.values ?? columnValueCounts(column);
       for (const { value, count } of values) {
-        const selected = elements.filter((e) =>
-          elementMatches(e, { path: p.key }, { kind: 'parameter-value', value }),
-        ).length;
-        expect(selected, `${p.key} = ${String(value)}`).toBe(count);
+        const matched = elements
+          .filter((e) => elementMatches(e, { path: p.key }, { kind: 'parameter-value', value }))
+          .map((e) => e.identity.expressId);
+        expect(columnIdsWithValue(column, value), `${p.key} = ${String(value)}`).toEqual(matched);
+        expect(matched.length, `${p.key} = ${String(value)}`).toBe(count);
         checked++;
       }
     }
     expect(checked).toBeGreaterThan(100);
   });
 
-  it('values fetched on demand agree with the description, and sum to its count', async () => {
+  it('a column counts what the description counts, is numeric for a numeric parameter, and has its units', async () => {
     const all = await discover(scope);
     for (const p of all.parameters) {
-      const fetched = await discoverValues(p.key);
-      if (p.values) expect(fetched).toEqual(p.values);
-      expect(fetched.reduce((n, v) => n + v.count, 0)).toBe(p.count);
+      const column = await discoverColumn(p.key);
+      const counted = columnValueCounts(column);
+      if (p.values) expect(counted).toEqual(p.values);
+      expect(counted.reduce((n, v) => n + v.count, 0)).toBe(p.count);
+      expect(column.count).toBe(p.count);
+      expect(column.type, p.key).toBe(p.kind === 'numeric' ? 'numeric' : 'discrete');
+      if (p.units) expect(columnUnits(column)).toEqual(p.units);
     }
   });
 
-  async function discoverValues(path: string): Promise<ValueCount[]> {
+  async function discoverColumn(path: string): Promise<ParameterColumn> {
     const reqId = nextReq++;
-    discoveries.requestValues(reqId, MODEL, scope, path);
+    const ids = Int32Array.from(scope);
+    discoveries.requestColumn(reqId, MODEL, ids, path);
     for (;;) {
-      const r = posted.find((m) => (m.type === 'parameterValues' || m.type === 'error') && m.reqId === reqId);
-      if (r?.type === 'parameterValues') return r.values;
+      const r = posted.find((m) => (m.type === 'column' || m.type === 'error') && m.reqId === reqId);
+      if (r?.type === 'column') return { ...r.column, modelId: MODEL, ids };
       if (r?.type === 'error') throw new Error(r.message);
       await new Promise((res) => setTimeout(res, 0));
     }

@@ -37,6 +37,11 @@ import { parameterValueOf } from './parameterFold';
 export interface PropertySelector {
   /** Dotted `PropertyFlatRow.path`, e.g. "Pset_WallCommon.LoadBearing". */
   path: string;
+  /**
+   * The unit key the value must be in (`PropertyFlatRow.unitKey`, `""` for
+   * none). When given, 3 mm does not match 3 m. Omitted: any unit.
+   */
+  unitKey?: string;
 }
 
 /**
@@ -103,6 +108,7 @@ export function elementMatches(
 ): boolean {
   const row = firstRowPerPath(props.flat).get(selector.path);
   if (!row) return false;
+  if (selector.unitKey !== undefined && (row.unitKey ?? '') !== selector.unitKey) return false;
   if (value.kind === 'parameter-value') {
     return parameterValueOf(row.rawValue, row.displayValue) === value.value;
   }

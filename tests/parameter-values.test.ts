@@ -1,12 +1,24 @@
 /**
- * Values of one parameter: the matcher target the Parameters list selects
- * with, the uncapped tally fetched on demand, and the worker job that
- * fetches it (chunked on the queue, stopped when the model goes away).
+ * Values of one parameter: the matcher target the Parameters list's
+ * counts agree with, the value column the list now counts and selects from
+ * (see `parameterColumn.ts`), and the worker job that builds a column
+ * (chunked on the queue, stopped when the model goes away).
  */
 
 import { describe, it, expect } from 'vitest';
 import { elementMatches } from '../src/inspector/matchValue';
-import { ParameterFold, ValueTally } from '../src/inspector/parameterFold';
+import { ParameterFold } from '../src/inspector/parameterFold';
+import {
+  ColumnBuilder,
+  columnIdsWithValue,
+  columnRowsWithValue,
+  columnUnits,
+  columnValueCounts,
+  columnBytes,
+  type ColumnData,
+  type ParameterColumn,
+} from '../src/inspector/parameterColumn';
+import { canSum } from '../src/inspector/units';
 import { SerialQueue } from '../src/parser/serialQueue';
 import { ParameterDiscoveries } from '../src/parser/parameterDiscovery';
 import type { FromWorker } from '../src/parser/ifcMessages';
@@ -74,33 +86,132 @@ describe('matching a value as the Parameters list counts it', () => {
   });
 });
 
-describe('ValueTally', () => {
-  it('counts every distinct value with no cap, most common first', () => {
-    const tally = new ValueTally('P.X');
-    for (let i = 0; i < 300; i++) tally.add(props(i, [row('P.X', single(`v${i % 250}`))]));
-    tally.add(props(999, [row('P.Y', single('other'))]));
-    const values = tally.result();
+/** Build a column from elements, row i being elements[i]. */
+function build(key: string, elements: ElementProperties[]): ColumnData {
+  const b = new ColumnBuilder(key, elements.length);
+  elements.forEach((e, i) => b.add(i, e));
+  return b.finish();
+}
+
+const withIds = (c: ColumnData, ids: number[]): ParameterColumn => ({ ...c, modelId: 'm', ids: Int32Array.from(ids) });
+
+describe('value columns', () => {
+  it('keeps numbers in a Float64Array, NaN where an element has none', () => {
+    const c = build('Q.L', [
+      props(1, [row('Q.L', single(2.5), { unit: 'mm', unitKey: 'si:mm' })]),
+      props(2, [row('Q.Other', single(1))]),
+      props(3, [row('Q.L', single(4), { unit: 'mm', unitKey: 'si:mm' })]),
+    ]);
+    expect(c.type).toBe('numeric');
+    if (c.type !== 'numeric') return;
+    expect([...c.values]).toEqual([2.5, NaN, 4]);
+    expect(c.count).toBe(2);
+    expect(c.units).toEqual([{ key: 'si:mm', symbol: 'mm' }]);
+    // One unit: no per-row index.
+    expect(c.unitIndex).toBeNull();
+    expect(columnBytes(c)).toBe(24);
+  });
+
+  it('records the unit of each row when the values are in more than one', () => {
+    const c = build('Q.L', [
+      props(1, [row('Q.L', single(200), { unit: 'mm', unitKey: 'si:mm' })]),
+      props(2, [row('Q.L', single(0.3), { unit: 'm', unitKey: 'si:m' })]),
+      props(3, [row('Q.L', single(250), { unit: 'mm', unitKey: 'si:mm' })]),
+    ]);
+    if (c.type !== 'numeric') throw new Error('expected numeric');
+    expect(c.units.map((u) => u.key)).toEqual(['si:mm', 'si:m']);
+    expect([...c.unitIndex!]).toEqual([0, 1, 0]);
+    // The units of a sub-scope decide whether it can be added up.
+    expect(canSum({ kind: 'numeric', units: columnUnits(c) }).ok).toBe(false);
+    expect(columnUnits(c, [0, 2])).toEqual([{ key: 'si:mm', symbol: 'mm', count: 2 }]);
+    expect(canSum({ kind: 'numeric', units: columnUnits(c, [0, 2]) })).toMatchObject({ ok: true, unit: { key: 'si:mm' } });
+  });
+
+  it('keeps the unit of every row right even past 65,536 distinct units', () => {
+    const n = 0x10000 + 3;
+    const b = new ColumnBuilder('Q.L', n);
+    for (let i = 0; i < n; i++) b.add(i, props(i, [row('Q.L', single(1), { unitKey: `u${i}` })]));
+    const c = b.finish();
+    if (c.type !== 'numeric') throw new Error('expected numeric');
+    expect(c.unitIndex).toBeInstanceOf(Uint32Array);
+    expect(c.units[c.unitIndex![n - 1]].key).toBe(`u${n - 1}`);
+    expect(c.units[c.unitIndex![5]].key).toBe('u5');
+  });
+
+  it('codes text, yes/no and enumerations into a dictionary, -1 where an element has none', () => {
+    const c = build('P.S', [
+      props(1, [row('P.S', single('a'))]),
+      props(2, [row('P.S', { kind: 'enumerated', values: ['b', 'c'] })]),
+      props(3, []),
+      props(4, [row('P.S', single('a'))]),
+    ]);
+    if (c.type !== 'discrete') throw new Error('expected discrete');
+    expect(c.dictionary).toEqual(['a', 'b, c']);
+    expect([...c.codes]).toEqual([0, 1, -1, 0]);
+    expect(columnUnits(c)).toEqual([]);
+  });
+
+  it('a parameter with numbers and text is discrete, and keeps the numbers as numbers', () => {
+    const c = build('P.M', [props(1, [row('P.M', single(3))]), props(2, [row('P.M', single('three'))])]);
+    if (c.type !== 'discrete') throw new Error('expected discrete');
+    expect(c.dictionary).toEqual([3, 'three']);
+  });
+
+  it('an element that has the path on its instance and its type takes the instance value', () => {
+    const c = build('P.X', [props(1, [row('P.X', single('instance')), row('P.X', single('type'), { inheritedFromType: true })])]);
+    if (c.type !== 'discrete') throw new Error('expected discrete');
+    expect(c.dictionary).toEqual(['instance']);
+  });
+
+  it('counts values as the description does, below the cap and past it', () => {
+    const elements: ElementProperties[] = [];
+    for (let i = 0; i < 300; i++) elements.push(props(i, [row('P.X', single(`v${i % 250}`))]));
+    elements.push(props(999, [row('P.Y', single('other'))]));
+    const values = columnValueCounts(build('P.X', elements));
     expect(values).toHaveLength(250);
     expect(values[0].count).toBe(2);
     expect(values.reduce((n, v) => n + v.count, 0)).toBe(300);
+
+    const fold = new ParameterFold();
+    const few = ['a', 'b', 'a', 'c'].map((v, i) => props(i, [row('P.X', single(v))]));
+    for (const e of few) fold.add(e);
+    expect(columnValueCounts(build('P.X', few))).toEqual(fold.result('m', 4).parameters[0].values);
+
+    const nums = [3, 1, 3, 2].map((v, i) => props(i, [row('Q.N', single(v))]));
+    const numFold = new ParameterFold();
+    for (const e of nums) numFold.add(e);
+    expect(columnValueCounts(build('Q.N', nums))).toEqual(numFold.result('m', 4).parameters[0].values);
   });
 
-  it('agrees with the fold below the cap', () => {
-    const fold = new ParameterFold();
-    const tally = new ValueTally('P.X');
-    for (const v of ['a', 'b', 'a', 'c']) {
-      const e = props(1, [row('P.X', single(v))]);
-      fold.add(e);
-      tally.add(e);
+  it('finds the elements with a value: exactly the ones the matcher selects, as many as counted', () => {
+    const elements = [
+      props(11, [row('P.X', single('a')), row('P.X', single('b'), { inheritedFromType: true })]),
+      props(12, [row('P.X', single('b'), { inheritedFromType: true })]),
+      props(13, [row('P.X', single('b'))]),
+      props(14, [row('P.Y', single('a'))]),
+    ];
+    const c = withIds(build('P.X', elements), [11, 12, 13, 14]);
+    for (const { value, count } of columnValueCounts(c)) {
+      const matched = elements
+        .filter((e) => elementMatches(e, { path: 'P.X' }, { kind: 'parameter-value', value }))
+        .map((e) => e.identity.expressId);
+      expect(columnIdsWithValue(c, value)).toEqual(matched);
+      expect(matched).toHaveLength(count);
     }
-    expect(tally.result()).toEqual(fold.result('m', 4).parameters[0].values);
+    expect(columnIdsWithValue(c, 'nope')).toEqual([]);
+  });
+
+  it('compares numbers exactly, and never a number with text', () => {
+    const c = build('Q.N', [props(1, [row('Q.N', single(0.1 + 0.2))]), props(2, [row('Q.N', single(0.3))])]);
+    expect(columnRowsWithValue(c, 0.3)).toEqual([1]);
+    expect(columnRowsWithValue(c, '0.3')).toEqual([]);
   });
 });
 
-function harness() {
+function harness(read?: (id: number) => ElementProperties) {
   const queue = new SerialQueue();
   const log: string[] = [];
-  const posted: FromWorker[] = [];
+  const posted: { msg: FromWorker; transfer?: Transferable[] }[] = [];
   const open = new Map([['m', 7]]);
   let during: (() => void) | null = null;
   const d = new ParameterDiscoveries(
@@ -112,15 +223,16 @@ function harness() {
         const f = during;
         during = null;
         f?.();
+        if (read) return read(id);
         return props(id, [row('P.X', single(id % 2 === 0 ? 'even' : 'odd'))]);
       },
-      post: (m) => posted.push(m),
+      post: (msg, transfer) => posted.push({ msg, transfer }),
     },
     2,
   );
-  const reply = async (reqId: number): Promise<FromWorker> => {
+  const reply = async (reqId: number): Promise<{ msg: FromWorker; transfer?: Transferable[] }> => {
     for (;;) {
-      const r = posted.find((m) => (m.type === 'parameterValues' || m.type === 'error') && m.reqId === reqId);
+      const r = posted.find(({ msg: m }) => (m.type === 'column' || m.type === 'error') && m.reqId === reqId);
       if (r) return r;
       await new Promise((res) => setTimeout(res, 1));
     }
@@ -128,23 +240,48 @@ function harness() {
   return { queue, log, posted, open, d, reply, setDuring: (f: () => void) => (during = f) };
 }
 
-describe('fetching one parameter\'s values in the worker', () => {
-  it('reads in chunks, lets a click go first, and answers with counts', async () => {
+describe('building a value column in the worker', () => {
+  it('reads in chunks, lets a click go first, and answers with the column, its arrays transferred', async () => {
     const h = harness();
     h.setDuring(() => setTimeout(() => h.queue.enqueue(async () => void h.log.push('getProps')), 0));
-    h.d.requestValues(1, 'm', [1, 2, 3, 4, 5], 'P.X');
-    const r = await h.reply(1);
-    expect(r).toEqual({ type: 'parameterValues', reqId: 1, values: [{ value: 'odd', count: 3 }, { value: 'even', count: 2 }] });
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'P.X');
+    const { msg, transfer } = await h.reply(1);
+    if (msg.type !== 'column' || msg.column.type !== 'discrete') throw new Error('expected a discrete column');
+    expect(msg.column.dictionary).toEqual(['odd', 'even']);
+    expect([...msg.column.codes]).toEqual([0, 1, 0, 1, 0]);
+    expect(transfer).toEqual([msg.column.codes.buffer]);
     expect(h.log.indexOf('getProps')).toBe(2);
-    expect(h.posted.some((m) => m.type === 'progress' && m.reqId === 1 && m.done === 5)).toBe(true);
+    expect(h.posted.some(({ msg: m }) => m.type === 'progress' && m.reqId === 1 && m.done === 5)).toBe(true);
+  });
+
+  it('keeps rows aligned with the scope when an element cannot be read', async () => {
+    const h = harness((id) => {
+      if (id === 2) throw new Error('unreadable');
+      return props(id, [row('Q.N', single(id * 10))]);
+    });
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3]), 'Q.N');
+    const { msg } = await h.reply(1);
+    if (msg.type !== 'column' || msg.column.type !== 'numeric') throw new Error('expected a numeric column');
+    expect([...msg.column.values]).toEqual([10, NaN, 30]);
   });
 
   it('runs alongside the description of the same model without either joining the other', async () => {
     const h = harness();
     h.d.request(1, 'm', [1, 2]);
-    h.d.requestValues(2, 'm', [1, 2], 'P.X');
+    h.d.requestColumn(2, 'm', Int32Array.from([1, 2]), 'P.X');
     await h.reply(2);
-    expect(h.posted.some((m) => m.type === 'parameters' && m.reqId === 1)).toBe(true);
+    expect(h.posted.some(({ msg: m }) => m.type === 'parameters' && m.reqId === 1)).toBe(true);
+  });
+
+  it('a second ask while it runs joins the same read; only the last answer is handed the arrays', async () => {
+    const h = harness();
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3]), 'P.X');
+    h.d.requestColumn(2, 'm', Int32Array.from([1, 2, 3]), 'P.X');
+    const first = await h.reply(1);
+    const second = await h.reply(2);
+    expect(h.log.filter((l) => l === 'read 1')).toHaveLength(1);
+    expect(first.transfer).toEqual([]);
+    expect(second.transfer).toHaveLength(1);
   });
 
   it('stops when the model is closed, and tells whoever waits', async () => {
@@ -153,9 +290,9 @@ describe('fetching one parameter\'s values in the worker', () => {
       h.open.delete('m');
       h.d.drop('m');
     });
-    h.d.requestValues(1, 'm', [1, 2, 3, 4, 5], 'P.X');
-    const r = await h.reply(1);
-    expect(r).toMatchObject({ type: 'error', message: expect.stringMatching(/closed/) });
+    h.d.requestColumn(1, 'm', Int32Array.from([1, 2, 3, 4, 5]), 'P.X');
+    const { msg } = await h.reply(1);
+    expect(msg).toMatchObject({ type: 'error', message: expect.stringMatching(/closed/) });
     await new Promise((res) => setTimeout(res, 10));
     expect(h.log).toEqual(['read 1', 'read 2']);
     expect(h.d.isRunning('m')).toBe(false);

@@ -240,7 +240,7 @@ export function typeQuery(identity: SimilarSource): SimilarQuery | null {
  */
 export function valueQuery(
   identity: Pick<ElementIdentity, 'modelId' | 'ifcClass' | 'ifcTypeCode'>,
-  row: Pick<PropertyFlatRow, 'path' | 'name' | 'rawValue' | 'displayValue'>,
+  row: Pick<PropertyFlatRow, 'path' | 'name' | 'rawValue' | 'displayValue' | 'unitKey'>,
   scope: { ifcTypeCode: number | null } = { ifcTypeCode: identity.ifcTypeCode },
 ): SimilarQuery | null {
   if (!canSelectSimilar(row)) return null;
@@ -249,7 +249,8 @@ export function valueQuery(
     modelId: identity.modelId,
     ifcClass: identity.ifcClass,
     ifcTypeCode: scope.ifcTypeCode,
-    selector: { path: row.path },
+    // In the row's unit: "similar" to 3 mm is not 3 m.
+    selector: { path: row.path, unitKey: row.unitKey ?? '' },
     value: row.rawValue,
     label: `${row.name} = ${row.displayValue || '—'}`,
   };

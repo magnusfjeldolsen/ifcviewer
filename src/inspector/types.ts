@@ -10,6 +10,8 @@
  * Spec: dev/plans/phase-element-inspector.md, "Data model" section.
  */
 
+import type { UnitCount } from './units';
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -112,10 +114,17 @@ export interface PropertyNode {
   label?: string;
   value: PropertyValue;
   /**
-   * Resolved unit suffix (e.g. "mm", "m²"). Kept separate from the value
-   * so aggregation can operate on raw numerics.
+   * Unit symbol to show (e.g. "mm", "ft", "W/(m²·K)"). Kept separate from the
+   * value so aggregation can operate on raw numerics. Absent when no unit
+   * applies or the model does not state one.
    */
   unit?: string;
+  /**
+   * Which unit the value is in (see `units.ts`): equal keys, same unit.
+   * Absent when no unit applies; `"?LENGTHUNIT"` and the like when the value
+   * is a measure whose unit the model does not state.
+   */
+  unitKey?: string;
   description?: string;
   source: PropertySource;
   /** True if this row originated on the element's type (`IfcRelDefinesByType`). */
@@ -160,7 +169,10 @@ export interface PropertyFlatRow {
   rawValue: PropertyValue;
   /** Formatted string of the value only (without unit suffix). */
   displayValue: string;
+  /** Unit symbol to show; see `PropertyNode.unit`. */
   unit?: string;
+  /** Which unit the value is in; see `PropertyNode.unitKey`. */
+  unitKey?: string;
   source: PropertySource;
   inheritedFromType?: boolean;
   description?: string;
@@ -186,9 +198,20 @@ export interface ParameterSummary {
   /** Elements in the scope that have a value at this path. */
   count: number;
   kind: ParameterKind;
-  /** Unit suffix as the inspector shows it, from the first element that has one. */
+  /**
+   * Unit symbol of the numeric values, when they are all in one unit that the
+   * model states. Absent for text, for plain numbers, for an unstated unit
+   * and for mixed units: `units` says which.
+   */
   unit?: string;
-  /** True when elements in the scope show different units for this path. */
+  /**
+   * The units of the numeric values (see `units.ts`), most common first, with
+   * how many values are in each. A single entry with key `""` is plain
+   * numbers; a key starting with `?` means the model does not state the unit.
+   * Absent when no value is a number.
+   */
+  units?: UnitCount[];
+  /** True when the numeric values are in more than one unit: they are not added up. */
   unitsDiffer?: boolean;
   /** Over the numeric values only; absent when there are none. */
   numeric?: { min: number; max: number; sum: number };

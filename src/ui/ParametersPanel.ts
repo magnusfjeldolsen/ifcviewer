@@ -12,6 +12,7 @@
 import type { ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 import { ParameterList } from './ParameterList';
+import type { UnitRef } from '../inspector/units';
 
 export interface ParametersPanelDeps {
   /** The loaded models, in the order the Models panel shows them. */
@@ -34,7 +35,20 @@ export interface ParametersPanelDeps {
     onProgress: (done: number, total: number) => void,
   ): Promise<ValueCount[]>;
   /** Select the model's elements that have `value` at this parameter. */
-  selectValue?(modelId: string, parameter: ParameterSummary, value: ParameterValue, additive: boolean): void;
+  selectValue?(
+    modelId: string,
+    parameter: ParameterSummary,
+    value: ParameterValue,
+    additive: boolean,
+    unit?: UnitRef,
+  ): void;
+  /**
+   * A parameter was opened: get ready to list and select its values (the
+   * viewer builds its value column in the background).
+   */
+  prepare?(modelId: string, parameter: ParameterSummary): void;
+  /** The parameter was closed again before a value was picked: what `prepare` started can stop. */
+  release?(modelId: string, parameter: ParameterSummary): void;
 }
 
 const counts = new Intl.NumberFormat('en-US');
@@ -108,10 +122,16 @@ export class ParametersPanel {
           }
         : undefined,
       onPickValue: deps.selectValue
-        ? (parameter, value, additive) => {
-            if (this.modelId !== null) deps.selectValue!(this.modelId, parameter, value, additive);
+        ? (parameter, value, additive, unit) => {
+            if (this.modelId !== null) deps.selectValue!(this.modelId, parameter, value, additive, unit);
           }
         : undefined,
+      onOpen: deps.prepare
+        ? (parameter) => {
+            if (this.modelId !== null) deps.prepare!(this.modelId, parameter);
+          }
+        : undefined,
+      onClose: deps.release ? (parameter, modelId) => deps.release!(modelId, parameter) : undefined,
     });
     parent.appendChild(this.container);
   }
@@ -163,6 +183,8 @@ export class ParametersPanel {
 
   close(): void {
     this.generation++;
+    // Closing the panel closes its open parameter, and so gives up its build.
+    this.list.open(null);
     this.modelId = null;
     this.container.classList.add('hidden');
   }

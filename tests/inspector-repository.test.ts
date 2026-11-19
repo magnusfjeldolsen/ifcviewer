@@ -18,10 +18,10 @@ import {
   fetchElementProperties,
   type PropertyApi,
 } from '../src/inspector/repository/fetchElementProperties';
-import { computeUnitTable } from '../src/inspector/repository/unitTable';
+import { readModelUnits } from '../src/inspector/repository/unitTable';
 import { stripAuthoringIdSuffix } from '../src/inspector/repository/propertyNormalizer';
 import { buildFlatRows } from '../src/inspector/repository/flatRows';
-import { buildUnitTable, type UnitTable } from '../src/inspector/format';
+import { ModelUnits } from '../src/inspector/units';
 
 /**
  * Tests for the extracted property fetch + normalize core
@@ -198,9 +198,9 @@ function mkFake(): PropertyApi {
 }
 
 /** Compute the model's unit table via the same path the worker uses. */
-async function unitTableFor(api: PropertyApi): Promise<UnitTable> {
-  return computeUnitTable(
-    api as unknown as Parameters<typeof computeUnitTable>[0],
+async function unitTableFor(api: PropertyApi): Promise<ModelUnits> {
+  return readModelUnits(
+    api as unknown as Parameters<typeof readModelUnits>[0],
     WEB_IFC_ID,
   );
 }
@@ -482,7 +482,7 @@ describe('fetchElementProperties — type-inherited psets (merge of two API call
   /** Fetch the wall with an empty unit table — these tests don't assert units. */
   function fetchTypedWall(api: PropertyApi): ReturnType<typeof fetchElementProperties> {
     return fetchElementProperties(
-      api, WEB_IFC_ID, MODEL_UUID, WALL_EXPRESS_ID, buildUnitTable([]),
+      api, WEB_IFC_ID, MODEL_UUID, WALL_EXPRESS_ID, ModelUnits.none(),
     );
   }
 

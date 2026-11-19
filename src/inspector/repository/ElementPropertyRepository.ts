@@ -7,7 +7,7 @@
  */
 
 import type { MatchTarget, PropertySelector } from '../matchValue';
-import type { ValueCount } from '../parameterFold';
+import type { ParameterColumn } from '../parameterColumn';
 import type { ElementIdentity, ElementProperties, ModelParameters } from '../types';
 
 /**
@@ -20,6 +20,18 @@ export class BulkRequestCancelled extends Error {
   constructor() {
     super('Bulk request cancelled');
     this.name = 'BulkRequestCancelled';
+  }
+}
+
+/**
+ * The column a caller awaited was given up (`releaseColumn`) because its
+ * parameter was closed before it was built. Not a failure: asking again
+ * builds it.
+ */
+export class ColumnBuildCancelled extends Error {
+  constructor() {
+    super('The column was no longer needed');
+    this.name = 'ColumnBuildCancelled';
   }
 }
 
@@ -121,15 +133,28 @@ export interface ElementPropertyRepository {
   ): Promise<ModelParameters>;
 
   /**
-   * Every distinct value of one parameter across `expressIds`, with counts,
-   * most common first: for a parameter with more distinct values than the
-   * description keeps. Background steps like `describeParameters`; kept per
-   * model and parameter until `disposeModel`.
+   * One parameter's value for every element `describeParameters` was asked
+   * about (the model's scope), as typed arrays: what colouring and totals
+   * read, and what the Parameters list counts and selects values with.
+   * Built in the worker on first ask, in background steps like
+   * `describeParameters`; kept per model and parameter until
+   * `disposeModel`. See `parameterColumn.ts`.
    */
-  parameterValues(
+  getColumn(
     modelId: string,
-    expressIds: readonly number[],
     path: string,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<ValueCount[]>;
+    /**
+     * `urgent`: someone is waiting on it now (a value was picked). It goes
+     * ahead of other background work and is not given up by `releaseColumn`.
+     */
+    options?: { urgent?: boolean },
+  ): Promise<ParameterColumn>;
+
+  /**
+   * A column asked for in case (its parameter was opened) is no longer
+   * needed: give up its build if it is still running and nobody picked from
+   * it. See `ColumnBuildCancelled`.
+   */
+  releaseColumn(modelId: string, path: string): void;
 }
