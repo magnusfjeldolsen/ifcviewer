@@ -17,6 +17,8 @@ export interface PickerRow {
 
 export const PICKER_SHOWN = 200;
 
+let pickerSerial = 0;
+
 /** Rows whose key or value contains `filter` (case-insensitive), in their given order. */
 export function filterPickerRows(rows: readonly PickerRow[], filter: string): PickerRow[] {
   const needle = filter.trim().toLowerCase();
@@ -50,6 +52,9 @@ export class ParameterPicker {
    */
   open(x: number, y: number, heading: string, rows: readonly PickerRow[], onPick: (key: string) => void): void {
     this.close();
+    // Where the keyboard was, to give it back on close.
+    const before = document.activeElement;
+    this.returnFocus = before instanceof HTMLElement && before !== document.body ? before : null;
     const el = document.createElement('div');
     el.className = 'param-picker';
     el.setAttribute('role', 'dialog');
@@ -66,6 +71,13 @@ export class ParameterPicker {
     input.className = 'param-picker-filter';
     input.placeholder = 'Find a parameter';
     input.setAttribute('aria-label', 'Find a parameter');
+    // A combobox over the list: the arrow keys move the choice, which a
+    // screen reader announces through aria-activedescendant.
+    const listId = `param-picker-list-${++pickerSerial}`;
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-controls', listId);
 
     const status = document.createElement('div');
     status.className = 'param-picker-status';
@@ -73,6 +85,8 @@ export class ParameterPicker {
     const list = document.createElement('ul');
     list.className = 'param-picker-list';
     list.setAttribute('role', 'listbox');
+    list.id = listId;
+    list.setAttribute('aria-label', 'Parameters');
 
     el.append(title, input, status, list);
 
@@ -83,8 +97,10 @@ export class ParameterPicker {
       onPick(key);
     };
     const mark = (): void => {
+      input.removeAttribute('aria-activedescendant');
       list.querySelectorAll('.param-picker-row').forEach((row, i) => {
         row.classList.toggle('active', i === active);
+        if (i === active) input.setAttribute('aria-activedescendant', row.id);
         row.setAttribute('aria-selected', String(i === active));
         if (i === active) (row as HTMLElement).scrollIntoView?.({ block: 'nearest' });
       });
@@ -101,8 +117,9 @@ export class ParameterPicker {
             ? `Showing ${shown.length} of ${matching.length}; type to narrow`
             : '';
       const frag = document.createDocumentFragment();
-      for (const r of shown) {
+      shown.forEach((r, n) => {
         const li = document.createElement('li');
+        li.id = `${listId}-${n}`;
         li.className = 'param-picker-row';
         li.setAttribute('role', 'option');
         li.title = `${r.key} = ${r.value}`;
@@ -122,7 +139,7 @@ export class ParameterPicker {
         li.append(key, value);
         li.addEventListener('click', () => pick(r.key));
         frag.appendChild(li);
-      }
+      });
       list.appendChild(frag);
       mark();
     };
@@ -157,7 +174,12 @@ export class ParameterPicker {
     window.removeEventListener('blur', this.onBlur);
     this.el.remove();
     this.el = null;
+    const back = this.returnFocus;
+    this.returnFocus = null;
+    if (back?.isConnected) back.focus();
   }
+
+  private returnFocus: HTMLElement | null = null;
 
   dispose(): void {
     this.close();

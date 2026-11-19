@@ -26,6 +26,12 @@ export interface ColourLegendDeps {
 
 const counts = new Intl.NumberFormat('en-US');
 
+/** Where the keyboard goes when the control it was on is disabled. */
+const FOCUS_NEIGHBOUR: Record<string, string[]> = {
+  all: ['none', 'box-0'],
+  none: ['all', 'box-0'],
+};
+
 /** "Whole model · Tower", or "Selection · 2 models". */
 export function scopeText(scope: ColourScope, modelName: (id: string) => string): string {
   if (scope.kind === 'model') return `Whole model · ${modelName(scope.modelId)}`;
@@ -61,6 +67,7 @@ export class ColourLegend {
     close.title = 'Clear colours';
     close.setAttribute('aria-label', 'Clear colours');
     close.textContent = '×';
+    close.dataset.focus = 'close';
     close.addEventListener('click', () => deps.controller.clear());
     header.append(title, this.titleName, close);
 
@@ -100,12 +107,39 @@ export class ColourLegend {
   }
 
   private render(): void {
-    // The legend is rebuilt on every change; keep the keyboard where it was.
+    const state = this.deps.controller.getState();
     const active = document.activeElement;
-    const focusKey = active instanceof HTMLElement && this.container.contains(active) ? active.dataset.focus : undefined;
+    const inLegend = active instanceof HTMLElement && this.container.contains(active);
+    // A colouring starting: remember where it was asked for from, to give
+    // the keyboard back there when it is cleared.
+    if (state.phase === 'reading' && this.phase !== 'reading' && !inLegend) {
+      this.origin = active instanceof HTMLElement && active !== document.body ? active : null;
+    }
+    this.phase = state.phase;
+    // The legend is rebuilt on every change; keep the keyboard where it was.
+    const focusKey = inLegend ? (active as HTMLElement).dataset.focus : undefined;
     this.build();
-    if (focusKey) this.container.querySelector<HTMLElement>(`[data-focus="${focusKey}"]`)?.focus();
+    if (state.phase === 'off') {
+      if (inLegend && this.origin?.isConnected) this.origin.focus();
+      this.origin = null;
+      return;
+    }
+    if (!focusKey) return;
+    // A button that turned itself off (All once all are ticked) hands the
+    // keyboard to its neighbour.
+    for (const key of [focusKey, ...(FOCUS_NEIGHBOUR[focusKey] ?? [])]) {
+      const el = this.container.querySelector<HTMLElement>(`[data-focus="${key}"]`);
+      if (el && !(el as HTMLButtonElement).disabled) {
+        el.focus();
+        return;
+      }
+    }
   }
+
+  /** The phase last drawn, to tell a colouring starting from one updating. */
+  private phase: ColourByState['phase'] = 'off';
+  /** What had the keyboard when the colouring was asked for. */
+  private origin: HTMLElement | null = null;
 
   private build(): void {
     const state = this.deps.controller.getState();
@@ -210,6 +244,7 @@ export class ColourLegend {
         select.appendChild(opt);
       }
       select.value = palette.id;
+      select.dataset.focus = 'palette';
       select.addEventListener('change', () => controller.setPalette(select.value));
       controls.appendChild(select);
     }

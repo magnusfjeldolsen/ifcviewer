@@ -283,3 +283,84 @@ describe('right-click menu: colour by parameter', () => {
     expect(items.some((i) => /colour/i.test(i.label ?? ''))).toBe(false);
   });
 });
+
+describe('colour legend keeps the keyboard in place', () => {
+  async function shown(column: ParameterColumn) {
+    const { controller } = makeController(column);
+    const origin = document.createElement('button');
+    document.body.appendChild(origin);
+    origin.focus();
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    return { controller, legend, origin, el: legend.getContainer() };
+  }
+  const button = (el: HTMLElement, text: string): HTMLButtonElement =>
+    [...el.querySelectorAll<HTMLButtonElement>('.colour-legend-btn')].find((b) => b.textContent === text)!;
+
+  it('a ticked checkbox keeps focus though the legend is redrawn', async () => {
+    const { el } = await shown(textColumn('m', ['a', 'b']));
+    const box = el.querySelectorAll<HTMLInputElement>('.colour-legend-entry input')[1];
+    box.focus();
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    expect(document.activeElement).toBe(el.querySelectorAll('.colour-legend-entry input')[1]);
+  });
+
+  it('None, once it has turned itself off, hands focus to All', async () => {
+    const { el } = await shown(textColumn('m', ['a', 'b']));
+    button(el, 'None').focus();
+    button(el, 'None').click();
+    expect(document.activeElement).toBe(button(el, 'All'));
+  });
+
+  it('the colour scale keeps focus after a change', async () => {
+    const { el } = await shown(numberColumn('m', Array.from({ length: 30 }, (_, i) => i)));
+    const select = el.querySelector<HTMLSelectElement>('.colour-legend-palette')!;
+    select.focus();
+    select.value = 'colour-blind-safe';
+    select.dispatchEvent(new Event('change'));
+    expect(document.activeElement).toBe(el.querySelector('.colour-legend-palette'));
+  });
+
+  it('Clear gives focus back to what started the colouring', async () => {
+    const { el, origin } = await shown(textColumn('m', ['a', 'b']));
+    button(el, 'Clear colours').focus();
+    button(el, 'Clear colours').click();
+    expect(document.activeElement).toBe(origin);
+  });
+});
+describe('parameter picker for screen readers and the keyboard', () => {
+  const ROWS = [
+    { key: 'Identity.Name', value: 'Wall A' },
+    { key: 'Pset_WallCommon.FireRating', value: 'EI 60' },
+  ];
+
+  it('is a combobox over a listbox, naming the row the arrow keys are on', () => {
+    const picker = new ParameterPicker(document.body);
+    picker.open(0, 0, 'h', ROWS, () => {});
+    const input = document.querySelector<HTMLInputElement>('.param-picker-filter')!;
+    const list = document.querySelector<HTMLElement>('.param-picker-list')!;
+    expect(input.getAttribute('role')).toBe('combobox');
+    expect(input.getAttribute('aria-controls')).toBe(list.id);
+    expect(list.getAttribute('role')).toBe('listbox');
+    const rows = document.querySelectorAll<HTMLElement>('.param-picker-row');
+    expect(input.getAttribute('aria-activedescendant')).toBe(rows[0].id);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    expect(input.getAttribute('aria-activedescendant')).toBe(rows[1].id);
+    expect(rows[1].getAttribute('aria-selected')).toBe('true');
+    input.value = 'nothing like it';
+    input.dispatchEvent(new Event('input'));
+    expect(input.hasAttribute('aria-activedescendant')).toBe(false);
+  });
+
+  it('gives focus back to where it was when it closes', () => {
+    const before = document.createElement('button');
+    document.body.appendChild(before);
+    before.focus();
+    const picker = new ParameterPicker(document.body);
+    picker.open(0, 0, 'h', ROWS, () => {});
+    expect(document.activeElement).not.toBe(before);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(document.activeElement).toBe(before);
+  });
+});
