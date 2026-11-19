@@ -20,8 +20,10 @@ import type { MeasurementEnd } from './MeasurementStore';
  * store, the selection vocabulary or the placement state machine, so there is
  * no path by which a rendering change can alter what a measurement *is*.
  *
- * It still needs WebGL and a 2D canvas context, so it has no unit tests. That
- * is the point of moving it here: it is now the only part that does.
+ * It still needs WebGL and a 2D canvas context, so most of it has no unit
+ * tests. That is the point of moving it here: it is now the only part that
+ * does. The one exception is where lines are placed, which
+ * `measurement-line-precision.test.ts` checks with a stand-in 2D context.
  */
 
 /** Yellow — a measurement nobody is pointing at. */
@@ -323,9 +325,6 @@ export class MeasurementRenderer {
     width: number,
     dashed: boolean,
   ): Line2 {
-    const geometry = new LineGeometry();
-    geometry.setPositions([start.x, start.y, start.z, end.x, end.y, end.z]);
-
     const material = new LineMaterial({
       color,
       linewidth: width,
@@ -337,8 +336,8 @@ export class MeasurementRenderer {
     });
     material.resolution.set(this.canvasWidth(), this.canvasHeight());
 
-    const line = new Line2(geometry, material);
-    line.computeLineDistances();
+    const line = new Line2(new LineGeometry(), material);
+    this.setLinePoints(line, start, end);
     line.renderOrder = 1000;
     // Line2 extends THREE.Mesh, so without this flag `raycastVisible` would
     // collect it and a measurement could steal clicks from the geometry it
@@ -358,8 +357,21 @@ export class MeasurementRenderer {
     return line;
   }
 
+  /**
+   * Put a fat line between two world points, held by its start.
+   *
+   * The geometry stores the end relative to the start, and the start goes in
+   * the object's position — never both points as raw world coordinates. The
+   * GPU works in 32-bit floats, which far from the origin cannot place a point
+   * any closer than half a metre (a Norwegian northing is about 6 650 000 m),
+   * and where it rounds to moves with the camera: the line jumped about on
+   * every orbit while its markers stayed put (#105). An object's position is
+   * combined with the camera in double precision before the GPU sees it, which
+   * is how the model batches and the markers stay still.
+   */
   private setLinePoints(line: Line2, start: THREE.Vector3, end: THREE.Vector3): void {
-    line.geometry.setPositions([start.x, start.y, start.z, end.x, end.y, end.z]);
+    line.position.copy(start);
+    line.geometry.setPositions([0, 0, 0, end.x - start.x, end.y - start.y, end.z - start.z]);
     line.computeLineDistances();
   }
 
