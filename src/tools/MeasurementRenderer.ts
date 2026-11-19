@@ -20,8 +20,10 @@ import type { MeasurementEnd } from './MeasurementStore';
  * store, the selection vocabulary or the placement state machine, so there is
  * no path by which a rendering change can alter what a measurement *is*.
  *
- * It still needs WebGL and a 2D canvas context, so it has no unit tests. That
- * is the point of moving it here: it is now the only part that does.
+ * It still needs WebGL and a 2D canvas context, so most of it has no unit
+ * tests. That is the point of moving it here: it is now the only part that
+ * does. The one exception is where lines are placed, which
+ * `measurement-line-precision.test.ts` checks with a stand-in 2D context.
  */
 
 /** Yellow — a measurement nobody is pointing at. */
