@@ -55,6 +55,13 @@ export interface TotalsDeps {
   loadColumn(modelId: string, key: string, onProgress: (done: number, total: number) => void): Promise<ParameterColumn>;
   /** A build asked for is no longer needed. */
   releaseColumn(modelId: string, key: string): void;
+  /**
+   * Settles when no model is loading. Column builds wait for it, and a build
+   * the tab no longer wants by then (it was closed) is never asked for.
+   */
+  waitForIdle?(): Promise<void>;
+  /** How many elements of `models` can be seen: the scope's size when no row needs the models described. */
+  visibleCount?(models: readonly string[]): number;
   /** Select exactly these elements. */
   select?(elements: { modelId: string; expressId: number }[]): void;
   /** Where the rows are remembered; `localStorage` when left out. */
@@ -192,6 +199,8 @@ export class TotalsController {
     this.generation++;
     for (const k of [...this.inflight]) if (k.startsWith(`${modelId}\n`)) this.inflight.delete(k);
     this.scopes = this.scopes.filter((s) => s.modelId !== modelId);
+    // A line clicked before the recount must not reach for the closed model.
+    for (const [key, inputs] of this.inputs) this.inputs.set(key, inputs.filter((i) => i.modelId !== modelId));
     this.invalidate();
   }
 
@@ -317,6 +326,22 @@ export class TotalsController {
         ? loaded.filter((m) => scope.elements.has(m))
         : loaded.filter((m) => this.deps.isShown?.(m) ?? true);
 
+    // With nothing to count, read nothing: only say what the scope is.
+    if (this.state.rows.length === 0 && this.state.groupBy === null) {
+      const elements =
+        scope.kind === 'selection'
+          ? [...scope.elements.values()].reduce((n, ids) => n + ids.length, 0)
+          : (this.deps.visibleCount?.(models) ?? null);
+      this.state = {
+        ...this.state,
+        scope: elements === null ? null : { kind: scope.kind, elements, models: models.length },
+        describing: null,
+        message: null,
+      };
+      this.emit();
+      return;
+    }
+
     // Describe the models first (their scope is the columns' rows). Kept
     // after the first time, so this is normally immediate.
     const progress = models.map(() => ({ done: 0, total: 0 }));
@@ -425,6 +450,13 @@ export class TotalsController {
       else this.updateRow(progressFor, { phase: 'reading', done, total });
     };
     let reading = false;
+    // A load running now goes first. If the tab was closed or the count
+    // overtaken meanwhile, nothing is asked for: a build started then would
+    // run with nobody holding it.
+    if (this.deps.waitForIdle) {
+      await this.deps.waitForIdle();
+      if (gen !== this.generation || !this.state.active) throw new ColumnBuildCancelled();
+    }
     const columns = await Promise.all(
       wanted.map(async (s, i) => {
         const id = `${s.modelId}\n${key}`;

@@ -674,9 +674,18 @@ ${key}`. */
         return this.propertyRepository.describeParameters(modelId, this.modelManager.elementIds(modelId), onProgress);
       },
       scopeIds: (modelId) => this.propertyRepository.scopeOf(modelId),
-      loadColumn: async (modelId, key, onProgress) => {
-        await this.loadGate.idle();
-        return this.propertyRepository.getColumn(modelId, key, onProgress);
+      // The controller waits for any load itself, and asks for a column only
+      // if it still wants it then.
+      waitForIdle: () => this.loadGate.idle(),
+      loadColumn: (modelId, key, onProgress) => this.propertyRepository.getColumn(modelId, key, onProgress),
+      visibleCount: (models) => {
+        const plane = this.clippingTool.getClipPlane();
+        let n = 0;
+        for (const m of models) {
+          const visible = this.modelManager.visibleElements(m, plane);
+          for (const id of this.modelManager.elementIds(m)) if (!visible || visible(id)) n++;
+        }
+        return n;
       },
       // A build the Parameters list also got ready is the list's to give up.
       releaseColumn: (modelId, key) => {

@@ -241,6 +241,62 @@ describe('TotalsController', () => {
     expect(s.groupBy).toBe('Identity.Type');
   });
 
+  it('never starts a build it no longer wants after waiting for a load', async () => {
+    const w = world({ a: { ids: [1], columns: { 'Q.Volume': vol([5]) } } });
+    let loaded!: () => void;
+    w.deps.waitForIdle = () => new Promise<void>((r) => (loaded = r));
+    w.c.addRow('Q.Volume');
+    w.c.setActive(true);
+    await flush();
+    // The tab closes while a model is still loading.
+    w.c.setActive(false);
+    loaded();
+    await flush();
+    expect(w.deps.loadColumn).not.toHaveBeenCalled();
+  });
+
+  it('asks for the column once the load is over when the tab is still open', async () => {
+    const w = world({ a: { ids: [1], columns: { 'Q.Volume': vol([5]) } } });
+    let loaded!: () => void;
+    w.deps.waitForIdle = () => new Promise<void>((r) => (loaded = r));
+    w.c.addRow('Q.Volume');
+    w.c.setActive(true);
+    await flush();
+    expect(w.deps.loadColumn).not.toHaveBeenCalled();
+    w.deps.waitForIdle = undefined;
+    loaded();
+    await flush();
+    expect(w.deps.loadColumn).toHaveBeenCalledTimes(1);
+    expect(w.c.getState().rows[0].phase).toBe('ready');
+  });
+
+  it('reads nothing while there is nothing to count, but still says what the scope is', async () => {
+    const w = world({ a: { ids: [1, 2, 3], columns: { 'Q.Volume': vol([1, 2, 3]) } } });
+    w.deps.visibleCount = vi.fn(() => 3);
+    w.c.setActive(true);
+    await flush();
+    expect(w.deps.describe).not.toHaveBeenCalled();
+    expect(w.c.getState().scope).toEqual({ kind: 'visible', elements: 3, models: 1 });
+    w.setScope(sel({ a: [1, 2] }));
+    w.c.invalidate();
+    await flush();
+    expect(w.c.getState().scope).toEqual({ kind: 'selection', elements: 2, models: 1 });
+    expect(w.deps.describe).not.toHaveBeenCalled();
+  });
+
+  it('does not select elements of a model that was just closed', async () => {
+    const w = world({
+      a: { ids: [1], columns: { 'Q.Volume': vol([1]) } },
+      b: { ids: [2], columns: { 'Q.Volume': vol([2]) } },
+    });
+    w.c.addRow('Q.Volume');
+    w.c.setActive(true);
+    await flush();
+    w.c.onModelRemoved('b');
+    w.c.selectLine('Q.Volume', {});
+    expect(w.deps.select).toHaveBeenCalledWith([{ modelId: 'a', expressId: 1 }]);
+  });
+
   it('lists every parameter of the loaded models for the pickers', async () => {
     const w = world({
       a: { ids: [1], columns: { 'Q.Volume': vol([1]) } },
