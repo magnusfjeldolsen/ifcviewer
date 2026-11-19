@@ -2950,3 +2950,9 @@ html, body {
 .totals-table.compact .totals-line {
   padding: 1px 4px;
 }
+
+@media (max-width: 520px) {
+  .params-panel.totals-tab {
+    width: auto;
+  }
+}
