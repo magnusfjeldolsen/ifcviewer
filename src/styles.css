@@ -2427,8 +2427,7 @@ html, body {
   text-overflow: ellipsis;
 }
 
-/* "No value" elements are drawn as a see-through ghost: say so in the swatch. */
+/* "No value" is near white: a dashed edge keeps the swatch visible. */
 .colour-legend-entry[data-kind='none'] .colour-legend-swatch {
   border: 1px dashed #6b7280;
-  background-color: rgba(212, 212, 212, 0.5) !important;
 }

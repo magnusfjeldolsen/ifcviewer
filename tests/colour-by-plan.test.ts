@@ -56,7 +56,7 @@ describe('colour by parameter — numbers in one unit', () => {
     expect(plan.entries[2].color).toEqual(sampleGradient(DEFAULT_GRADIENT, 1));
     const p = plan.models[0];
     expect(Array.from(p.entry)).toEqual([1, 0, 2, 0, 3]);
-    // The element without a value is a pale grey ghost.
+    // The element without a value is the near-white "no value" colour.
     expect(p.rgba[16]).toBeCloseTo(toLinear(hexToRgb(NO_VALUE_COLOUR)).r);
     expect(p.rgba[19]).toBeCloseTo(NO_VALUE_OPACITY);
     expect(p.rgba[3]).toBe(1);

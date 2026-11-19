@@ -71,12 +71,18 @@ export const CATEGORY_COLOURS: readonly string[] = [
 export const OTHER_COLOUR = '#bdb5ab';
 
 /**
- * Elements in the scope with no value: a pale grey ghost. Drawn see-through,
- * so the coloured elements stand out and what lacks the value still shows
- * where it is. An opaque grey would look like the model's own concrete.
+ * Elements in the scope with no value: near white, like a card model, so
+ * the coloured elements stand out and nothing reads as the model's own grey
+ * concrete.
+ *
+ * Opaque on purpose. An opacity below 1 draws them as a see-through ghost,
+ * which shows coloured elements behind them, but see-through parts are
+ * drawn in sorted depth bands: on the Snowdon sample, orbit frame time went
+ * from 5.9 to 7.6 ms on integrated graphics and draw calls from 5 to 81,
+ * and on a model of a hundred chunks the draw calls could reach thousands.
  */
-export const NO_VALUE_COLOUR = '#d4d4d4';
-export const NO_VALUE_OPACITY = 0.3;
+export const NO_VALUE_COLOUR = '#f2f2f2';
+export const NO_VALUE_OPACITY = 1;
 
 export function gradientById(id: string): GradientPalette {
   return GRADIENTS.find((g) => g.id === id) ?? DEFAULT_GRADIENT;

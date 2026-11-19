@@ -66,7 +66,7 @@ export interface ModelPaint {
   ids: Int32Array;
   /** Index into `ColourPlan.entries`. */
   entry: Uint8Array;
-  /** Linear RGBA, four per element; alpha below 1 ghosts it (no value). */
+  /** Linear RGBA, four per element (alpha below 1 would ghost it; see NO_VALUE_OPACITY). */
   rgba: Float32Array;
 }
 

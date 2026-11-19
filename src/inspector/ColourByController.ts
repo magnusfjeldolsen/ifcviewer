@@ -214,6 +214,7 @@ export class ColourByController {
     const plan = buildColourPlan(key, this.inputs, { palette: this.palette });
     const t1 = performance.now();
     this.timings.planMs = t1 - t0;
+    measure('colour-by: plan', t0, t1);
     const keep = ticked && ticked.length === plan.entries.length ? ticked : plan.entries.map(() => true);
     this.state = { phase: 'shown', key, scope, plan, ticked: keep, palette: this.palette };
     this.repaint();
@@ -232,7 +233,9 @@ export class ColourByController {
       }
       this.deps.paint.setDataColors(p.modelId, p.ids, tickedColours(p, s.ticked, out));
     }
-    this.timings.paintMs = performance.now() - t0;
+    const t1 = performance.now();
+    this.timings.paintMs = t1 - t0;
+    measure('colour-by: paint', t0, t1);
     this.emit();
   }
 
@@ -242,7 +245,9 @@ export class ColourByController {
     const t0 = performance.now();
     for (const p of this.state.plan.models) this.deps.paint.clearDataColors(p.modelId);
     this.scratch.clear();
-    this.timings.clearMs = performance.now() - t0;
+    const t1 = performance.now();
+    this.timings.clearMs = t1 - t0;
+    measure('colour-by: clear', t0, t1);
   }
 
   private set(state: ColourByState): void {
@@ -252,5 +257,14 @@ export class ColourByController {
 
   private emit(): void {
     for (const l of this.listeners) l();
+  }
+}
+
+/** Record a span on the page's performance timeline, where the benchmark and DevTools read it. */
+function measure(name: string, start: number, end: number): void {
+  try {
+    performance.measure(name, { start, end });
+  } catch {
+    // Older engines without the options form: the timing is still in `timings`.
   }
 }
