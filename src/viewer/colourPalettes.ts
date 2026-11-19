@@ -1,0 +1,139 @@
+/**
+ * The colours "colour by parameter" (#68) paints with, as data.
+ *
+ * Every colour here is sRGB, as CSS writes it, so a legend swatch is the
+ * colour as written. The renderer works in linear light: `toLinear` converts
+ * before a colour reaches the model. To add a palette, add an entry to
+ * `GRADIENTS`; the legend offers every entry.
+ */
+
+/** An sRGB colour, each channel 0..1. */
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+/** A colour scale from the lowest value (first stop) to the highest (last). */
+export interface GradientPalette {
+  id: string;
+  /** As the legend's palette picker shows it. */
+  label: string;
+  /** Evenly spaced stops, low to high. */
+  stops: readonly string[];
+}
+
+/**
+ * Numeric scales. The first is the default: red for the lowest value to
+ * green for the highest, as the owner asked for. Its middle stops are
+ * darker than a print scale's: the viewer's lighting darkens faces, and a
+ * pale yellow washes out against the light background.
+ */
+export const GRADIENTS: readonly GradientPalette[] = [
+  {
+    id: 'red-green',
+    label: 'Red – yellow – green',
+    stops: ['#d73027', '#f46d43', '#fdae61', '#e8d34a', '#a6d96a', '#66bd63', '#1a9850'],
+  },
+  {
+    // Viridis: ordered by lightness, so it reads with any colour vision and
+    // in greyscale.
+    id: 'colour-blind-safe',
+    label: 'Colour-blind safe',
+    stops: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+  },
+];
+
+export const DEFAULT_GRADIENT = GRADIENTS[0];
+
+/**
+ * Distinct values (text, yes/no, a few numbers in different units), in
+ * order of use: Kelly's colours of maximum contrast, without white, black
+ * and grey, which the model and the "no value" state already use.
+ */
+export const CATEGORY_COLOURS: readonly string[] = [
+  '#0067a5', // blue
+  '#f38400', // orange
+  '#be0032', // red
+  '#008856', // green
+  '#875692', // purple
+  '#f3c300', // yellow
+  '#a1caf1', // light blue
+  '#e68fac', // pink
+  '#8db600', // yellow-green
+  '#604e97', // violet
+  '#c2b280', // buff
+  '#882d17', // reddish brown
+];
+
+/** The values past the most common ones, sharing one colour. */
+export const OTHER_COLOUR = '#7d6b5d';
+
+/**
+ * Elements in the scope with no value. Pale, so they recede behind the
+ * coloured ones, and lighter than the greys models are usually drawn in.
+ */
+export const NO_VALUE_COLOUR = '#e4e4e4';
+
+export function gradientById(id: string): GradientPalette {
+  return GRADIENTS.find((g) => g.id === id) ?? DEFAULT_GRADIENT;
+}
+
+/** "#d73027" → {r, g, b} in 0..1. */
+export function hexToRgb(hex: string): Rgb {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255 };
+}
+
+/** {r, g, b} → "#d73027". */
+export function rgbToHex(c: Rgb): string {
+  const h = (v: number): string =>
+    Math.round(Math.min(1, Math.max(0, v)) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
+}
+
+/** The colour at `t` (0 = lowest, 1 = highest) along a scale, interpolated in sRGB. */
+export function sampleGradient(palette: GradientPalette, t: number): Rgb {
+  const stops = palette.stops;
+  if (stops.length === 1) return hexToRgb(stops[0]);
+  const x = Math.min(1, Math.max(0, Number.isFinite(t) ? t : 0)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x));
+  const f = x - i;
+  const a = hexToRgb(stops[i]);
+  const b = hexToRgb(stops[i + 1]);
+  return { r: a.r + (b.r - a.r) * f, g: a.g + (b.g - a.g) * f, b: a.b + (b.b - a.b) * f };
+}
+
+function channelToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/** sRGB → linear RGB, which the renderer's colours are in. */
+export function toLinear(c: Rgb): Rgb {
+  return { r: channelToLinear(c.r), g: channelToLinear(c.g), b: channelToLinear(c.b) };
+}
+
+/** Steps in a gradient lookup table: finer than the eye separates on a face. */
+export const GRADIENT_LUT_SIZE = 256;
+
+/**
+ * The scale as linear RGB at `GRADIENT_LUT_SIZE` evenly spaced points, so
+ * colouring each element is a table lookup, not a conversion.
+ */
+export function gradientLut(palette: GradientPalette): Float32Array {
+  const lut = new Float32Array(GRADIENT_LUT_SIZE * 3);
+  for (let i = 0; i < GRADIENT_LUT_SIZE; i++) {
+    const c = toLinear(sampleGradient(palette, i / (GRADIENT_LUT_SIZE - 1)));
+    lut[i * 3] = c.r;
+    lut[i * 3 + 1] = c.g;
+    lut[i * 3 + 2] = c.b;
+  }
+  return lut;
+}
+
+/** CSS for a bar showing the whole scale, low on the left. */
+export function gradientCss(palette: GradientPalette): string {
+  return `linear-gradient(to right, ${palette.stops.join(', ')})`;
+}
