@@ -38,6 +38,36 @@ export type ColourScope =
   | { kind: 'model'; modelId: string }
   | { kind: 'selection'; elements: ReadonlyMap<string, readonly number[]> };
 
+/**
+ * What a colouring asked for from `modelId` covers. With two or more
+ * elements selected, the selection; otherwise the whole of `modelId`.
+ * `onlyThisModel` (the Parameters list, which is one model's list) keeps to
+ * the selected elements of `modelId`, and to the whole model when fewer
+ * than two of them are selected; from the right-click menu a selection
+ * across models is coloured as one.
+ */
+export function colourScopeFor(
+  selected: readonly { modelId: string; expressId: number }[],
+  modelId: string,
+  onlyThisModel: boolean,
+): ColourScope {
+  const chosen = onlyThisModel ? selected.filter((e) => e.modelId === modelId) : selected;
+  if (chosen.length < 2) return { kind: 'model', modelId };
+  const elements = new Map<string, number[]>();
+  for (const { modelId: m, expressId } of chosen) {
+    let ids = elements.get(m);
+    if (!ids) elements.set(m, (ids = []));
+    ids.push(expressId);
+  }
+  return { kind: 'selection', elements };
+}
+
+/** True when `state` is a colouring by `key` that covers elements of `modelId`. */
+export function isColouringBy(state: ColourByState, key: string, modelId: string): boolean {
+  if (state.phase === 'off' || state.key !== key) return false;
+  return state.scope.kind === 'model' ? state.scope.modelId === modelId : state.scope.elements.has(modelId);
+}
+
 export type ColourByState =
   | { phase: 'off' }
   | { phase: 'reading'; key: string; scope: ColourScope; done: number; total: number }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ColourByController, type ColourByDeps } from '../src/inspector/ColourByController';
+import { ColourByController, colourScopeFor, isColouringBy, type ColourByDeps } from '../src/inspector/ColourByController';
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
 import { makeModelManager, boxModel } from './helpers/models';
 
@@ -171,5 +171,42 @@ describe('ColourByController', () => {
     expect(s.ticked).toEqual([true, false, true]);
     expect(modelManager.getElementState('a', 1)!.color).not.toEqual(before);
     expect(modelManager.getElementState('a', 2)!.dataColored).toBe(false);
+  });
+});
+
+describe('what a colouring covers', () => {
+  const a1 = { modelId: 'a', expressId: 1 };
+  const a2 = { modelId: 'a', expressId: 2 };
+  const b1 = { modelId: 'b', expressId: 1 };
+  const b2 = { modelId: 'b', expressId: 2 };
+
+  it('one element or none selected: the whole model', () => {
+    expect(colourScopeFor([], 'a', false)).toEqual({ kind: 'model', modelId: 'a' });
+    expect(colourScopeFor([a1], 'a', false)).toEqual({ kind: 'model', modelId: 'a' });
+  });
+
+  it('from the right-click menu, a selection across models is coloured as one', () => {
+    const s = colourScopeFor([a1, b1, b2], 'a', false);
+    expect(s).toEqual({ kind: 'selection', elements: new Map([['a', [1]], ['b', [1, 2]]]) });
+  });
+
+  it("from a model's Parameters list, only that model's selected elements", () => {
+    expect(colourScopeFor([a1, a2, b1], 'a', true)).toEqual({ kind: 'selection', elements: new Map([['a', [1, 2]]]) });
+  });
+
+  it("from a model's Parameters list, a selection in another model colours the whole list's model", () => {
+    // Before: model B's elements were coloured by model A's parameter, and
+    // model A stayed as it was.
+    expect(colourScopeFor([b1, b2], 'a', true)).toEqual({ kind: 'model', modelId: 'a' });
+    expect(colourScopeFor([a1, b1, b2], 'a', true)).toEqual({ kind: 'model', modelId: 'a' });
+  });
+
+  it('the swatch of the parameter shown clears it: same parameter, and the colouring covers that model', async () => {
+    const { controller } = setup({ a: textColumn('a', [1, 2, 3], ['x', 'y', 'x']) });
+    expect(isColouringBy(controller.getState(), 'k', 'a')).toBe(false);
+    await controller.colourBy('k', colourScopeFor([b1, b2], 'a', true));
+    expect(isColouringBy(controller.getState(), 'k', 'a')).toBe(true);
+    expect(isColouringBy(controller.getState(), 'other', 'a')).toBe(false);
+    expect(isColouringBy(controller.getState(), 'k', 'b')).toBe(false);
   });
 });

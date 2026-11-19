@@ -41,7 +41,7 @@ import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
-import { ColourByController, type ColourScope } from '../inspector/ColourByController';
+import { ColourByController, colourScopeFor, isColouringBy, type ColourScope } from '../inspector/ColourByController';
 import { ColourLegend } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
@@ -702,11 +702,8 @@ ${parameter.key}`);
       },
       // The button of the parameter coloured by now clears it again.
       colourBy: (modelId, parameter) => {
-        const s = this.colourBy.getState();
-        const covers =
-          s.phase !== 'off' && (s.scope.kind === 'model' ? s.scope.modelId === modelId : s.scope.elements.has(modelId));
-        if (covers && s.key === parameter.key) this.colourBy.clear();
-        else void this.colourByParameter(parameter.key, modelId);
+        if (isColouringBy(this.colourBy.getState(), parameter.key, modelId)) this.colourBy.clear();
+        else void this.colourBy.colourBy(parameter.key, this.colourScope(modelId, true));
       },
     });
 
@@ -1630,26 +1627,13 @@ ${parameter.key}`);
   // ── Colour by parameter (#68) ──────────────────────────────
 
   /**
-   * What a colouring covers: the selection when more than one element is
-   * selected, otherwise the whole of `modelId` (the model the colouring
-   * was asked for from). One rule for every entry point, named in the
-   * legend's header.
+   * What a colouring covers (see `colourScopeFor`): with two or more
+   * elements selected, the selection; otherwise the whole of `modelId`.
+   * From the Parameters list (`onlyThisModel`), only the list's model.
    */
-  private colourScope(modelId: string): ColourScope {
+  private colourScope(modelId: string, onlyThisModel: boolean): ColourScope {
     const state = this.selectionManager.getState();
-    if (state.kind === 'none' || state.identities.length < 2) return { kind: 'model', modelId };
-    const elements = new Map<string, number[]>();
-    for (const { modelId: m, expressId } of state.identities) {
-      let ids = elements.get(m);
-      if (!ids) elements.set(m, (ids = []));
-      ids.push(expressId);
-    }
-    return { kind: 'selection', elements };
-  }
-
-  /** Colour by `key`, over the scope the current selection and `modelId` give. */
-  private colourByParameter(key: string, modelId: string): Promise<void> {
-    return this.colourBy.colourBy(key, this.colourScope(modelId));
+    return colourScopeFor(state.kind === 'none' ? [] : state.identities, modelId, onlyThisModel);
   }
 
   /**
@@ -1678,7 +1662,7 @@ ${parameter.key}`);
       window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
       return;
     }
-    const scope = this.colourScope(first.modelId);
+    const scope = this.colourScope(first.modelId, false);
     const n = state.identities.length;
     const heading = scope.kind === 'model' ? 'Colour the whole model by' : `Colour the ${n.toLocaleString('en-US')} selected by`;
     this.parameterPicker.open(x, y, heading, rows, (key) => void this.colourBy.colourBy(key, scope));
