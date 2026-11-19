@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
 import { ModelManager } from '../src/viewer/ModelManager';
-import { ANCHOR_REACH, SEE_THROUGH_SETTLE_MS, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
+import { ANCHOR_REACH, HIGHLIGHT_COLOR, SEE_THROUGH_SETTLE_MS, ChunkMesh, ModelBatch, elementOfHit, modelIdOfObject, pieceGeometryOfHit } from '../src/viewer/ModelBatch';
 import { boxMesh, boxModel, cameraLookingAt, makeModelManager } from './helpers/models';
 
 /** Every chunk mesh of every model in the scene. */
@@ -385,10 +385,10 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
 
   it('gives each element its own colour in one call, on every piece', () => {
     const { modelManager } = makeModelManager([boxModel('m', [1, 1, 2, 3], { color: red })]);
-    const rgb = new Float32Array([0, 1, 0, 0, 0, 1, NaN, 0, 0]);
-    modelManager.setDataColors('m', [1, 2, 3], rgb);
+    const rgba = new Float32Array([0, 1, 0, 1, 0, 0, 1, 1, NaN, 0, 0, 0]);
+    modelManager.setDataColors('m', [1, 2, 3], rgba);
     const batch = modelManager.getModel('m')!.batch;
-    expect(batch.elementState(1)).toMatchObject({ color: { r: 0, g: 1, b: 0 }, dataColored: true });
+    expect(batch.elementState(1)).toMatchObject({ color: { r: 0, g: 1, b: 0 }, dataColored: true, opacity: 1 });
     expect(batch.elementState(2)!.color).toEqual({ r: 0, g: 0, b: 1 });
     // NaN: no data colour, the element's own.
     expect(batch.elementState(3)).toMatchObject({ color: { r: 1, g: 0, b: 0 }, dataColored: false });
@@ -398,12 +398,32 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
     const { modelManager } = makeModelManager([boxModel('m', [1, 2], { color: red })]);
     const batch = modelManager.getModel('m')!.batch;
     modelManager.setColor('m', [1], { r: 0, g: 0, b: 1 });
-    modelManager.setDataColors('m', [1, 2], new Float32Array([0, 1, 0, 0, 1, 0]));
+    modelManager.setDataColors('m', [1, 2], new Float32Array([0, 1, 0, 1, 0, 1, 0, 1]));
     expect(batch.elementState(1)!.color).toEqual({ r: 0, g: 1, b: 0 });
     modelManager.clearDataColors('m');
     expect(batch.elementState(1)).toMatchObject({ color: { r: 0, g: 0, b: 1 }, colorOverridden: true, dataColored: false });
     expect(batch.elementState(2)).toMatchObject({ color: { r: 1, g: 0, b: 0 }, colorOverridden: false });
     expect(batch.dataColorBytes).toBe(0);
+  });
+
+  it('a ghost alpha makes an element see-through, and clearing makes it solid again', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1, 2])]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setDataColors('m', [1, 2], new Float32Array([0.5, 0.5, 0.5, 0.3, 1, 0, 0, 1]));
+    expect(batch.elementState(1)!.opacity).toBeCloseTo(0.3);
+    expect(batch.elementState(2)!.opacity).toBe(1);
+    expect(batch.stats().overlays).toBe(1);
+    modelManager.clearDataColors('m');
+    expect(batch.elementState(1)!.opacity).toBe(1);
+    expect(batch.stats().overlays).toBe(0);
+  });
+
+  it('a ghost never makes an element more solid than it was made', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1])]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setOpacity('m', [1], 0.25);
+    modelManager.setDataColors('m', [1], new Float32Array([0.5, 0.5, 0.5, 0.3]));
+    expect(batch.elementState(1)!.opacity).toBe(0.25);
   });
 
   it('leaves hidden, see-through and highlighted elements as they are', () => {
@@ -412,7 +432,7 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
     modelManager.setHidden('m', [1], true);
     modelManager.setOpacity('m', [2], 0.25);
     modelManager.setHighlighted('m', [3], true);
-    modelManager.setDataColors('m', [1, 2, 3], new Float32Array(9).fill(0.5));
+    modelManager.setDataColors('m', [1, 2, 3], new Float32Array(12).fill(1));
     expect(batch.elementState(1)!.hidden).toBe(true);
     expect(batch.elementState(2)!.opacity).toBe(0.25);
     expect(batch.elementState(3)!.highlighted).toBe(true);
@@ -422,11 +442,22 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
     expect(batch.elementState(3)!.highlighted).toBe(true);
   });
 
+  it('draws a selected element in the highlight colour, so the selection shows on any data colour', () => {
+    const { modelManager } = makeModelManager([boxModel('m', [1])]);
+    const batch = modelManager.getModel('m')!.batch;
+    modelManager.setDataColors('m', [1], new Float32Array([0, 1, 0, 1]));
+    modelManager.setHighlighted('m', [1], true);
+    const blue = new THREE.Color(HIGHLIGHT_COLOR);
+    expect(batch.elementState(1)!.color.b).toBeCloseTo(blue.b);
+    modelManager.setHighlighted('m', [1], false);
+    expect(batch.elementState(1)!.color).toEqual({ r: 0, g: 1, b: 0 });
+  });
+
   it('holds no memory until used, and ignores elements the model does not have', () => {
     const { modelManager } = makeModelManager([boxModel('m', [1])]);
     const batch = modelManager.getModel('m')!.batch;
     expect(batch.dataColorBytes).toBe(0);
-    modelManager.setDataColors('m', [1, 999], new Float32Array([1, 1, 1, 0, 0, 0]));
+    modelManager.setDataColors('m', [1, 999], new Float32Array([1, 1, 1, 1, 0, 0, 0, 1]));
     expect(batch.elementState(1)!.dataColored).toBe(true);
     expect(batch.dataColorBytes).toBeGreaterThan(0);
   });
@@ -435,10 +466,10 @@ describe('ModelBatch — data colours (colour by parameter)', () => {
     const meshes = Array.from({ length: 20000 }, (_, i) => boxMesh(i + 1, { at: [i % 200, Math.floor(i / 200), 0] }));
     const { modelManager } = makeModelManager([{ id: 'm', meshes }]);
     const ids = Int32Array.from(modelManager.elementIds('m'));
-    const rgb = new Float32Array(ids.length * 3);
-    for (let i = 0; i < ids.length; i++) rgb[i * 3] = i / ids.length;
+    const rgba = new Float32Array(ids.length * 4).fill(1);
+    for (let i = 0; i < ids.length; i++) rgba[i * 4] = i / ids.length;
     const t0 = performance.now();
-    modelManager.setDataColors('m', ids, rgb);
+    modelManager.setDataColors('m', ids, rgba);
     modelManager.clearDataColors('m');
     expect(performance.now() - t0).toBeLessThan(500);
   });

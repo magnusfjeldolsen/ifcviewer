@@ -9,7 +9,7 @@ import {
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
 import type { ParameterValue } from '../src/inspector/types';
 import type { UnitRef } from '../src/inspector/units';
-import { DEFAULT_GRADIENT, NO_VALUE_COLOUR, hexToRgb, sampleGradient, toLinear } from '../src/viewer/colourPalettes';
+import { DEFAULT_GRADIENT, NO_VALUE_COLOUR, NO_VALUE_OPACITY, hexToRgb, sampleGradient, toLinear } from '../src/viewer/colourPalettes';
 
 const MM: UnitRef = { key: 'LENGTHUNIT:MILLI:METRE', symbol: 'mm' };
 const M: UnitRef = { key: 'LENGTHUNIT::METRE', symbol: 'm' };
@@ -56,8 +56,10 @@ describe('colour by parameter — numbers in one unit', () => {
     expect(plan.entries[2].color).toEqual(sampleGradient(DEFAULT_GRADIENT, 1));
     const p = plan.models[0];
     expect(Array.from(p.entry)).toEqual([1, 0, 2, 0, 3]);
-    // The element without a value is painted the pale "no value" grey.
-    expect(p.rgb[12]).toBeCloseTo(toLinear(hexToRgb(NO_VALUE_COLOUR)).r);
+    // The element without a value is a pale grey ghost.
+    expect(p.rgba[16]).toBeCloseTo(toLinear(hexToRgb(NO_VALUE_COLOUR)).r);
+    expect(p.rgba[19]).toBeCloseTo(NO_VALUE_OPACITY);
+    expect(p.rgba[3]).toBe(1);
   });
 
   it('many distinct values: a continuous gradient, with ranges to tick', () => {
@@ -72,9 +74,9 @@ describe('colour by parameter — numbers in one unit', () => {
     // The lowest is the first stop, the highest the last, each element its own shade.
     const low = toLinear(sampleGradient(DEFAULT_GRADIENT, 0));
     const high = toLinear(sampleGradient(DEFAULT_GRADIENT, 1));
-    expect(p.rgb[0]).toBeCloseTo(low.r, 5);
-    expect(p.rgb[59 * 3 + 1]).toBeCloseTo(high.g, 5);
-    expect(p.rgb[3]).not.toBe(p.rgb[6]);
+    expect(p.rgba[0]).toBeCloseTo(low.r, 5);
+    expect(p.rgba[59 * 4 + 1]).toBeCloseTo(high.g, 5);
+    expect(p.rgba[4]).not.toBe(p.rgba[8]);
     expect(p.entry[59]).toBe(5);
   });
 
@@ -172,11 +174,11 @@ describe('colour by parameter — scope and ticking', () => {
 
   it('an unticked entry gives its elements back their own colour (NaN)', () => {
     const plan = buildColourPlan('k', [whole(discrete('a', [0, 1, 0], ['x', 'y']))], opts);
-    const out = new Float32Array(plan.models[0].rgb.length);
+    const out = new Float32Array(plan.models[0].rgba.length);
     tickedColours(plan.models[0], [false, true], out);
     expect(Number.isNaN(out[0])).toBe(true);
-    expect(out[3]).toBe(plan.models[0].rgb[3]);
-    expect(Number.isNaN(out[6])).toBe(true);
+    expect(out[4]).toBe(plan.models[0].rgba[4]);
+    expect(Number.isNaN(out[8])).toBe(true);
   });
 
   it('lists the elements of an entry, across models', () => {

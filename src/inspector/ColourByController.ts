@@ -226,8 +226,8 @@ export class ColourByController {
     const t0 = performance.now();
     for (const p of s.plan.models) {
       let out = this.scratch.get(p.modelId);
-      if (!out || out.length !== p.rgb.length) {
-        out = new Float32Array(p.rgb.length);
+      if (!out || out.length !== p.rgba.length) {
+        out = new Float32Array(p.rgba.length);
         this.scratch.set(p.modelId, out);
       }
       this.deps.paint.setDataColors(p.modelId, p.ids, tickedColours(p, s.ticked, out));

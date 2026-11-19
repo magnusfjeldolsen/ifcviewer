@@ -59,6 +59,11 @@ export interface ParameterListOptions {
    * got ready for it can be given up. `modelId` is the model it belonged to.
    */
   onClose?(parameter: ParameterSummary, modelId: string): void;
+  /**
+   * Colour the elements by this parameter (#68). With it, each row has a
+   * colour button beside its header.
+   */
+  onColourBy?(parameter: ParameterSummary): void;
 }
 
 /** "412 of 1,235". */
@@ -162,6 +167,8 @@ export class ParameterList {
   private rowEls = new Map<string, HTMLElement>();
   /** Re-renders the open row's value list (set while a row is open). */
   private refreshOpen: (() => void) | null = null;
+  /** The parameter the model is coloured by, if it is this list's model. */
+  private colouredKey: string | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -265,6 +272,20 @@ export class ParameterList {
     return this.openKey;
   }
 
+  /** Mark the row of the parameter the elements are coloured by (null: none). */
+  setColouredKey(key: string | null): void {
+    if (key === this.colouredKey) return;
+    const previous = this.colouredKey;
+    this.colouredKey = key;
+    for (const k of [previous, key]) {
+      const btn = k === null ? null : this.rowEls.get(k)?.querySelector('.param-colour-btn');
+      if (btn) {
+        btn.classList.toggle('active', k === key);
+        btn.setAttribute('aria-pressed', String(k === key));
+      }
+    }
+  }
+
   /** Tell `onClose` that row `key` (of the data shown now) is no longer open. */
   private closed(key: string | null): void {
     if (key === null || !this.data) return;
@@ -366,6 +387,20 @@ export class ParameterList {
     head.appendChild(key);
     head.appendChild(meta);
     li.appendChild(head);
+
+    const onColourBy = this.options.onColourBy;
+    if (onColourBy) {
+      li.classList.add('colourable');
+      const colour = document.createElement('button');
+      colour.type = 'button';
+      const on = this.colouredKey === p.key;
+      colour.className = on ? 'param-colour-btn active' : 'param-colour-btn';
+      colour.setAttribute('aria-pressed', String(on));
+      colour.title = 'Colour the elements by this parameter';
+      colour.setAttribute('aria-label', `Colour by ${p.key}`);
+      colour.addEventListener('click', () => onColourBy(p));
+      li.appendChild(colour);
+    }
 
     if (open) {
       const panel = this.valuesPanel(p, scopeSize);

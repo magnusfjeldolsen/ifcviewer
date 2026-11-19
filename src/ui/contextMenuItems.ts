@@ -49,11 +49,20 @@ export interface ContextMenuActions {
    */
   selectSimilarCategory: () => void;
   selectSimilarType: () => void;
+  /**
+   * Colour by a parameter (#68): opens a picker of the clicked element's
+   * parameters. Optional, so callers without colouring build the same menu.
+   */
+  colourBy?: () => void;
+  /** End the colouring shown now. */
+  clearColours?: () => void;
 }
 
 export interface AppearanceFlags {
   hasHidden: boolean;
   hasTransparent: boolean;
+  /** A colouring by parameter is shown. */
+  hasColouring?: boolean;
 }
 
 /**
@@ -94,6 +103,13 @@ export function buildContextMenuItems(
   items.push({ label: 'Make opaque', onClick: actions.opaque, disabled: !flags.hasTransparent });
   items.push({ separator: true });
 
+  // Colour by parameter.
+  if (actions.colourBy) {
+    items.push({ label: 'Colour by parameter…', onClick: actions.colourBy });
+    if (flags.hasColouring && actions.clearColours) items.push({ label: 'Clear colours', onClick: actions.clearColours });
+    items.push({ separator: true });
+  }
+
   // Select similar — whatever the selection shares (see ContextMenuActions).
   const similar = sharedSource(state.identities);
   if (similar) {
@@ -116,13 +132,17 @@ export function buildContextMenuItems(
 
 /** Recovery-only menu for the no-selection case; null when nothing is active. */
 function buildRecoveryOnly(flags: AppearanceFlags, actions: ContextMenuActions): MenuItem[] | null {
-  if (!flags.hasHidden && !flags.hasTransparent) return null;
+  const colouring = !!flags.hasColouring && !!actions.clearColours;
+  if (!flags.hasHidden && !flags.hasTransparent && !colouring) return null;
   const items: MenuItem[] = [];
   if (flags.hasHidden) {
     items.push({ label: 'Show all', onClick: actions.showAll });
   }
   if (flags.hasTransparent) {
     items.push({ label: 'Clear transparency', onClick: actions.clearTransparency });
+  }
+  if (colouring) {
+    items.push({ label: 'Clear colours', onClick: actions.clearColours });
   }
   return items;
 }

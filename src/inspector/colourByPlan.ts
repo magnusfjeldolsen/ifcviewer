@@ -37,6 +37,7 @@ import type { ParameterValue } from './types';
 import {
   CATEGORY_COLOURS,
   NO_VALUE_COLOUR,
+  NO_VALUE_OPACITY,
   OTHER_COLOUR,
   GRADIENT_LUT_SIZE,
   gradientLut,
@@ -65,8 +66,8 @@ export interface ModelPaint {
   ids: Int32Array;
   /** Index into `ColourPlan.entries`. */
   entry: Uint8Array;
-  /** Linear RGB, three per element. */
-  rgb: Float32Array;
+  /** Linear RGBA, four per element; alpha below 1 ghosts it (no value). */
+  rgba: Float32Array;
 }
 
 export interface ColourPlan {
@@ -209,15 +210,16 @@ function paintsFor(inputs: readonly PlanModelInput[]): ModelPaint[] {
     const { rows, column } = input;
     if (rows) for (let i = 0; i < n; i++) ids[i] = column.ids[rows[i]];
     else ids.set(column.ids);
-    return { modelId: column.modelId, ids, entry: new Uint8Array(n), rgb: new Float32Array(n * 3) };
+    return { modelId: column.modelId, ids, entry: new Uint8Array(n), rgba: new Float32Array(n * 4) };
   });
 }
 
-function paint(p: ModelPaint, i: number, entry: number, c: Rgb): void {
+function paint(p: ModelPaint, i: number, entry: number, c: Rgb, alpha = 1): void {
   p.entry[i] = entry;
-  p.rgb[i * 3] = c.r;
-  p.rgb[i * 3 + 1] = c.g;
-  p.rgb[i * 3 + 2] = c.b;
+  p.rgba[i * 4] = c.r;
+  p.rgba[i * 4 + 1] = c.g;
+  p.rgba[i * 4 + 2] = c.b;
+  p.rgba[i * 4 + 3] = alpha;
 }
 
 /** Append the "no value" entry when some element lacks one, and paint those. */
@@ -235,7 +237,7 @@ function finishNoValue(
   entries.push({ label: 'No value', color: NO_VALUE, count, kind: 'none' });
   const linear = toLinear(NO_VALUE);
   for (let m = 0; m < paints.length; m++) {
-    for (let i = 0; i < paints[m].ids.length; i++) if (!hasValue(m, i)) paint(paints[m], i, index, linear);
+    for (let i = 0; i < paints[m].ids.length; i++) if (!hasValue(m, i)) paint(paints[m], i, index, linear, NO_VALUE_OPACITY);
   }
 }
 
@@ -311,9 +313,10 @@ function gradientPlan(
       entries[b].count++;
       p.entry[i] = b;
       const l = Math.round(t * last) * 3;
-      p.rgb[i * 3] = lut[l];
-      p.rgb[i * 3 + 1] = lut[l + 1];
-      p.rgb[i * 3 + 2] = lut[l + 2];
+      p.rgba[i * 4] = lut[l];
+      p.rgba[i * 4 + 1] = lut[l + 1];
+      p.rgba[i * 4 + 2] = lut[l + 2];
+      p.rgba[i * 4 + 3] = 1;
       valued[m][i] = 1;
     });
   });
@@ -423,19 +426,21 @@ function total(paints: ModelPaint[]): number {
 }
 
 /**
- * The colours to draw with some entries ticked off: `rgb` where an
+ * The colours to draw with some entries ticked off: `rgba` where an
  * element's entry is ticked, NaN (its own colour) where not. Written into
- * `out`, which must be as long as `paint.rgb`, so nothing is allocated.
+ * `out`, which must be as long as `paint.rgba`, so nothing is allocated.
  */
 export function tickedColours(paint: ModelPaint, ticked: readonly boolean[], out: Float32Array): Float32Array {
-  const { entry, rgb } = paint;
+  const { entry, rgba } = paint;
   for (let i = 0; i < entry.length; i++) {
+    const o = i * 4;
     if (ticked[entry[i]]) {
-      out[i * 3] = rgb[i * 3];
-      out[i * 3 + 1] = rgb[i * 3 + 1];
-      out[i * 3 + 2] = rgb[i * 3 + 2];
+      out[o] = rgba[o];
+      out[o + 1] = rgba[o + 1];
+      out[o + 2] = rgba[o + 2];
+      out[o + 3] = rgba[o + 3];
     } else {
-      out[i * 3] = NaN;
+      out[o] = NaN;
     }
   }
   return out;

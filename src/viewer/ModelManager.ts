@@ -192,11 +192,12 @@ export class ModelManager {
 
   /**
    * Colour elements of one model by data, each its own colour (see
-   * `ModelBatch.setDataColors`): `rgb` holds linear RGB per element, NaN for
-   * none. Drawn above any colour override, which `clearDataColors` restores.
+   * `ModelBatch.setDataColors`): `rgba` holds linear RGBA per element, NaN
+   * for none; an alpha below 1 ghosts the element. Drawn above any colour
+   * override, which `clearDataColors` restores.
    */
-  setDataColors(modelId: string, expressIds: ArrayLike<number>, rgb: Float32Array): void {
-    this.apply(modelId, (b) => b.setDataColors(expressIds, rgb));
+  setDataColors(modelId: string, expressIds: ArrayLike<number>, rgba: Float32Array): void {
+    this.apply(modelId, (b) => b.setDataColors(expressIds, rgba));
   }
 
   /** Remove every data colour of one model. */

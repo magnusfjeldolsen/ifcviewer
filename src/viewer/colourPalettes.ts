@@ -49,10 +49,10 @@ export const DEFAULT_GRADIENT = GRADIENTS[0];
 /**
  * Distinct values (text, yes/no, a few numbers in different units), in
  * order of use: Kelly's colours of maximum contrast, without white, black
- * and grey, which the model and the "no value" state already use.
+ * and grey (the model and the "no value" state use those) and without the
+ * deep blues, which a selected element is drawn in.
  */
 export const CATEGORY_COLOURS: readonly string[] = [
-  '#0067a5', // blue
   '#f38400', // orange
   '#be0032', // red
   '#008856', // green
@@ -61,19 +61,22 @@ export const CATEGORY_COLOURS: readonly string[] = [
   '#a1caf1', // light blue
   '#e68fac', // pink
   '#8db600', // yellow-green
-  '#604e97', // violet
-  '#c2b280', // buff
   '#882d17', // reddish brown
+  '#c2b280', // buff
+  '#b3446c', // purplish red
+  '#f99379', // salmon
 ];
 
-/** The values past the most common ones, sharing one colour. */
-export const OTHER_COLOUR = '#7d6b5d';
+/** The values past the most common ones, sharing one colour: a light warm grey. */
+export const OTHER_COLOUR = '#bdb5ab';
 
 /**
- * Elements in the scope with no value. Pale, so they recede behind the
- * coloured ones, and lighter than the greys models are usually drawn in.
+ * Elements in the scope with no value: a pale grey ghost. Drawn see-through,
+ * so the coloured elements stand out and what lacks the value still shows
+ * where it is. An opaque grey would look like the model's own concrete.
  */
-export const NO_VALUE_COLOUR = '#e4e4e4';
+export const NO_VALUE_COLOUR = '#d4d4d4';
+export const NO_VALUE_OPACITY = 0.3;
 
 export function gradientById(id: string): GradientPalette {
   return GRADIENTS.find((g) => g.id === id) ?? DEFAULT_GRADIENT;

@@ -41,6 +41,9 @@ import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
+import { ColourByController, type ColourScope } from '../inspector/ColourByController';
+import { ColourLegend } from '../ui/ColourLegend';
+import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
@@ -185,6 +188,10 @@ export class App {
   /** Columns asked for because their parameter is open: `${modelId}
 ${key}`. */
   private preparedColumns = new Set<string>();
+  /** Colour by parameter (#68): the colouring shown, its legend, and the right-click picker. */
+  private colourBy!: ColourByController;
+  private colourLegend!: ColourLegend;
+  private parameterPicker!: ParameterPicker;
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
   private loadSettledListeners: Array<(event: LoadSettledEvent) => void> = [];
@@ -416,6 +423,9 @@ ${key}`. */
         // Prune appearance overrides for the removed model (system change,
         // pushes no undo command). Its onChange triggers a debounced save.
         this.appearanceManager.onModelRemoved(id);
+        // Its elements leave the colouring by parameter (and the colouring
+        // ends if it was this model's alone).
+        this.colourBy?.onModelRemoved(id);
         // Free memoized properties AND close the worker's model. The
         // repository's disposeModel posts the `disposeModel` worker
         // message, so we do NOT also call parser.disposeModel here.
@@ -690,6 +700,38 @@ ${parameter.key}`;
 ${parameter.key}`);
         this.propertyRepository.releaseColumn(modelId, parameter.key);
       },
+      colourBy: (modelId, parameter) => void this.colourByParameter(parameter.key, modelId),
+    });
+
+    // Colour by parameter (#68). The colours read the same value columns as
+    // the Parameters list; a model's parameters are described first when
+    // the colouring comes from the right-click menu and the list was never
+    // opened (the column's rows are the described elements).
+    this.colourBy = new ColourByController({
+      loadColumn: async (modelId, key, onProgress) => {
+        await this.loadGate.idle();
+        await this.propertyRepository.describeParameters(modelId, this.modelManager.elementIds(modelId), onProgress);
+        // Urgent: someone is waiting to see the colours.
+        return this.propertyRepository.getColumn(modelId, key, onProgress, { urgent: true });
+      },
+      paint: this.modelManager,
+      select: (elements) =>
+        this.selectionManager.selectExactly(elements.map((e) => ({ ...e, ifcClass: '', ifcTypeCode: 0 }))),
+    });
+    // Appended after the Parameters panel: the stylesheet moves the legend
+    // left of the panel while the panel is open (a sibling selector).
+    this.colourLegend = new ColourLegend(appEl, {
+      controller: this.colourBy,
+      modelName: (id) => this.modelRecords.get(id)?.name ?? 'Model',
+    });
+    this.parameterPicker = new ParameterPicker(appEl);
+    this.colourBy.onChange(() => {
+      const s = this.colourBy.getState();
+      this.parametersPanel.setColoured(
+        s.phase === 'off'
+          ? null
+          : { key: s.key, models: new Set(s.scope.kind === 'model' ? [s.scope.modelId] : s.scope.elements.keys()) },
+      );
     });
 
     // Persist the basket on every content change (debounced via the same
@@ -708,7 +750,10 @@ ${parameter.key}`);
     // The tray shares the right edge with the Parameters panel and grows
     // upward; the panel stays clear of it.
     const tray = contextualParent.querySelector<HTMLElement>('.contextual-actions');
-    if (tray) this.parametersPanel.keepClearOf(tray);
+    if (tray) {
+      this.parametersPanel.keepClearOf(tray);
+      this.colourLegend.keepClearOf(tray);
+    }
     this.contextualActions.register({
       id: 'remove-clipping',
       label: 'Remove clipping',
@@ -779,6 +824,17 @@ ${parameter.key}`);
       isVisible: () => this.viewer.hasPivot(),
       onClick: () => this.viewer.clearPivot(),
       subscribe: (refresh) => this.viewer.onPivotChange(refresh),
+    });
+
+    // Colour by parameter: the legend has its own Clear, but the tray is
+    // where every other "undo this view change" lives.
+    this.contextualActions.register({
+      id: 'clear-colours',
+      label: 'Clear colours',
+      icon: '🎨',
+      isVisible: () => this.colourBy.isActive(),
+      onClick: () => this.colourBy.clear(),
+      subscribe: (refresh) => this.colourBy.onChange(refresh),
     });
 
     this.contextualActions.register({
@@ -1499,6 +1555,7 @@ ${parameter.key}`);
       {
         hasHidden: this.appearanceManager.hasHidden(),
         hasTransparent: this.appearanceManager.hasTransparent(),
+        hasColouring: this.colourBy.isActive(),
       },
       {
         hide: () => this.appearanceHide(),
@@ -1517,6 +1574,8 @@ ${parameter.key}`);
           const query = typeQuery(similar);
           if (query) void this.runSelectSimilar(query);
         },
+        colourBy: () => void this.openColourPicker(x, y, state),
+        clearColours: () => this.colourBy.clear(),
       },
     );
 
@@ -1559,6 +1618,63 @@ ${parameter.key}`);
     return state.kind === 'single'
       ? { kind: 'single', identities: [enriched[0]] }
       : { ...state, identities: enriched };
+  }
+
+  // ── Colour by parameter (#68) ──────────────────────────────
+
+  /**
+   * What a colouring covers: the selection when more than one element is
+   * selected, otherwise the whole of `modelId` (the model the colouring
+   * was asked for from). One rule for every entry point, named in the
+   * legend's header.
+   */
+  private colourScope(modelId: string): ColourScope {
+    const state = this.selectionManager.getState();
+    if (state.kind === 'none' || state.identities.length < 2) return { kind: 'model', modelId };
+    const elements = new Map<string, number[]>();
+    for (const { modelId: m, expressId } of state.identities) {
+      let ids = elements.get(m);
+      if (!ids) elements.set(m, (ids = []));
+      ids.push(expressId);
+    }
+    return { kind: 'selection', elements };
+  }
+
+  /** Colour by `key`, over the scope the current selection and `modelId` give. */
+  private colourByParameter(key: string, modelId: string): Promise<void> {
+    return this.colourBy.colourBy(key, this.colourScope(modelId));
+  }
+
+  /**
+   * "Colour by parameter…" from the right-click menu: a searchable list of
+   * the clicked element's own parameters, each with its value, at the
+   * menu's position.
+   */
+  private async openColourPicker(x: number, y: number, state: SelectionState): Promise<void> {
+    if (state.kind === 'none') return;
+    const first = state.identities[0];
+    let rows: PickerRow[];
+    try {
+      const props = await this.propertyRepository.get(first.modelId, first.expressId);
+      // One row per parameter: the first at its path, as discovery and the
+      // value columns read it.
+      const seen = new Set<string>();
+      rows = [];
+      for (const r of props.flat) {
+        if (seen.has(r.path)) continue;
+        seen.add(r.path);
+        rows.push({ key: r.path, value: r.unit ? `${r.displayValue} ${r.unit}` : r.displayValue });
+      }
+    } catch (err) {
+      console.error('App: reading parameters for colouring failed', err);
+      this.setStatus('Could not read the parameters of this element');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      return;
+    }
+    const scope = this.colourScope(first.modelId);
+    const n = state.identities.length;
+    const heading = scope.kind === 'model' ? 'Colour the whole model by' : `Colour the ${n.toLocaleString('en-US')} selected by`;
+    this.parameterPicker.open(x, y, heading, rows, (key) => void this.colourBy.colourBy(key, scope));
   }
 
   // ── Appearance actions (D) ─────────────────────────────────
@@ -1634,6 +1750,10 @@ ${parameter.key}`);
     for (const id of this.modelManager.getModelIds()) {
       this.appearanceManager.onModelRemoved(id);
     }
+    // The same for a colouring by parameter: its columns are of models
+    // about to be closed.
+    this.colourBy?.clear();
+    this.parameterPicker?.close();
     // resetView tears down and re-adds every model; the undo history's
     // references won't survive that, so clear it (U2). (The selectionManager
     // .clear() above ran while history was still live; clearing now drops any
@@ -1815,6 +1935,8 @@ ${parameter.key}`);
     if (this.inspectorPanel) this.inspectorPanel.dispose();
     if (this.selectionBasketPanel) this.selectionBasketPanel.dispose();
     if (this.parametersPanel) this.parametersPanel.dispose();
+    if (this.colourLegend) this.colourLegend.dispose();
+    if (this.parameterPicker) this.parameterPicker.dispose();
     this.marqueeSelector.dispose();
     // Before toolManager.dispose (which disposes the measurement tool), so the
     // resolver's providers still point at live objects while they unhook.
