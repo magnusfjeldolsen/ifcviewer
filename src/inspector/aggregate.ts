@@ -53,6 +53,16 @@ export interface GroupLine {
   stats: Stats;
   /** Text rows: how many distinct values the group's elements have. */
   distinct?: number;
+  /** The group's value (absent for "(no value)"): tells look-alike labels apart. */
+  value?: ParameterValue;
+  /** For a number in a unit its model does not state: whose. */
+  modelId?: string;
+}
+
+/** What a group is, besides its label. */
+interface GroupMeta {
+  value?: ParameterValue;
+  modelId?: string;
 }
 
 /** The numbers of a total that are in one unit. */
@@ -111,16 +121,25 @@ class GroupRegistry {
   private index = new Map<string, number>();
   readonly keys: string[] = [];
   readonly labels: string[] = [];
+  readonly meta: GroupMeta[] = [];
 
-  of(key: string, label: string): number {
+  of(key: string, label: string, meta: GroupMeta = {}): number {
     let i = this.index.get(key);
     if (i === undefined) {
       i = this.keys.length;
       this.index.set(key, i);
       this.keys.push(key);
       this.labels.push(label);
+      this.meta.push(meta);
     }
     return i;
+  }
+
+  /** A line of group `g`, with what it is. */
+  line(g: number, stats: Stats, distinct?: number): GroupLine {
+    const out: GroupLine = { key: this.keys[g], label: this.labels[g], stats, ...this.meta[g] };
+    if (distinct !== undefined) out.distinct = distinct;
+    return out;
   }
 }
 
@@ -139,7 +158,7 @@ function groupMapper(modelId: string, group: ColumnData | null, groups: GroupReg
   if (!group) return noValue;
   if (group.type === 'discrete') {
     const map = new Int32Array(group.dictionary.length);
-    group.dictionary.forEach((v, code) => (map[code] = groups.of(`v:${valueKey(v)}`, legendValueText(v))));
+    group.dictionary.forEach((v, code) => (map[code] = groups.of(`v:${valueKey(v)}`, legendValueText(v), { value: v })));
     const codes = group.codes;
     return (row) => (codes[row] < 0 ? noValue() : map[codes[row]]);
   }
@@ -154,7 +173,10 @@ function groupMapper(modelId: string, group: ColumnData | null, groups: GroupReg
     if (g === undefined) {
       const unit = group.units[u];
       const label = legendValueText(v) + (unit.symbol ? ` ${unit.symbol}` : '');
-      g = groups.of(`n:${v}|${mergedUnitKey(modelId, unit.key)}`, label);
+      g = groups.of(`n:${v}|${mergedUnitKey(modelId, unit.key)}`, label, {
+        value: v,
+        ...(isNotStated(unit.key) ? { modelId } : {}),
+      });
       perUnit[u].set(v, g);
     }
     return g;
@@ -185,11 +207,7 @@ class GroupStats {
     const out: GroupLine[] = [];
     for (let g = 0; g < this.count.length; g++) {
       if (this.count[g] === 0) continue;
-      out.push({
-        key: groups.keys[g],
-        label: groups.labels[g],
-        stats: { count: this.count[g], sum: this.sum[g], min: this.min[g], max: this.max[g] },
-      });
+      out.push(groups.line(g, { count: this.count[g], sum: this.sum[g], min: this.min[g], max: this.max[g] }));
     }
     return out;
   }
@@ -237,12 +255,7 @@ class GroupDistinct {
     const out: GroupLine[] = [];
     for (let g = 0; g < this.count.length; g++) {
       if (this.count[g] === 0) continue;
-      out.push({
-        key: groups.keys[g],
-        label: groups.labels[g],
-        stats: { count: this.count[g], sum: NaN, min: NaN, max: NaN },
-        distinct: this.seen[g].size,
-      });
+      out.push(groups.line(g, { count: this.count[g], sum: NaN, min: NaN, max: NaN }, this.seen[g].size));
     }
     return out;
   }
@@ -263,8 +276,36 @@ export function aggregate(inputs: readonly TotalsInput[]): Totals {
   const textGroups = new GroupDistinct();
   let scopeSize = 0;
   let numbersCount = 0;
-  let otherCount = 0;
-  let numbersInText = 0;
+  /** Values that are not numbers (text, yes/no). */
+  let textCount = 0;
+
+  /** The bucket of a unit of a model's numbers. */
+  const bucketFor = (modelId: string, unit: UnitRef): Bucket => {
+    const key = mergedUnitKey(modelId, unit.key);
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        totals: {
+          unit: { key: unit.key, symbol: unit.symbol },
+          key,
+          ...(isNotStated(unit.key) ? { modelId } : {}),
+          stats: emptyStats(),
+        },
+        groupStats: grouped ? new GroupStats() : null,
+      };
+      buckets.set(key, b);
+      order.push(b);
+    }
+    return b;
+  };
+  const addNumber = (b: Bucket, v: number, g: number): void => {
+    const s = b.totals.stats;
+    s.count++;
+    s.sum += v;
+    if (v < s.min) s.min = v;
+    if (v > s.max) s.max = v;
+    if (g >= 0) b.groupStats!.add(g, v);
+  };
 
   for (const input of inputs) {
     const { column, rows } = input;
@@ -274,73 +315,52 @@ export function aggregate(inputs: readonly TotalsInput[]): Totals {
     const groupOf = grouped ? groupMapper(input.modelId, input.group ?? null, groups) : null;
 
     if (column.type === 'numeric') {
-      // The bucket of each of the column's units.
-      const bucketOf: Bucket[] = column.units.map((unit) => {
-        const key = mergedUnitKey(input.modelId, unit.key);
-        let b = buckets.get(key);
-        if (!b) {
-          b = {
-            totals: {
-              unit: { key: unit.key, symbol: unit.symbol },
-              key,
-              ...(isNotStated(unit.key) ? { modelId: input.modelId } : {}),
-              stats: emptyStats(),
-            },
-            groupStats: grouped ? new GroupStats() : null,
-          };
-          buckets.set(key, b);
-          order.push(b);
-        }
-        return b;
-      });
+      const bucketOf = column.units.map((unit) => bucketFor(input.modelId, unit));
       const vals = column.values;
       const unitIndex = column.unitIndex;
       for (let k = 0; k < n; k++) {
         const r = rows ? rows[k] : k;
         const v = vals[r];
         if (Number.isNaN(v)) continue;
-        const b = bucketOf[unitIndex ? unitIndex[r] : 0];
-        const s = b.totals.stats;
-        s.count++;
-        s.sum += v;
-        if (v < s.min) s.min = v;
-        if (v > s.max) s.max = v;
-        if (groupOf) b.groupStats!.add(groupOf(r), v);
+        addNumber(bucketOf[unitIndex ? unitIndex[r] : 0], v, groupOf ? groupOf(r) : -1);
       }
       continue;
     }
 
-    // Text, yes/no, enumerations (and numbers among them).
+    // Text, yes/no, enumerations, and numbers among them. What counts is
+    // what the scope holds: numbers here are added up like any others when
+    // the scope has no text.
     const valueOf = new Int32Array(column.dictionary.length);
     const isNumber = new Uint8Array(column.dictionary.length);
     column.dictionary.forEach((v, code) => {
       valueOf[code] = values.of(v);
       isNumber[code] = typeof v === 'number' ? 1 : 0;
     });
+    // A column built before units were kept for its numbers: their unit is not known.
+    const units = column.units && column.units.length > 0 ? column.units : [{ key: '?UNIT', symbol: '' }];
+    const unitIndex = column.unitIndex ?? null;
+    let bucketOf: Bucket[] | null = null;
     const codes = column.codes;
     for (let k = 0; k < n; k++) {
       const r = rows ? rows[k] : k;
       const code = codes[r];
       if (code < 0) continue;
-      otherCount++;
-      numbersInText += isNumber[code];
+      const g = groupOf ? groupOf(r) : -1;
+      if (isNumber[code]) {
+        bucketOf ??= units.map((unit) => bucketFor(input.modelId, unit));
+        addNumber(bucketOf[unitIndex ? unitIndex[r] : 0], column.dictionary[code] as number, g);
+      } else textCount++;
       seenValues.add(valueOf[code]);
-      if (groupOf) textGroups.add(groupOf(r), valueOf[code]);
+      if (g >= 0) textGroups.add(g, valueOf[code]);
     }
   }
 
   for (const b of order) numbersCount += b.totals.stats.count;
-  const withValue = numbersCount + otherCount;
+  const withValue = numbersCount + textCount;
   const kind: Totals['kind'] =
-    withValue === 0
-      ? 'none'
-      : otherCount === 0
-        ? 'numeric'
-        : numbersCount === 0 && numbersInText === 0
-          ? 'discrete'
-          : 'mixed';
+    withValue === 0 ? 'none' : textCount === 0 ? 'numeric' : numbersCount === 0 ? 'discrete' : 'mixed';
 
-  if (kind === 'mixed' && numbersCount > 0) {
+  if (kind === 'mixed') {
     // Numbers from columns that were all numbers count as values too.
     for (const input of inputs) {
       const { column, rows } = input;
@@ -361,6 +381,7 @@ export function aggregate(inputs: readonly TotalsInput[]): Totals {
   const numbers =
     kind === 'numeric'
       ? order
+          .filter((b) => b.totals.stats.count > 0)
           .map((b) => ({ ...b.totals, ...(b.groupStats ? { groups: b.groupStats.lines(groups) } : {}) }))
           .sort((a, b) => b.stats.count - a.stats.count)
       : [];
@@ -418,6 +439,36 @@ export function lineElements(
     }
   }
   return out;
+}
+
+/**
+ * The lines with labels that tell them apart. Two groups can look alike: a
+ * number in a unit two models leave unstated (one group per model), numbers
+ * that show the same to six digits, the text "true" and yes/no true. Those
+ * get the model's name, every digit, or quotes round text; anything still
+ * alike gets a number. Lines that are not alike keep their label.
+ */
+export function distinctLabels(lines: readonly GroupLine[], modelName: (modelId: string) => string): GroupLine[] {
+  const count = new Map<string, number>();
+  for (const l of lines) count.set(l.label, (count.get(l.label) ?? 0) + 1);
+  if (lines.every((l) => count.get(l.label) === 1)) return [...lines];
+  const better = (l: GroupLine): string => {
+    let label = l.label;
+    const v = l.value;
+    if (typeof v === 'number') {
+      const shown = legendValueText(v);
+      if (label.startsWith(shown)) label = String(v) + label.slice(shown.length);
+    } else if (typeof v === 'string') label = `"${v}"`;
+    if (l.modelId) label += ` (${modelName(l.modelId)})`;
+    return label;
+  };
+  const relabelled = lines.map((l) => (count.get(l.label)! > 1 ? { ...l, label: better(l) } : l));
+  const seen = new Map<string, number>();
+  return relabelled.map((l) => {
+    const n = (seen.get(l.label) ?? 0) + 1;
+    seen.set(l.label, n);
+    return n === 1 ? l : { ...l, label: `${l.label} #${n}` };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +551,8 @@ export interface Slice {
   share: number;
   /** Index into the category colours; -1 for "other". */
   colour: number;
+  /** The group's key (labels need not be unique); absent for "other". */
+  key?: string;
 }
 
 /** Slices shown before the rest are joined into "Other". */
@@ -521,7 +574,7 @@ export function pieSlices(lines: readonly GroupLine[], by: 'sum' | 'count', top 
   const sorted = sortLines(lines, by, true);
   const slices: Slice[] = sorted.slice(0, top).map((l, i) => {
     const value = by === 'sum' ? l.stats.sum : l.stats.count;
-    return { label: l.label, value, share: value / whole, colour: i };
+    return { label: l.label, value, share: value / whole, colour: i, key: l.key };
   });
   const rest = sorted.slice(top);
   if (rest.length > 0) {
@@ -531,9 +584,13 @@ export function pieSlices(lines: readonly GroupLine[], by: 'sum' | 'count', top 
   return slices;
 }
 
-/** Rows as tab-separated text that pastes into a spreadsheet as cells. */
+/**
+ * Rows as tab-separated text that pastes into a spreadsheet as cells.
+ * Numbers keep 12 significant digits: still numbers to the spreadsheet, but
+ * without the float noise of a sum (1234.5600000000002 → 1234.56).
+ */
 export function toTsv(rows: readonly (readonly (string | number)[])[]): string {
   const cell = (c: string | number): string =>
-    typeof c === 'number' ? (Number.isFinite(c) ? String(c) : '') : c.replace(/[\t\r\n]+/g, ' ');
+    typeof c === 'number' ? (Number.isFinite(c) ? String(Number(c.toPrecision(12))) : '') : c.replace(/[\t\r\n]+/g, ' ');
   return rows.map((r) => r.map(cell).join('\t')).join('\n');
 }

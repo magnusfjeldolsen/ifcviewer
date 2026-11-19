@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   aggregate,
   barFractions,
+  distinctLabels,
   lineElements,
   mean,
   pieSlices,
@@ -247,7 +248,69 @@ describe('ordering and charts', () => {
     expect(pieSlices([line('a', 1, 0)], 'sum')).toBeNull();
   });
 
-  it('writes tab-separated text with full-precision numbers', () => {
-    expect(toTsv([['Group', 'Sum'], ['a\tb', 1 / 3], ['c', NaN]])).toBe(`Group\tSum\na b\t${1 / 3}\nc\t`);
+  it('writes tab-separated text with numbers to 12 significant digits, without float noise', () => {
+    expect(toTsv([['Group', 'Sum'], ['a\tb', 1 / 3], ['c', NaN]])).toBe('Group\tSum\na b\t0.333333333333\nc\t');
+    expect(toTsv([[1234.5600000000002, 0.1 + 0.2, 12345678901234]])).toBe('1234.56\t0.3\t12345678901200');
+  });
+
+  it('shares slices carry their group, so look-alike labels stay apart', () => {
+    const slices = pieSlices([line('3', 1, 5, 'n:3|a'), line('3', 1, 7, 'n:3|b')], 'sum')!;
+    expect(slices.map((s) => s.key)).toEqual(['n:3|b', 'n:3|a']);
   });
 });
+
+describe('distinctLabels: look-alike groups told apart', () => {
+  const name = (m: string): string => `${m.toUpperCase()}.ifc`;
+
+  it('names the model of a number whose unit two models leave unstated', () => {
+    const unstated: UnitRef = { key: '?LENGTHUNIT', symbol: '' };
+    const inputs = [
+      input('a', numeric([1]), 1, undefined, numeric([3], [unstated])),
+      input('b', numeric([2]), 1, undefined, numeric([3], [unstated])),
+    ];
+    const lines = aggregate(inputs).numbers[0].groups!;
+    expect(lines.map((l) => l.label)).toEqual(['3', '3']);
+    expect(distinctLabels(lines, name).map((l) => l.label)).toEqual(['3 (A.ifc)', '3 (B.ifc)']);
+    // And each still selects its own model's elements.
+    expect(lineElements(inputs, { unitKey: aggregate(inputs).numbers[0].key, groupKey: lines[1].key })).toEqual([
+      { modelId: 'b', expressId: 100 },
+    ]);
+  });
+
+  it('quotes text that looks like a yes/no, and shows every digit of numbers that format alike', () => {
+    const t = aggregate([input('a', numeric([1, 2, 3, 4]), 4, undefined, discrete(['true', true, 1.0000001, 1.00000012]))]);
+    const labels = distinctLabels(t.numbers[0].groups!, name).map((l) => l.label);
+    expect(labels).toEqual(['"true"', 'true', '1.0000001', '1.00000012']);
+  });
+
+  it('leaves labels alone when none look alike', () => {
+    const lines = [line('A', 1, 1), line('B', 1, 1)];
+    expect(distinctLabels(lines, name)).toEqual(lines);
+  });
+});
+
+describe('aggregate: what the scope itself holds', () => {
+  const mixedColumn = (): DiscreteColumnData => ({
+    ...discrete(['x', 2, 3, 'y']),
+    units: [M3],
+    unitIndex: null,
+  });
+
+  it('adds up a scope whose own values are all numbers, though the column also holds text', () => {
+    const t = aggregate([input('a', mixedColumn(), 4, [1, 2])]);
+    expect(t.kind).toBe('numeric');
+    expect(t.numbers.map((u) => [u.unit.symbol, u.stats.sum])).toEqual([['m³', 5]]);
+    expect(t.verdict.ok).toBe(true);
+  });
+
+  it('says numbers and text are mixed only when the scope holds both', () => {
+    const t = aggregate([input('a', mixedColumn(), 4, [0, 1])]);
+    expect(t.kind).toBe('mixed');
+    expect(t.verdict).toMatchObject({ ok: false, reason: 'mixed-kinds' });
+  });
+
+  it('counts a text-only scope as text', () => {
+    expect(aggregate([input('a', mixedColumn(), 4, [0, 3])]).kind).toBe('discrete');
+  });
+});
+
