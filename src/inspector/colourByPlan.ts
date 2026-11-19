@@ -17,13 +17,19 @@
  *  - **gradient**: numbers in one unit with more than `maxSteps` distinct
  *    values. Each element's colour is its place between the lowest and
  *    highest value; the legend splits that range into `gradientBins` equal
- *    ranges, so a range can be ticked off.
+ *    ranges, so a range can be ticked off. A range runs from its lower
+ *    edge up to, not including, its upper edge ("1.2 to <1.4 mm"); the
+ *    last includes the highest value. Ranges no element is in are left out.
  *  - **steps**: numbers in one unit with few distinct values. One entry per
  *    value, lowest first, spread evenly along the scale so neighbours differ.
  *  - **categories**: text, yes/no, enumerations, and numbers in more than one
  *    unit (which do not belong on one scale: 3 mm is not near 3 m). The most
  *    common `maxCategories` values get a distinct colour each; the rest share
  *    one "other values" entry, so the legend never grows past a screenful.
+ *
+ * Numbers are compared as the legend shows them (six significant figures),
+ * so 3000 and 3000.0000001 are one value, not two entries both reading
+ * "3000 mm". Infinite numbers count as no value.
  *
  * Units are compared by key (see `units.ts`). A unit the model does not
  * state is only known to match within that model, so across models it
@@ -143,6 +149,19 @@ function globalUnitKey(modelId: string, unit: UnitRef): string {
   return isNotStated(unit.key) ? `${modelId}\u0000${unit.key}` : unit.key;
 }
 
+/** A number that can be coloured: not NaN (no value) and not infinite. */
+function hasNumber(v: number): boolean {
+  return Number.isFinite(v);
+}
+
+/**
+ * A number as the legend shows it, and the number that text stands for:
+ * values that show the same (3000 and 3000.0000001) are one value here.
+ */
+function shownNumber(v: number): number {
+  return Number.isInteger(v) ? v : Number(v.toPrecision(6));
+}
+
 /** Decide how to colour `inputs` and what every element gets. */
 export function buildColourPlan(key: string, inputs: readonly PlanModelInput[], options: PlanOptions): ColourPlan {
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -164,7 +183,7 @@ export function buildColourPlan(key: string, inputs: readonly PlanModelInput[], 
       continue;
     }
     forEachRow(input, (row) => {
-      if (Number.isNaN(c.values[row])) return;
+      if (!hasNumber(c.values[row])) return;
       const u = c.units[c.unitIndex ? c.unitIndex[row] : 0];
       const k = globalUnitKey(c.modelId, u);
       if (!units.has(k)) units.set(k, u.symbol);
@@ -173,6 +192,7 @@ export function buildColourPlan(key: string, inputs: readonly PlanModelInput[], 
 
   if (numeric && units.size === 1) {
     const unit = [...units.values()][0];
+    // Distinct values as shown, up to one past the step limit.
     const distinct = new Set<number>();
     let min = Infinity;
     let max = -Infinity;
@@ -181,10 +201,11 @@ export function buildColourPlan(key: string, inputs: readonly PlanModelInput[], 
       if (c.type !== 'numeric') continue;
       forEachRow(input, (row) => {
         const v = c.values[row];
-        if (Number.isNaN(v)) return;
-        if (distinct.size <= maxSteps) distinct.add(v);
-        if (v < min) min = v;
-        if (v > max) max = v;
+        if (!hasNumber(v)) return;
+        const s = shownNumber(v);
+        if (distinct.size <= maxSteps) distinct.add(s);
+        if (s < min) min = s;
+        if (s > max) max = s;
       });
     }
     return distinct.size <= maxSteps
@@ -264,8 +285,8 @@ function stepsPlan(
     if (c.type !== 'numeric') return;
     forEachRow(input, (row, i) => {
       const v = c.values[row];
-      if (Number.isNaN(v)) return;
-      const k = indexOf.get(v)!;
+      if (!hasNumber(v)) return;
+      const k = indexOf.get(shownNumber(v))!;
       entries[k].count++;
       paint(paints[m], i, k, linear[k]);
       valued[m][i] = 1;
@@ -273,6 +294,30 @@ function stepsPlan(
   });
   finishNoValue(entries, paints, (m, i) => valued[m][i] === 1);
   return { key, mode: 'steps', entries, models: paints, scopeSize: total(paints) };
+}
+
+/**
+ * The edges of `bins` equal ranges from `min` to `max`. The inner edges are
+ * rounded to two significant figures of a range's width, and those rounded
+ * numbers are the edges: what the legend says is what decides the range.
+ */
+export function rangeEdges(min: number, max: number, bins: number): number[] {
+  const width = (max - min) / bins;
+  const decimals = Math.min(6, Math.max(0, Math.ceil(-Math.log10(width)) + 1));
+  const edges = [min];
+  for (let b = 1; b < bins; b++) edges.push(Number((min + width * b).toFixed(decimals)));
+  edges.push(max);
+  return edges;
+}
+
+/**
+ * Which range a value is in: from its lower edge up to, not including, its
+ * upper edge; the last range includes the highest value.
+ */
+export function rangeOf(v: number, edges: readonly number[]): number {
+  let b = edges.length - 2;
+  while (b > 0 && v < edges[b]) b--;
+  return b;
 }
 
 function gradientPlan(
@@ -285,40 +330,50 @@ function gradientPlan(
   palette: GradientPalette,
 ): ColourPlan {
   const span = max - min;
-  const width = span / bins;
-  const entries: LegendEntry[] = [];
-  for (let b = 0; b < bins; b++) {
-    const lo = min + width * b;
-    const hi = b === bins - 1 ? max : min + width * (b + 1);
-    entries.push({
-      label: `${rangeNumber(lo, width)} – ${rangeNumber(hi, width)}${unitSuffix(unit)}`,
-      color: sampleGradient(palette, (b + 0.5) / bins),
-      count: 0,
-      kind: 'range',
-    });
-  }
+  const edges = rangeEdges(min, max, bins);
   const lut = gradientLut(palette);
   const last = GRADIENT_LUT_SIZE - 1;
   const paints = paintsFor(inputs);
   const valued = paints.map((p) => new Uint8Array(p.ids.length));
+  // First pass: each element's range and colour; ranges are counted.
+  const counts = new Array<number>(bins).fill(0);
   inputs.forEach((input, m) => {
     const c = input.column;
     if (c.type !== 'numeric') return;
     const p = paints[m];
     forEachRow(input, (row, i) => {
       const v = c.values[row];
-      if (Number.isNaN(v)) return;
-      const t = (v - min) / span;
-      const b = Math.min(bins - 1, Math.floor(t * bins));
-      entries[b].count++;
+      if (!hasNumber(v)) return;
+      const s = shownNumber(v);
+      const b = rangeOf(s, edges);
+      counts[b]++;
       p.entry[i] = b;
-      const l = Math.round(t * last) * 3;
+      const l = Math.round(((s - min) / span) * last) * 3;
       p.rgba[i * 4] = lut[l];
       p.rgba[i * 4 + 1] = lut[l + 1];
       p.rgba[i * 4 + 2] = lut[l + 2];
       p.rgba[i * 4 + 3] = 1;
       valued[m][i] = 1;
     });
+  });
+  // Ranges no element falls in are left out of the legend; the scale bar
+  // still runs from the lowest value to the highest.
+  const entryOf = new Array<number>(bins).fill(-1);
+  const entries: LegendEntry[] = [];
+  for (let b = 0; b < bins; b++) {
+    if (counts[b] === 0) continue;
+    entryOf[b] = entries.length;
+    const lo = formatNumber(edges[b]);
+    const hi = formatNumber(edges[b + 1]);
+    entries.push({
+      label: b === bins - 1 ? `${lo} to ${hi}${unitSuffix(unit)}` : `${lo} to <${hi}${unitSuffix(unit)}`,
+      color: sampleGradient(palette, (b + 0.5) / bins),
+      count: counts[b],
+      kind: 'range',
+    });
+  }
+  paints.forEach((p, m) => {
+    for (let i = 0; i < p.entry.length; i++) if (valued[m][i]) p.entry[i] = entryOf[p.entry[i]];
   });
   finishNoValue(entries, paints, (m, i) => valued[m][i] === 1);
   return { key, mode: 'gradient', entries, models: paints, scopeSize: total(paints), range: { min, max, unit } };
@@ -330,8 +385,10 @@ function categoriesPlan(
   maxCategories: number,
   units: Map<string, string>,
 ): ColourPlan {
-  // Every distinct value (with its unit, for numbers) gets a category index;
-  // each row is first given that, then mapped to a legend entry.
+  // Every distinct value as shown (with its unit, for numbers) gets a
+  // category index; each row is first given that, then mapped to a legend
+  // entry. Text "3" and the number 3 stay apart: a model that wrote text
+  // where another wrote a number may not mean the same thing.
   const categoryOf = new Map<string, number>();
   const labels: string[] = [];
   const counts: number[] = [];
@@ -350,21 +407,27 @@ function categoriesPlan(
     const out = new Int32Array(scopeCount(input)).fill(-1);
     const c = input.column;
     if (c.type === 'discrete') {
-      const local = c.dictionary.map((v) => category(`${typeof v}:${String(v)}`, legendValueText(v)));
+      const local = c.dictionary.map((v) =>
+        typeof v === 'number'
+          ? Number.isFinite(v)
+            ? category(`number:${formatNumber(shownNumber(v))}\u0000`, formatNumber(shownNumber(v)))
+            : -1
+          : category(`${typeof v}:${String(v)}`, legendValueText(v)),
+      );
       forEachRow(input, (row, i) => {
         const code = c.codes[row];
-        if (code < 0) return;
+        if (code < 0 || local[code] < 0) return;
         out[i] = local[code];
         counts[local[code]]++;
       });
     } else {
       forEachRow(input, (row, i) => {
         const v = c.values[row];
-        if (Number.isNaN(v)) return;
+        if (!hasNumber(v)) return;
         const u = c.units[c.unitIndex ? c.unitIndex[row] : 0];
         const unitKey = globalUnitKey(c.modelId, u);
-        const label = `${formatNumber(v)}${showUnits ? unitSuffix(u.symbol) : ''}`;
-        const k = category(`number:${v}\u0000${unitKey}`, label);
+        const text = formatNumber(shownNumber(v));
+        const k = category(`number:${text}\u0000${unitKey}`, `${text}${showUnits ? unitSuffix(u.symbol) : ''}`);
         out[i] = k;
         counts[k]++;
       });
@@ -372,8 +435,11 @@ function categoriesPlan(
     return out;
   });
 
-  // Most common first; ties by label so the order is stable.
-  const order = labels.map((_, i) => i).sort((a, b) => counts[b] - counts[a] || (labels[a] < labels[b] ? -1 : 1));
+  // Most common first; then by label; then by first appearance, so the
+  // order is the same every time.
+  const order = labels
+    .map((_, i) => i)
+    .sort((a, b) => counts[b] - counts[a] || (labels[a] < labels[b] ? -1 : labels[a] > labels[b] ? 1 : a - b));
   const coloured = order.length > maxCategories ? order.slice(0, maxCategories) : order;
   const entryOf = new Int32Array(labels.length).fill(-1);
   const entries: LegendEntry[] = coloured.map((cat, i) => {
@@ -408,15 +474,6 @@ function categoriesPlan(
   });
   finishNoValue(entries, paints, (m, i) => perRow[m][i] >= 0);
   return { key, mode: 'categories', entries, models: paints, scopeSize: total(paints), ...(note ? { note } : {}) };
-}
-
-/**
- * A range boundary rounded to what the range's width can tell apart: two
- * significant figures of the width, so "0 – 98" rather than "0 – 98.3333".
- */
-function rangeNumber(v: number, width: number): string {
-  const decimals = Math.min(6, Math.max(0, Math.ceil(-Math.log10(width)) + 1));
-  return formatNumber(Number(v.toFixed(decimals)));
 }
 
 function total(paints: ModelPaint[]): number {

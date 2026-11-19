@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   buildColourPlan,
   entryElements,
+  rangeEdges,
+  rangeOf,
   rowsInScope,
   tickedColours,
   type PlanModelInput,
@@ -68,7 +70,8 @@ describe('colour by parameter — numbers in one unit', () => {
     expect(plan.mode).toBe('gradient');
     expect(plan.range).toEqual({ min: 0, max: 590, unit: 'mm' });
     expect(plan.entries).toHaveLength(6);
-    expect(plan.entries[0].label).toBe('0 – 98 mm');
+    expect(plan.entries[0].label).toBe('0 to <98 mm');
+    expect(plan.entries[5].label).toBe('492 to 590 mm');
     expect(plan.entries.reduce((n, e) => n + e.count, 0)).toBe(60);
     const p = plan.models[0];
     // The lowest is the first stop, the highest the last, each element its own shade.
@@ -195,5 +198,88 @@ describe('colour by parameter — scope and ticking', () => {
     const plan = buildColourPlan('k', [whole(numeric('a', values))], opts);
     expect(performance.now() - t0).toBeLessThan(200);
     expect(plan.mode).toBe('gradient');
+  });
+});
+
+describe('colour by parameter — range edges', () => {
+  it('a value on an edge goes to the range above it; the last range includes the highest', () => {
+    // 1 to 2.2 in six ranges of 0.2: float noise once put 1.2 and 1.4 below their edge.
+    const edges = rangeEdges(1, 2.2, 6);
+    expect(edges).toEqual([1, 1.2, 1.4, 1.6, 1.8, 2, 2.2]);
+    expect([1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 1.19, 1.21].map((v) => rangeOf(v, edges))).toEqual([0, 1, 2, 3, 4, 5, 5, 0, 1]);
+  });
+
+  it('the legend says which end of a range is included', () => {
+    const values = [1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 1.05, 1.1, 1.15, 1.25, 1.3, 1.35, 1.45];
+    const plan = buildColourPlan('k', [whole(numeric('a', values))], opts);
+    expect(plan.mode).toBe('gradient');
+    expect(plan.entries.map((e) => [e.label, e.count])).toEqual([
+      ['1 to <1.2 mm', 4],
+      ['1.2 to <1.4 mm', 4],
+      ['1.4 to <1.6 mm', 2],
+      ['1.6 to <1.8 mm', 1],
+      ['1.8 to <2 mm', 1],
+      ['2 to 2.2 mm', 2],
+    ]);
+  });
+
+  it('ranges no element falls in are left out', () => {
+    const values = [...Array.from({ length: 20 }, (_, i) => i * 0.1), 100];
+    const plan = buildColourPlan('k', [whole(numeric('a', values))], opts);
+    expect(plan.entries.map((e) => e.label)).toEqual(['0 to <17 mm', '83 to 100 mm']);
+    // The scale still runs from the lowest to the highest value.
+    expect(plan.range).toMatchObject({ min: 0, max: 100 });
+    // Elements point at the entries that are shown.
+    expect(plan.models[0].entry[20]).toBe(1);
+  });
+});
+
+describe('colour by parameter — values that show the same', () => {
+  it('numbers that show as the same text are one value', () => {
+    const plan = buildColourPlan('k', [whole(numeric('a', [3000, 3000.0000001, 2999.99999999, 1500]))], opts);
+    expect(plan.entries.map((e) => [e.label, e.count])).toEqual([
+      ['1500 mm', 1],
+      ['3000 mm', 3],
+    ]);
+  });
+
+  it('near-equal values do not push a few values over the step limit', () => {
+    const values = Array.from({ length: 40 }, (_, i) => 100 * (1 + (i % 4)) + 1e-9 * i);
+    const plan = buildColourPlan('k', [whole(numeric('a', values))], opts);
+    expect(plan.mode).toBe('steps');
+    expect(plan.entries).toHaveLength(4);
+  });
+
+  it('in mixed units too, values are grouped by what is shown', () => {
+    const plan = buildColourPlan('k', [whole(numeric('a', [3, 3.0000000001, 3], [MM, M], [0, 0, 1]))], opts);
+    expect(plan.entries.map((e) => [e.label, e.count])).toEqual([
+      ['3 mm', 2],
+      ['3 m', 1],
+    ]);
+  });
+
+  it('text "3" and the number 3 stay apart', () => {
+    const plan = buildColourPlan('k', [whole(discrete('a', [0, 1], ['3', 3]))], opts);
+    expect(plan.entries).toHaveLength(2);
+  });
+
+  it('entries with the same count and label keep a fixed order', () => {
+    const a = buildColourPlan('k', [whole(discrete('a', [0, 1], ['3', 3]))], opts);
+    const b = buildColourPlan('k', [whole(discrete('a', [0, 1], ['3', 3]))], opts);
+    expect(a.entries.map((e) => e.color)).toEqual(b.entries.map((e) => e.color));
+  });
+
+  it('infinite numbers count as no value', () => {
+    const plan = buildColourPlan('k', [whole(numeric('a', [1, 2, Infinity, -Infinity, NaN]))], opts);
+    expect(plan.mode).toBe('steps');
+    expect(plan.entries.map((e) => [e.label, e.count])).toEqual([
+      ['1 mm', 1],
+      ['2 mm', 1],
+      ['No value', 3],
+    ]);
+    const big = Array.from({ length: 30 }, (_, i) => i);
+    const g = buildColourPlan('k', [whole(numeric('a', [...big, Infinity]))], opts);
+    expect(g.range).toMatchObject({ min: 0, max: 29 });
+    expect(Number.isFinite(g.models[0].rgba[0])).toBe(true);
   });
 });
