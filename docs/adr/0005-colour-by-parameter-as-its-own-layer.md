@@ -47,6 +47,24 @@ Three things stood in the way:
   costs nothing.
 - **Unticking a legend entry gives its elements back their own colours**; it
   does not hide them. Hiding stays with Hide and Isolate.
+- **Only what can be seen is coloured** (amended 19 Nov, at the owner's
+  request). Hidden elements, elements of a model switched off and elements
+  wholly behind the section plane (judged by their bounding boxes, so no
+  per-triangle work) are not counted, do not set a scale's ends and do not
+  take one of the colours. An element shown later keeps its own colour.
+  Before this, every element with geometry was counted, hidden or not.
+- **Refresh, never by surprise.** Hiding, showing, isolating or moving the
+  section plane marks the colouring out of date; only Refresh (legend or
+  right-click) works it out again, over what is visible then. A colouring
+  of a selection keeps to that selection: Refresh colours those of the
+  selected elements that are visible now. Refresh reuses the value columns
+  already read, so it takes a few milliseconds.
+- **How many values get their own colour is the user's choice**: 6, 12
+  (default), 24, 50, 100 or all, remembered in the browser. Past the twelve
+  hand-picked colours, colours are generated round the colour wheel with
+  the selection blue's hues left out. The legend draws at most 200 rows,
+  with a filter for the rest. The numeric "a dozen values or fewer → one
+  entry per value" switch is not tied to this choice.
 - **Not undoable, not saved.** A colouring ends on Clear, when another
   starts, or when its last model is closed.
 
