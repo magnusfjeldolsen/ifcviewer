@@ -129,14 +129,27 @@ export function easedDistance(current: number, target: number, dt: number, tau =
  * flattened onto the ground plane, `pitch` the angle above it.
  */
 export function pitchOf(forward: THREE.Vector3, up: THREE.Vector3): number {
-  const f = forward.dot(up) / (forward.length() || 1);
-  return Math.asin(Math.min(Math.max(f, -1), 1));
+  // atan2 rather than asin: asin loses precision next to the pole, which is
+  // exactly where a plan view sits.
+  const vertical = forward.dot(up);
+  const horizontal = Math.sqrt(Math.max(forward.lengthSq() - vertical * vertical, 0));
+  return Math.atan2(vertical, horizontal);
 }
 
 /**
- * Turn a forward direction by `yaw` about `up` and tilt it by `pitch`,
- * clamping the result just short of straight up or down. There is never roll:
- * the camera is aimed with `lookAt`, which keeps its right vector horizontal.
+ * Turn a forward direction by `yaw` about `up` and tilt it by `pitch`. There
+ * is never roll: the camera is aimed with `lookAt`, which keeps its right
+ * vector horizontal.
+ *
+ * The heading comes from the camera's `right` vector (up × right), which is
+ * well defined even looking straight down — forward alone loses it there,
+ * and a plan view would swing round to an arbitrary heading on the first
+ * input. Without a usable `right`, the flattened forward is used.
+ *
+ * Pitch is limited to `PITCH_MARGIN` short of the pole, but a view that
+ * already starts closer (orbit lets a plan view get within 1e-6 rad) is not
+ * snapped back: it stays where it is and may only move away from the pole,
+ * so a small input always makes a correspondingly small change.
  *
  * Writes into `out` (which may be `forward`) and returns it — called every
  * frame while turning, so it allocates nothing.
@@ -144,19 +157,26 @@ export function pitchOf(forward: THREE.Vector3, up: THREE.Vector3): number {
 export function turnForward(
   forward: THREE.Vector3,
   up: THREE.Vector3,
+  right: THREE.Vector3 | null,
   yaw: number,
   pitch: number,
   out: THREE.Vector3,
 ): THREE.Vector3 {
   const currentPitch = pitchOf(forward, up);
-  const limit = Math.PI / 2 - PITCH_MARGIN;
+  const limit = Math.max(Math.PI / 2 - PITCH_MARGIN, Math.abs(currentPitch));
   const nextPitch = Math.min(Math.max(currentPitch + pitch, -limit), limit);
 
-  // Horizontal heading: forward with its up component removed.
-  scratchH.copy(forward).addScaledVector(up, -forward.dot(up));
+  // Heading from the camera's right vector, flattened in case of rounding.
+  scratchH.set(0, 0, 0);
+  if (right) {
+    scratchR2.copy(right).addScaledVector(up, -right.dot(up));
+    if (scratchR2.lengthSq() > 1e-12) scratchH.crossVectors(up, scratchR2);
+  }
   if (scratchH.lengthSq() < 1e-12) {
-    // Looking straight up or down (only reachable from outside flying):
-    // there is no heading, so pick one perpendicular to up.
+    scratchH.copy(forward).addScaledVector(up, -forward.dot(up));
+  }
+  if (scratchH.lengthSq() < 1e-24) {
+    // Straight up or down with no right vector: pick any heading.
     scratchH.set(1, 0, 0).addScaledVector(up, -up.x);
     if (scratchH.lengthSq() < 1e-12) scratchH.set(0, 0, 1).addScaledVector(up, -up.z);
   }
@@ -170,6 +190,7 @@ export function turnForward(
 }
 
 const scratchH = new THREE.Vector3();
+const scratchR2 = new THREE.Vector3();
 
 /**
  * World displacement for a velocity given in the view's frame: `forward`

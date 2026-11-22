@@ -190,6 +190,58 @@ describe('FlyController — turning', () => {
   });
 });
 
+describe('FlyController — starting from a plan view', () => {
+  /** A camera nearly straight down (or up), the top of the screen towards +X. */
+  function nearPole(polar: number, lookingUp = false): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+    cam.position.set(0, 50, 0);
+    const vertical = lookingUp ? Math.cos(polar) : -Math.cos(polar);
+    cam.lookAt(new THREE.Vector3(Math.sin(polar), vertical, 0).add(cam.position));
+    cam.updateMatrixWorld();
+    return cam;
+  }
+  const headingOf = (cam: THREE.PerspectiveCamera): THREE.Vector3 => {
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
+    return new THREE.Vector3().crossVectors(UP, right).normalize();
+  };
+
+  for (const lookingUp of [false, true]) {
+    for (const polar of [1e-6, 1e-4, 0.005]) {
+      it(`a tiny yaw changes the view by no more than itself (polar ${polar}${lookingUp ? ', looking up' : ''})`, () => {
+        const cam = nearPole(polar, lookingUp);
+        const q0 = cam.quaternion.clone();
+        const h0 = headingOf(cam);
+        const fly = new FlyController();
+        const dx = 1; // one pixel of drag in an 800 px view
+        const yaw = Math.PI / 800;
+        fly.look(cam, dx, 0, 800);
+        expect(cam.quaternion.angleTo(q0)).toBeLessThanOrEqual(yaw * 1.0001 + 1e-7);
+        // The heading turned by the yaw and nothing else: no swing to +X/−Z.
+        expect(headingOf(cam).angleTo(h0)).toBeCloseTo(yaw, 6);
+      });
+
+      it(`a tiny pitch does not snap a degree (polar ${polar}${lookingUp ? ', looking up' : ''})`, () => {
+        const cam = nearPole(polar, lookingUp);
+        const q0 = cam.quaternion.clone();
+        const fly = new FlyController();
+        fly.look(cam, 0, 1, 800);
+        expect(cam.quaternion.angleTo(q0)).toBeLessThanOrEqual(Math.PI / 800 + 1e-7);
+        fly.look(cam, 0, -1, 800);
+        expect(cam.quaternion.angleTo(q0)).toBeLessThanOrEqual(2 * Math.PI / 800 + 1e-7);
+      });
+    }
+  }
+
+  it('the first arrow-key frame from a plan view keeps the heading', () => {
+    const cam = nearPole(1e-6);
+    const h0 = headingOf(cam);
+    const fly = new FlyController();
+    fly.keyDown('ArrowLeft');
+    fly.tick(cam, 1 / 60);
+    expect(headingOf(cam).angleTo(h0)).toBeLessThan(0.01);
+  });
+});
+
 describe('FlyController — speed', () => {
   it('X steps faster and Z slower, once per press', () => {
     const fly = new FlyController();

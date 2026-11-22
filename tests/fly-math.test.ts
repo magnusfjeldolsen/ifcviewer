@@ -135,41 +135,61 @@ describe('easedDistance', () => {
 
 describe('turnForward', () => {
   it('yaws about the up axis, positive to the left', () => {
-    const out = turnForward(v(0, 0, -1), UP, Math.PI / 2, 0, new THREE.Vector3());
+    const out = turnForward(v(0, 0, -1), UP, null, Math.PI / 2, 0, new THREE.Vector3());
     expect(out.distanceTo(v(-1, 0, 0))).toBeCloseTo(0, 10);
   });
 
   it('keeps the pitch while yawing', () => {
     const f = v(0, 0.5, -1).normalize();
-    const out = turnForward(f, UP, 1.3, 0, new THREE.Vector3());
+    const out = turnForward(f, UP, null, 1.3, 0, new THREE.Vector3());
     expect(pitchOf(out, UP)).toBeCloseTo(pitchOf(f, UP), 10);
     expect(out.length()).toBeCloseTo(1, 10);
   });
 
   it('pitches up and down', () => {
-    const out = turnForward(v(0, 0, -1), UP, 0, 0.3, new THREE.Vector3());
+    const out = turnForward(v(0, 0, -1), UP, null, 0, 0.3, new THREE.Vector3());
     expect(pitchOf(out, UP)).toBeCloseTo(0.3, 10);
   });
 
   it('clamps pitch just short of straight up and down', () => {
     const limit = Math.PI / 2 - PITCH_MARGIN;
-    const up = turnForward(v(0, 0, -1), UP, 0, 10, new THREE.Vector3());
+    const up = turnForward(v(0, 0, -1), UP, null, 0, 10, new THREE.Vector3());
     expect(pitchOf(up, UP)).toBeCloseTo(limit, 10);
-    const down = turnForward(v(0, 0, -1), UP, 0, -10, new THREE.Vector3());
+    const down = turnForward(v(0, 0, -1), UP, null, 0, -10, new THREE.Vector3());
     expect(pitchOf(down, UP)).toBeCloseTo(-limit, 10);
     // Still has a heading, so the view cannot flip over.
     expect(Math.hypot(up.x, up.z)).toBeGreaterThan(0.01);
   });
 
   it('finds a heading when started looking straight down', () => {
-    const out = turnForward(v(0, -1, 0), UP, 0, 0, new THREE.Vector3());
+    const out = turnForward(v(0, -1, 0), UP, null, 0, 0, new THREE.Vector3());
     expect(Number.isFinite(out.x) && Number.isFinite(out.y) && Number.isFinite(out.z)).toBe(true);
-    expect(pitchOf(out, UP)).toBeCloseTo(-(Math.PI / 2 - PITCH_MARGIN), 10);
+    // Not snapped: a view that starts at the pole stays there until moved.
+    expect(pitchOf(out, UP)).toBeCloseTo(-Math.PI / 2, 10);
+  });
+
+  it('keeps the heading from the right vector when looking straight down', () => {
+    // A plan view whose top of screen points along +X: right is +Z (up × right = heading).
+    const out = turnForward(v(0, -1, 0), UP, v(0, 0, 1), 0, 0.01, new THREE.Vector3());
+    expect(out.x).toBeGreaterThan(0); // tilting up reveals +X, not some other heading
+    expect(Math.abs(out.z)).toBeLessThan(1e-12);
+  });
+
+  it('does not snap a view that starts closer to the pole than the limit', () => {
+    for (const polar of [1e-6, 1e-4, 0.005]) {
+      const f = v(Math.sin(polar), -Math.cos(polar), 0); // heading +X, nearly straight down
+      // A tiny tilt towards the pole is refused rather than snapping 1° away.
+      const toward = turnForward(f, UP, v(0, 0, 1), 0, -1e-4, new THREE.Vector3());
+      expect(toward.angleTo(f)).toBeLessThan(1e-9);
+      // A tiny tilt away from it moves by exactly that much.
+      const away = turnForward(f, UP, v(0, 0, 1), 0, 1e-4, new THREE.Vector3());
+      expect(away.angleTo(f)).toBeCloseTo(1e-4, 9);
+    }
   });
 
   it('may write into its input', () => {
     const f = v(0, 0, -1);
-    const same = turnForward(f, UP, Math.PI, 0, f);
+    const same = turnForward(f, UP, null, Math.PI, 0, f);
     expect(same).toBe(f);
     expect(f.distanceTo(v(0, 0, 1))).toBeCloseTo(0, 10);
   });

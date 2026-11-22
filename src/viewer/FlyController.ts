@@ -59,6 +59,7 @@ export class FlyController {
 
   private readonly forward = new THREE.Vector3();
   private readonly delta = new THREE.Vector3();
+  private readonly right = new THREE.Vector3();
 
   /** Cruising speed, metres per second, before Shift / Space. */
   getSpeed(): number {
@@ -145,7 +146,7 @@ export class FlyController {
   look(camera: THREE.PerspectiveCamera, dx: number, dy: number, height: number): void {
     const k = lookRadiansPerPixel(height);
     camera.getWorldDirection(this.forward);
-    turnForward(this.forward, camera.up, -dx * k, -dy * k, this.forward);
+    turnForward(this.forward, camera.up, this.rightOf(camera), -dx * k, -dy * k, this.forward);
     this.aim(camera);
   }
 
@@ -188,7 +189,7 @@ export class FlyController {
     let moved = false;
     if (yaw !== 0 || pitch !== 0) {
       camera.getWorldDirection(this.forward);
-      turnForward(this.forward, camera.up, yaw, pitch, this.forward);
+      turnForward(this.forward, camera.up, this.rightOf(camera), yaw, pitch, this.forward);
       this.aim(camera);
       moved = true;
     }
@@ -217,6 +218,11 @@ export class FlyController {
       if (this.held.has(DRIVE_CODES[i])) return true;
     }
     return false;
+  }
+
+  /** The camera's right vector in world space, which keeps the heading even looking straight down. */
+  private rightOf(camera: THREE.PerspectiveCamera): THREE.Vector3 {
+    return this.right.set(1, 0, 0).applyQuaternion(camera.quaternion);
   }
 
   /** Point the camera along `this.forward` with no roll. */
