@@ -5,6 +5,7 @@ import type { AppearanceManagerDeps } from '../src/viewer/AppearanceManager';
 import type { ModelManager } from '../src/viewer/ModelManager';
 import type { ElementIdentity, Scope } from '../src/inspector/types';
 import { boxModel, makeModelManager } from './helpers/models';
+import { HistoryManager } from '../src/core/history/HistoryManager';
 
 /**
  * AppearanceManager engine tests (D, the appearance system).
@@ -342,5 +343,80 @@ describe('AppearanceManager — predicates (T11)', () => {
 
     manager.opaque(scope(['A', 2]));
     expect(manager.hasTransparent()).toBe(false);
+  });
+});
+
+describe('AppearanceManager — show only (#70)', () => {
+  function setup() {
+    const env = makeDeps();
+    env.load('A', [1, 2, 3, 4]);
+    env.load('B', [10, 20]);
+    const history = new HistoryManager();
+    const manager = new AppearanceManager({ ...env.deps, history });
+    return { env, manager, history };
+  }
+  const shown = (m: AppearanceManager) =>
+    [['A', 1], ['A', 2], ['A', 3], ['A', 4], ['B', 10], ['B', 20]]
+      .filter(([id, e]) => m.getStateFor(id as string, e as number) !== 'hidden')
+      .map(([id, e]) => `${id}${e}`);
+
+  it('shows only the given elements, across models, as one undo step', () => {
+    const { manager, history } = setup();
+    const r = manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow');
+    expect(r).toEqual({ shown: 2, fresh: false });
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+    history.undo();
+    expect(manager.hasHidden()).toBe(false);
+    history.redo();
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+  });
+
+  it('a second show-only narrows the first (AND)', () => {
+    const { manager, history } = setup();
+    manager.showOnly(scope(['A', 1], ['A', 2], ['B', 10]), 'narrow');
+    const r = manager.showOnly(scope(['A', 2], ['A', 3], ['B', 10], ['B', 20]), 'narrow');
+    expect(r).toEqual({ shown: 2, fresh: false });
+    expect(shown(manager)).toEqual(['A2', 'B10']);
+    history.undo();
+    expect(shown(manager)).toEqual(['A1', 'A2', 'B10']);
+  });
+
+  it('starts over with all of them when none of them is visible now', () => {
+    const { manager } = setup();
+    manager.showOnly(scope(['A', 1]), 'narrow');
+    const r = manager.showOnly(scope(['A', 3], ['B', 20]), 'narrow');
+    expect(r).toEqual({ shown: 2, fresh: true });
+    expect(shown(manager)).toEqual(['A3', 'B20']);
+  });
+
+  it('add shows them as well, hiding nothing (OR)', () => {
+    const { manager, history } = setup();
+    manager.showOnly(scope(['A', 1]), 'narrow');
+    manager.showOnly(scope(['A', 3], ['B', 20]), 'add');
+    expect(shown(manager)).toEqual(['A1', 'A3', 'B20']);
+    history.undo();
+    expect(shown(manager)).toEqual(['A1']);
+  });
+
+  it('does nothing for no elements, rather than hiding everything', () => {
+    const { manager, history } = setup();
+    expect(manager.showOnly([], 'narrow')).toEqual({ shown: 0, fresh: false });
+    expect(manager.hasHidden()).toBe(false);
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('tells the renderer once per model, in at most two calls', () => {
+    const { env, manager } = setup();
+    const spy = vi.spyOn(env.modelManager, 'setHidden');
+    manager.showOnly(scope(['A', 1], ['A', 2]), 'narrow');
+    // A: two hidden (no shown change); B: both hidden.
+    expect(spy.mock.calls.map((c) => c[0]).sort()).toEqual(['A', 'B']);
+  });
+
+  it('isolate still works as before through the shared path', () => {
+    const { manager } = setup();
+    manager.hide(scope(['A', 1]));
+    manager.isolate(scope(['A', 1], ['A', 2]));
+    expect(shown(manager)).toEqual(['A1', 'A2']);
   });
 });

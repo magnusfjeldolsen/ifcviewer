@@ -118,8 +118,53 @@ export class AppearanceManager {
    * v1: scope = selection only (A5).
    */
   isolate(scope: Scope): void {
+    this.isolateKeys(new Set(scope.map((id) => makeKey(id.modelId, id.expressId))), 'Isolate elements');
+  }
+
+  /**
+   * "Show only" (#70): isolate the elements with a value, as one undoable
+   * step through the same path as `isolate`.
+   *
+   * - `narrow`: of `elements`, only those visible now are shown, so a second
+   *   show-only narrows the first (AND). When none of them is visible now,
+   *   every one of them is shown instead (`fresh`): two values of one
+   *   parameter never share an element, and an empty view helps nobody.
+   * - `add`: `elements` are shown as well as what is shown now (OR); nothing
+   *   is hidden.
+   *
+   * Returns how many of `elements` are shown afterwards.
+   */
+  showOnly(
+    elements: readonly { modelId: string; expressId: number }[],
+    mode: 'narrow' | 'add',
+  ): { shown: number; fresh: boolean } {
+    const keys = new Set(elements.map((id) => makeKey(id.modelId, id.expressId)));
+    // Nothing has the value: hiding everything would only leave an empty view.
+    if (keys.size === 0) return { shown: 0, fresh: false };
+    if (mode === 'add') {
+      const before = this.serialize();
+      let mutated = false;
+      for (const key of keys) {
+        if (this.states.get(key) === 'hidden') {
+          this.clearState(key);
+          mutated = true;
+        }
+      }
+      this.flush();
+      this.finishOp(mutated, before, 'Show elements');
+      return { shown: keys.size, fresh: false };
+    }
+    const visible = new Set<AppearanceKey>();
+    for (const key of keys) if (this.states.get(key) !== 'hidden') visible.add(key);
+    const fresh = visible.size === 0;
+    const keep = fresh ? keys : visible;
+    this.isolateKeys(keep, 'Show only');
+    return { shown: keep.size, fresh };
+  }
+
+  /** Every element not in `keep` hidden, every one in it back to normal: one command. */
+  private isolateKeys(keep: ReadonlySet<AppearanceKey>, label: string): void {
     const before = this.serialize();
-    const keep = new Set(scope.map((id) => makeKey(id.modelId, id.expressId)));
     let mutated = false;
 
     for (const modelId of this.deps.modelManager.getModelIds()) {
@@ -140,7 +185,7 @@ export class AppearanceManager {
     }
 
     this.flush();
-    this.finishOp(mutated, before, 'Isolate elements');
+    this.finishOp(mutated, before, label);
   }
 
   /** Clear all hidden state (restore visibility). Leaves transparency intact. */
