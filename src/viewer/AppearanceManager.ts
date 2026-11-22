@@ -146,11 +146,12 @@ export class AppearanceManager {
    * "Visible now" is the rule colouring uses: not hidden, its model switched
    * on, and not wholly behind the section plane.
    *
-   * - `narrow`: of `elements`, only those visible now are kept, so a second
-   *   show-only narrows the first (AND). When none of them is visible now,
+   * - `narrow`: of `elements`, those not hidden now are kept, so a second
+   *   show-only narrows the first (AND). When none of them can be seen now,
    *   all of them are kept and unhidden instead (`fresh`): two values of one
    *   parameter never share an element, and an empty view helps nobody. A
-   *   model switched off stays off; its matches are counted apart.
+   *   model switched off stays off; its matches are kept, not shown, and
+   *   counted apart, as are those behind the section plane.
    * - `add`: `elements` are unhidden as well as what is shown now (OR);
    *   nothing is hidden.
    *
@@ -184,10 +185,13 @@ export class AppearanceManager {
     if (mode === 'add') {
       for (const key of matches.keys()) unhide(key);
     } else {
+      // Narrowing keeps the matches not hidden themselves, including those in
+      // a model switched off or behind the cut: switching the model on or
+      // moving the cut shows them. It starts over only when no match at all
+      // can be seen now.
       const visibleNow = this.visibility(plane);
-      const visible = new Map([...matches].filter(([, e]) => visibleNow(e.modelId, e.expressId)));
-      fresh = visible.size === 0;
-      if (!fresh) keep = visible;
+      fresh = ![...matches.values()].some((e) => visibleNow(e.modelId, e.expressId));
+      if (!fresh) keep = new Map([...matches].filter(([key]) => this.states.get(key) !== 'hidden'));
       for (const modelId of mm.getModelIds()) {
         for (const expressId of mm.elementIds(modelId)) {
           const key = makeKey(modelId, expressId);

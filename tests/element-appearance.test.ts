@@ -434,11 +434,12 @@ describe('AppearanceManager — show only (#70)', () => {
     expect(env.modelManager.isVisible('B')).toBe(false);
   });
 
-  it('a match in a model switched off does not count as shown when another is visible', () => {
+  it('a match in a model switched off is kept but not counted as shown, so switching the model on shows it', () => {
     const { env, manager } = setup();
     env.modelManager.setVisible('B', false);
-    expect(manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow')).toEqual(ok(1));
-    expect(shown(manager)).toEqual(['A1']);
+    expect(manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow')).toEqual({ shown: 1, fresh: false, switchedOff: 1, cutAway: 0 });
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+    expect(env.modelManager.isVisible('B')).toBe(false);
   });
 
   it('matches wholly behind the section cut are not visible: falls back, and says so', () => {
