@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { FlyTips, formatFlySpeed } from '../src/ui/FlyTips';
+import { FlyTips, formatFlySpeed, looksTouchOnly } from '../src/ui/FlyTips';
 import { Toolbar } from '../src/ui/Toolbar';
 import { ToolManager, type Tool } from '../src/tools/Tool';
 
@@ -93,5 +93,60 @@ describe('Toolbar mode buttons', () => {
     expect(flyBtn.classList.contains('active')).toBe(true);
     bar.setPressed('fly', false);
     expect(flyBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('FlyTips — screen readers', () => {
+  it('announces only the speed, politely', () => {
+    document.body.innerHTML = '';
+    new FlyTips(document.body, 5);
+    const el = document.querySelector('.fly-tips') as HTMLElement;
+    expect(el.getAttribute('role')).toBeNull();
+    expect(el.getAttribute('aria-live')).toBeNull();
+    const speed = document.querySelector('.fly-tips-speed') as HTMLElement;
+    expect(speed.getAttribute('aria-live')).toBe('polite');
+    expect(document.querySelectorAll('[aria-live], [role="status"]').length).toBe(1);
+  });
+});
+
+describe('looksTouchOnly', () => {
+  const media = (fine: boolean, coarse: boolean) => ({
+    matchMedia: (q: string) => ({ matches: q.includes('fine') ? fine : q.includes('coarse') ? coarse : false }) as MediaQueryList,
+  });
+
+  it('is true only with a coarse pointer and no fine one', () => {
+    expect(looksTouchOnly(media(false, true))).toBe(true);
+    expect(looksTouchOnly(media(true, true))).toBe(false); // touch laptop with a trackpad
+    expect(looksTouchOnly(media(true, false))).toBe(false);
+  });
+
+  it('is false where media queries are unavailable', () => {
+    expect(looksTouchOnly({} as Pick<Window, 'matchMedia'>)).toBe(false);
+    expect(looksTouchOnly(undefined)).toBe(false);
+  });
+});
+
+describe('Toolbar — hiding a button', () => {
+  it('hides and shows a button by name', () => {
+    document.body.innerHTML = '';
+    const bar = new Toolbar(document.body, new ToolManager());
+    bar.addButton({ name: 'fly', icon: 'F', title: 'Fly', toggle: true, onClick: () => {} });
+    const btn = document.querySelector('.toolbar-btn') as HTMLButtonElement;
+    bar.setHidden('fly', true);
+    expect(btn.hidden).toBe(true);
+    bar.setHidden('fly', false);
+    expect(btn.hidden).toBe(false);
+  });
+
+  it('a mode button gives up focus after a click, so Space cannot press it again', () => {
+    document.body.innerHTML = '';
+    const bar = new Toolbar(document.body, new ToolManager());
+    const action = vi.fn();
+    bar.addButton({ name: 'fly', icon: 'F', title: 'Fly', toggle: true, onClick: action });
+    const btn = document.querySelector('.toolbar-btn') as HTMLButtonElement;
+    btn.focus();
+    btn.click();
+    expect(action).toHaveBeenCalledOnce();
+    expect(document.activeElement).not.toBe(btn);
   });
 });

@@ -20,7 +20,7 @@ import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
 import { HistoryShortcuts } from '../ui/HistoryShortcuts';
 import { HistoryManager } from './history/HistoryManager';
 import { HelpOverlay } from '../ui/HelpOverlay';
-import { FlyTips } from '../ui/FlyTips';
+import { FlyTips, looksTouchOnly } from '../ui/FlyTips';
 import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
@@ -415,6 +415,12 @@ ${key}`. */
       else this.flyTips.hide();
     });
     this.viewer.onFlySpeedChange((speed) => this.flyTips.setSpeed(speed));
+    // A touch-only device has no way to fly, so it is not offered — until a
+    // key press shows a keyboard is there after all.
+    if (looksTouchOnly()) {
+      this.toolbar.setHidden('fly', true);
+      window.addEventListener('keydown', () => this.toolbar.setHidden('fly', false), { once: true });
+    }
 
     // Model tree panel
     this.modelTreePanel = new ModelTreePanel(appEl, {
@@ -613,6 +619,7 @@ ${key}`. */
     this.keyboardShortcuts.register({
       key: 'g',
       label: 'Fly through the model',
+      plainOnly: true,
       action: () => this.viewer.toggleFlying(),
     });
 
@@ -642,6 +649,8 @@ ${key}`. */
     // Help overlay — ? button at top-left, also toggled by ? key
     const appEl = document.getElementById('app')!;
     this.helpOverlay = new HelpOverlay(appEl, this.keyboardShortcuts);
+    // An open menu or help card has the keyboard; fly keys wait for it.
+    this.viewer.setFlyKeysSuspended(() => !!this.contextMenu?.isOpen() || this.helpOverlay.isOpen());
 
     this.keyboardShortcuts.register({
       key: '?',

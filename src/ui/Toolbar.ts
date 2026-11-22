@@ -100,6 +100,12 @@ export class Toolbar {
     this.container.appendChild(btn);
   }
 
+  /** Take a button off the toolbar, or put it back. */
+  setHidden(name: string, hidden: boolean): void {
+    const btn = this.buttons.get(name);
+    if (btn) btn.hidden = hidden;
+  }
+
   /** Show a mode button as on or off. */
   setPressed(name: string, pressed: boolean): void {
     const btn = this.buttons.get(name);

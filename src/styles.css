@@ -3052,3 +3052,27 @@ html, body {
   background: rgba(255, 255, 255, 0.16);
   white-space: nowrap;
 }
+
+/* A hidden toolbar button (fly, on a touch-only device): the flex display
+   above would otherwise override the attribute. */
+.toolbar-btn[hidden] {
+  display: none;
+}
+
+/* Below 1024px the gap between the Models panel and the Parameters panel /
+   legend is too narrow for the key list: fold to the speed alone, just right
+   of the Models panel, and sit under any panel that still reaches it. */
+@media (max-width: 1023px) {
+  .fly-tips {
+    left: 264px;
+    transform: none;
+    width: auto;
+    padding: 4px 10px;
+    z-index: 9;
+  }
+
+  .fly-tips-list,
+  .fly-tips-toggle {
+    display: none !important;
+  }
+}

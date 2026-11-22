@@ -27,6 +27,17 @@ export function formatFlySpeed(speed: number): string {
   return `${text} m/s`;
 }
 
+/**
+ * True on a device with a touch screen and no mouse or trackpad, where flying
+ * — all keys and fine dragging — has no way to move. Pages cannot see whether
+ * a keyboard is attached, so the caller should change its mind on the first
+ * key press.
+ */
+export function looksTouchOnly(win: Pick<Window, 'matchMedia'> | undefined = globalThis.window): boolean {
+  if (!win || typeof win.matchMedia !== 'function') return false;
+  return !win.matchMedia('(any-pointer: fine)').matches && win.matchMedia('(any-pointer: coarse)').matches;
+}
+
 export class FlyTips {
   private el: HTMLElement;
   private speedEl: HTMLElement;
@@ -40,8 +51,6 @@ export class FlyTips {
     this.el = document.createElement('div');
     this.el.className = 'fly-tips';
     this.el.hidden = true;
-    this.el.setAttribute('role', 'status');
-    this.el.setAttribute('aria-label', 'Flying');
 
     const head = document.createElement('div');
     head.className = 'fly-tips-head';
@@ -50,7 +59,10 @@ export class FlyTips {
     title.textContent = 'Flying';
     this.speedEl = document.createElement('span');
     this.speedEl.className = 'fly-tips-speed';
+    // Only the speed is announced, politely, as it changes; the key list is
+    // ordinary content a screen reader can read when asked.
     this.speedEl.setAttribute('aria-live', 'polite');
+    this.speedEl.setAttribute('aria-atomic', 'true');
     this.toggleBtn = document.createElement('button');
     this.toggleBtn.type = 'button';
     this.toggleBtn.className = 'fly-tips-toggle';
