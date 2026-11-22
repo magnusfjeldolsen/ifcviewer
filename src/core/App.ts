@@ -316,6 +316,8 @@ ${key}`. */
       modelManager: this.modelManager,
       requestRender,
       history: this.history,
+      // Read when a show-only runs, long after the clipping tool exists.
+      clipPlane: () => this.clippingTool.getClipPlane(),
     });
 
     // Element selection (Phase 2 — Inspector). Must be constructed after

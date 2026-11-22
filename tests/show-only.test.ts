@@ -72,4 +72,13 @@ describe('the status line after a show-only', () => {
     );
     expect(showOnlyStatus('X = 1', { shown: 0, fresh: false }, false)).toBe('No elements match X = 1');
   });
+
+  it('says which matches cannot be seen, and why', () => {
+    expect(showOnlyStatus('Type = A', { shown: 0, fresh: true, switchedOff: 40, cutAway: 0 }, false)).toBe(
+      'Type = A: none can be seen — 40 in a model that is switched off',
+    );
+    expect(showOnlyStatus('Type = A', { shown: 3, fresh: false, switchedOff: 2, cutAway: 1 }, false)).toBe(
+      'Showing only 3 elements — Type = A; 2 in a model that is switched off, 1 behind the section cut',
+    );
+  });
 });

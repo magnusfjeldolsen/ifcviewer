@@ -28,14 +28,31 @@ export function crossModelUnitKey(
   return key;
 }
 
-/** The status line after a show-only. */
-export function showOnlyStatus(label: string, result: { shown: number; fresh: boolean }, additive: boolean): string {
-  const n = result.shown.toLocaleString('en-US');
+/**
+ * The status line after a show-only. `shown` counts what can be seen
+ * afterwards; matches in a model switched off or behind the section plane
+ * are said apart, since they cannot be.
+ */
+export function showOnlyStatus(
+  label: string,
+  result: { shown: number; fresh: boolean; switchedOff?: number; cutAway?: number },
+  additive: boolean,
+): string {
+  const off = result.switchedOff ?? 0;
+  const cut = result.cutAway ?? 0;
+  const fmt = (k: number): string => k.toLocaleString('en-US');
+  const unseen: string[] = [];
+  if (off > 0) unseen.push(`${fmt(off)} in a model that is switched off`);
+  if (cut > 0) unseen.push(`${fmt(cut)} behind the section cut`);
+  if (result.shown === 0) {
+    return unseen.length === 0 ? `No elements match ${label}` : `${label}: none can be seen — ${unseen.join(', ')}`;
+  }
+  const n = fmt(result.shown);
   const noun = result.shown === 1 ? 'element' : 'elements';
-  if (result.shown === 0) return `No elements match ${label}`;
-  if (additive) return `Also showing ${n} ${noun} — ${label}`;
-  if (result.fresh) return `None of the shown elements match ${label}: showing all ${n} that do`;
-  return `Showing only ${n} ${noun} — ${label}`;
+  const rest = unseen.length > 0 ? `; ${unseen.join(', ')}` : '';
+  if (additive) return `Also showing ${n} ${noun} — ${label}${rest}`;
+  if (result.fresh) return `None of the shown elements match ${label}: showing all ${n} that do${rest}`;
+  return `Showing only ${n} ${noun} — ${label}${rest}`;
 }
 
 /** A show-only button's tooltip. */
