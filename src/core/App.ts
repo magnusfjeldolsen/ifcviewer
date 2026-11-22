@@ -248,12 +248,12 @@ ${key}`. */
         const on = this.settings.toggle(key);
         const name = target === 'vertex' ? 'Corners' : target === 'edge' ? 'Edges' : 'Surfaces';
         this.setStatus(`${name} ${on ? 'on' : 'off'}`);
-        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+        this.clearStatusAfter(STATUS_CLEAR_MS);
       },
       onToggleSnapping: () => {
         const on = this.settings.toggle('measurementSnapping');
         this.setStatus(on ? 'Snapping on' : 'Snapping off');
-        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+        this.clearStatusAfter(STATUS_CLEAR_MS);
       },
     };
 
@@ -268,7 +268,7 @@ ${key}`. */
       // like every other transient message.
       onMessage: (message) => {
         this.setStatus(message);
-        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+        this.clearStatusAfter(STATUS_CLEAR_MS);
       },
       ...snapSettings,
     });
@@ -289,7 +289,7 @@ ${key}`. */
       lengthUnitFor: (modelId) => this.propertyRepository.lengthUnit(modelId),
       onMessage: (message) => {
         this.setStatus(message);
-        setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+        this.clearStatusAfter(STATUS_CLEAR_MS);
       },
       snappingEnabled: snapSettings.snappingEnabled,
       allowedSnapTargets: snapSettings.allowedSnapTargets,
@@ -1333,7 +1333,7 @@ ${parameter.key}`);
       for (const existing of this.modelRecords.values()) {
         if (existing.name === file.name) {
           this.setStatus(`${file.name} is already loaded`);
-          setTimeout(() => this.setStatus(''), 3000);
+          this.clearStatusAfter(3000);
           // Settled, as a load that did not happen: whoever waits for this
           // load (the `?stats` surface, the bench) hears about it.
           this.emitLoadSettled({
@@ -1409,7 +1409,7 @@ ${parameter.key}`);
       );
 
       this.setStatus(`Loaded ${file.name} (${totalElements.toLocaleString()} elements)`);
-      setTimeout(() => this.setStatus(''), 3000);
+      this.clearStatusAfter(3000);
       timeline.mark('main.settled');
       this.emitLoadSettled({
         name: file.name, source: 'file', ok: true, meshCount: parsed.meshCount, fromCache: false,
@@ -1523,13 +1523,13 @@ ${parameter.key}`);
         this.selectionManager.selectExactly(identities);
       }
       this.setStatus(describeSimilarResult(query, identities.length));
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
     } catch (err) {
       // Superseded by a newer query — the user moved on, not an error.
       if (err instanceof BulkRequestCancelled) return;
       console.error('App: select similar failed', err);
       this.setStatus('Could not complete the search');
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
     }
   }
 
@@ -1580,12 +1580,12 @@ ${parameter.key}`);
         else this.selectionManager.selectExactly(identities);
       }
       this.setStatus(describeSimilarResult(query, identities.length));
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
     } catch (err) {
       if (err instanceof BulkRequestCancelled) return;
       console.error('App: select parameter value failed', err);
       this.setStatus('Could not complete the search');
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
     }
   }
 
@@ -1607,13 +1607,8 @@ ${parameter.key}`);
     // Readable from the page (`performance.getEntriesByName('show-only')`) for measuring.
     performance.measure('show-only', { start });
     this.setStatus(showOnlyStatus(label, result, additive));
-    // Eyes are clicked in quick succession: an earlier message's clearing
-    // must not wipe this one early.
-    window.clearTimeout(this.showOnlyStatusTimer);
-    this.showOnlyStatusTimer = window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    this.clearStatusAfter(STATUS_CLEAR_MS);
   }
-
-  private showOnlyStatusTimer: number | undefined;
 
   /**
    * The Parameters list's eye: show only the elements with `value`, in
@@ -1655,7 +1650,7 @@ ${parameter.key}`);
       if (err instanceof BulkRequestCancelled) return;
       console.error('App: show only failed', err);
       this.setStatus('Could not complete the search');
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
     }
   }
 
@@ -1835,7 +1830,7 @@ ${parameter.key}`);
     } catch (err) {
       console.error('App: reading parameters for colouring failed', err);
       this.setStatus('Could not read the parameters of this element');
-      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+      this.clearStatusAfter(STATUS_CLEAR_MS);
       return;
     }
     const scope = this.colourScope(first.modelId, false);
@@ -2014,6 +2009,17 @@ ${parameter.key}`);
 
   private emitLoadSettled(event: LoadSettledEvent): void {
     for (const cb of this.loadSettledListeners) cb(event);
+  }
+
+  /**
+   * Clear the status after `ms`, unless another message has replaced it by
+   * then: a message's clearing never wipes a newer one early.
+   */
+  private clearStatusAfter(ms: number): void {
+    const text = this.statusEl?.textContent ?? '';
+    window.setTimeout(() => {
+      if ((this.statusEl?.textContent ?? '') === text) this.setStatus('');
+    }, ms);
   }
 
   private setStatus(text: string): void {
