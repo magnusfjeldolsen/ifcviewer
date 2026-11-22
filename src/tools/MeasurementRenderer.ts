@@ -5,6 +5,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { formatDistance } from './measureMath';
 import type { MeasurementView } from './measurementViews';
 import type { MeasurementEnd } from './MeasurementStore';
+import { labelWorldHeight } from './labelScale';
 
 /**
  * Everything a measurement looks like, and nothing about what it means.
@@ -71,6 +72,10 @@ const GLYPH_SEGMENTS = 16;
 /** The hover glyph is white so it reads as "not placed yet". */
 const HOVER_COLOR = 0xffffff;
 
+/** Scratch for `updateLabel`, so the per-frame label pass allocates nothing. */
+const scratchForward = new THREE.Vector3();
+const scratchOffset = new THREE.Vector3();
+
 export interface MeasurementRendererDeps {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -96,6 +101,8 @@ export class MeasurementRenderer {
   private previewLine: Line2 | null = null;
   private previewExtension: Line2 | null = null;
   private previewLabel: THREE.Sprite | null = null;
+  /** Every live label, so each can be resized on a frame without walking the scene. */
+  private labels = new Set<THREE.Sprite>();
 
   constructor(deps: MeasurementRendererDeps) {
     this.deps = deps;
@@ -212,7 +219,7 @@ export class MeasurementRenderer {
     this.removePreviewLabel();
     this.previewLabel = this.createLabel(distance);
     this.previewLabel.position.addVectors(start, end).multiplyScalar(0.5);
-    applyLabelScale(this.previewLabel, distance);
+    this.updateLabel(this.previewLabel);
     this.deps.scene.add(this.previewLabel);
   }
 
@@ -240,6 +247,8 @@ export class MeasurementRenderer {
       this.hoverMarker.scale.setScalar(dist * HOVER_MARKER_SCREEN_SIZE);
     }
 
+    for (const label of this.labels) this.updateLabel(label);
+
     const width = this.canvasWidth();
     const height = this.canvasHeight();
     for (const line of this.lines.values()) line.material.resolution.set(width, height);
@@ -254,6 +263,7 @@ export class MeasurementRenderer {
     for (const group of this.groups.values()) this.disposeGroup(group);
     this.groups.clear();
     this.lines.clear();
+    this.labels.clear();
   }
 
   // ── Building ───────────────────────────────────────────────
@@ -295,7 +305,7 @@ export class MeasurementRenderer {
 
     const label = this.createLabel(distance);
     label.position.addVectors(view.start, view.end).multiplyScalar(0.5);
-    applyLabelScale(label, distance);
+    this.updateLabel(label);
     group.add(label);
 
     this.deps.scene.add(group);
@@ -474,6 +484,8 @@ export class MeasurementRenderer {
     // Never a pick target (D9): it is the only part of a measurement with real
     // screen area, and it grows without bound as the camera closes in.
     sprite.userData.isMeasurementLabel = true;
+    sprite.userData.aspect = canvas.width / canvas.height;
+    this.labels.add(sprite);
 
     return sprite;
   }
@@ -488,10 +500,25 @@ export class MeasurementRenderer {
 
   private removePreviewLabel(): void {
     if (!this.previewLabel) return;
+    this.labels.delete(this.previewLabel);
     this.deps.scene.remove(this.previewLabel);
     this.previewLabel.material.map?.dispose();
     this.previewLabel.material.dispose();
     this.previewLabel = null;
+  }
+
+  /**
+   * Hold a label at `LABEL_HEIGHT_PX` on screen (#57). The width follows the
+   * texture's own aspect, since the text — and so the canvas — varies in length.
+   */
+  private updateLabel(sprite: THREE.Sprite): void {
+    const camera = this.deps.camera;
+    camera.getWorldDirection(scratchForward);
+    scratchOffset.subVectors(sprite.position, camera.position);
+    const depth = scratchOffset.dot(scratchForward);
+    const height = labelWorldHeight(depth, camera.fov, this.canvasHeight());
+    const aspect = (sprite.userData.aspect as number | undefined) ?? 2;
+    sprite.scale.set(height * aspect, height, 1);
   }
 
   private scaleMarkers(group: THREE.Group): void {
@@ -514,17 +541,12 @@ export class MeasurementRenderer {
         else mat.dispose();
       }
       if (child instanceof THREE.Sprite) {
+        this.labels.delete(child);
         child.material.map?.dispose();
         child.material.dispose();
       }
     });
   }
-}
-
-/** Label size follows the measured length, clamped at both ends. */
-function applyLabelScale(sprite: THREE.Sprite, distance: number): void {
-  const scale = Math.max(0.15, Math.min(2.0, distance * 0.15));
-  sprite.scale.set(scale, scale * 0.5, 1);
 }
 
 function roundRect(
