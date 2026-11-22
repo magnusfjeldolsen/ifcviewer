@@ -104,4 +104,29 @@ describe('KeyboardShortcuts', () => {
 
     expect(action).not.toHaveBeenCalled();
   });
-});
+
+  it('ignores auto-repeat, so holding a toggle key does not flicker it', () => {
+    const action = vi.fn();
+    shortcuts.register({ key: 'g', label: 'Fly', action });
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }));
+    for (let i = 0; i < 5; i++) document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', repeat: true, bubbles: true }));
+    expect(action).toHaveBeenCalledOnce();
+  });
+
+  it('a plain-only shortcut ignores Ctrl, Cmd and Alt chords', () => {
+    const fly = vi.fn();
+    const fit = vi.fn();
+    shortcuts.register({ key: 'g', label: 'Fly', plainOnly: true, action: fly });
+    shortcuts.register({ key: 'f', label: 'Fit', action: fit });
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
+      const e = new KeyboardEvent('keydown', { key: 'g', bubbles: true, cancelable: true, ...mod });
+      document.body.dispatchEvent(e);
+      expect(e.defaultPrevented).toBe(false); // the browser's own Ctrl+G still works
+    }
+    expect(fly).not.toHaveBeenCalled();
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }));
+    expect(fly).toHaveBeenCalledOnce();
+    // Other shortcuts are unchanged.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+    expect(fit).toHaveBeenCalledOnce();
+  });});
