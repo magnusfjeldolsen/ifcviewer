@@ -363,6 +363,30 @@ describe('opening a parameter', () => {
     ]);
   });
 
+  it('each value has an eye that shows only its elements, as well with Ctrl or Shift, and never selects', () => {
+    const onPickValue = vi.fn();
+    const onShowOnly = vi.fn();
+    const { parent, head } = listWith({ onPickValue, onShowOnly });
+    head('P.Profile').click();
+    const eyes = parent.querySelectorAll<HTMLButtonElement>('[data-key="P.Profile"] .show-only-btn');
+    expect(eyes).toHaveLength(parent.querySelectorAll('[data-key="P.Profile"] .param-value').length);
+    expect(eyes[0].getAttribute('aria-label')).toBe('Show only HEA140');
+    expect(eyes[0].title).toMatch(/^Show only the elements with HEA140, hide the rest/);
+    eyes[0].click();
+    eyes[1].dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    expect(onShowOnly.mock.calls.map((c) => [c[0].key, c[1], c[2]])).toEqual([
+      ['P.Profile', 'HEA140', false],
+      ['P.Profile', 'HEA160', true],
+    ]);
+    expect(onPickValue).not.toHaveBeenCalled();
+  });
+
+  it('has no eye without a show-only handler', () => {
+    const { parent, head } = listWith({ onPickValue: vi.fn() });
+    head('P.Profile').click();
+    expect(parent.querySelector('.show-only-btn')).toBeNull();
+  });
+
   it('gives every name and value its full text as a tooltip', () => {
     const long = 'A_very_long_type_name_without_spaces'.repeat(4);
     const parent = document.createElement('div');

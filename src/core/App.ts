@@ -48,6 +48,7 @@ import { TotalsController, type TotalsScope } from '../inspector/TotalsControlle
 import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
+import { crossModelUnitKey, showOnlyStatus } from '../inspector/showOnly';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
@@ -736,6 +737,8 @@ ${key}`. */
       },
       selectValue: (modelId, parameter, value, additive, unit) =>
         void this.selectParameterValue(modelId, parameter, value, additive, unit),
+      showOnlyValue: (modelId, parameter, value, additive, unit) =>
+        void this.showOnlyParameterValue(modelId, parameter, value, additive, unit),
       // Opening a parameter builds its column in case a value is picked;
       // closing it again (or opening another) gives that build up, so
       // browsing the list never leaves scans running that nobody needs.
@@ -1571,6 +1574,71 @@ ${parameter.key}`);
     } catch (err) {
       if (err instanceof BulkRequestCancelled) return;
       console.error('App: select parameter value failed', err);
+      this.setStatus('Could not complete the search');
+      window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    }
+  }
+
+  // ── Show only (#70) ────────────────────────────────────────
+
+  /**
+   * Show only these elements and hide the rest, through the same path as
+   * Isolate (one undo step). While something is hidden it narrows what is
+   * shown; `additive` (Ctrl/Shift) shows them as well. The status line says
+   * what happened, and the tray's "Show N hidden" is the way back.
+   */
+  private showOnlyElements(
+    elements: readonly { modelId: string; expressId: number }[],
+    label: string,
+    additive: boolean,
+  ): void {
+    const start = performance.now();
+    const result = this.appearanceManager.showOnly(elements, additive ? 'add' : 'narrow');
+    // Readable from the page (`performance.getEntriesByName('show-only')`) for measuring.
+    performance.measure('show-only', { start });
+    this.setStatus(showOnlyStatus(label, result, additive));
+    window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+  }
+
+  /**
+   * The Parameters list's eye: show only the elements with `value`, in
+   * every loaded model that has the parameter. The list's own model reads
+   * it exactly as selecting does; another model matches only in the same
+   * unit key, and not at all when the unit is not stated (ADR 4). Another
+   * model's parameters are described first if they never were.
+   */
+  private async showOnlyParameterValue(
+    modelId: string,
+    parameter: ParameterSummary,
+    value: ParameterValue,
+    additive: boolean,
+    valueUnit?: UnitRef,
+  ): Promise<void> {
+    const key = parameter.key;
+    this.propertyRepository.cancelBulk();
+    const symbol = valueUnit ? valueUnit.symbol : parameter.unit;
+    const unit = typeof value === 'number' && symbol ? ` ${symbol}` : '';
+    const label = `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}`;
+    this.setStatus(`Finding ${label}…`);
+    const crossKey = crossModelUnitKey(parameter, value, valueUnit);
+    const models = this.modelManager.getModelIds().filter((m) => m === modelId || crossKey !== null);
+    try {
+      await this.loadGate.idle();
+      const found = await Promise.all(
+        models.map(async (m) => {
+          if (m !== modelId) {
+            const described = await this.propertyRepository.describeParameters(m, this.modelManager.elementIds(m));
+            if (!described.parameters.some((p) => p.key === key)) return [];
+          }
+          const column = await this.propertyRepository.getColumn(m, key, undefined, { urgent: true });
+          const ids = columnIdsWithValue(column, value, m === modelId ? valueUnit?.key : (crossKey ?? undefined));
+          return ids.map((expressId) => ({ modelId: m, expressId }));
+        }),
+      );
+      this.showOnlyElements(found.flat(), label, additive);
+    } catch (err) {
+      if (err instanceof BulkRequestCancelled) return;
+      console.error('App: show only failed', err);
       this.setStatus('Could not complete the search');
       window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
     }

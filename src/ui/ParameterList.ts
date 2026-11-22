@@ -14,7 +14,8 @@
  * none, or "mixed units" when the values are in more than one: an opened
  * row then says which units and that the values are not added up.
  * Opening a row lists its values with element counts, most common first;
- * picking a value hands it to `onPickValue`.
+ * picking a value hands it to `onPickValue`, and its eye button to
+ * `onShowOnly`.
  *
  * Nothing in the list scrolls sideways: long names and values are cut with
  * an ellipsis and carry their full text in a tooltip.
@@ -24,6 +25,8 @@ import { formatNumber } from '../inspector/format';
 import { canSum, isNotStated, sumVerdictText, unitLabel, type UnitRef } from '../inspector/units';
 import type { ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
+import { showOnlyTitle } from '../inspector/showOnly';
+import { showOnlyButton } from './showOnlyButton';
 
 export type ParameterSort = 'name' | 'count';
 
@@ -48,6 +51,12 @@ export interface ParameterListOptions {
    * value picked is the value in that unit only.
    */
   onPickValue?(parameter: ParameterSummary, value: ParameterValue, additive: boolean, unit?: UnitRef): void;
+  /**
+   * Show only the elements with this value, hiding the rest (#70). With it,
+   * each value has an eye button. `additive` (Ctrl, Shift or Cmd): show them
+   * as well. `unit` as for `onPickValue`.
+   */
+  onShowOnly?(parameter: ParameterSummary, value: ParameterValue, additive: boolean, unit?: UnitRef): void;
   /**
    * A row was opened: a value is likely to be picked next, so whatever
    * picking needs can start getting ready.
@@ -546,6 +555,15 @@ export class ParameterList {
           b.disabled = true;
         }
         li.appendChild(b);
+        const onShowOnly = this.options.onShowOnly;
+        if (onShowOnly) {
+          li.className = 'param-value-item';
+          li.appendChild(
+            showOnlyButton(`Show only ${text}`, showOnlyTitle(`the elements with ${text}`), (additive) =>
+              onShowOnly(p, v.value, additive, v.unit),
+            ),
+          );
+        }
         frag.appendChild(li);
       }
       list.appendChild(frag);
