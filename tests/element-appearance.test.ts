@@ -420,6 +420,8 @@ describe('AppearanceManager — show only (#70)', () => {
     expect(manager.showOnly(scope(['Gone', 1]), 'narrow')).toEqual(ok(0));
     expect(manager.hasHidden()).toBe(false);
     expect(manager.showOnly(scope(['Gone', 1], ['A', 2]), 'narrow')).toEqual(ok(1));
+    // Nor are elements without geometry (a select-similar class query finds those too).
+    expect(manager.showOnly(scope(['A', 2], ['A', 99]), 'narrow')).toEqual(ok(1));
   });
 
   it('a match only in a model switched off is not visible: falls back, keeps the model off, and says so', () => {

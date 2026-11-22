@@ -485,3 +485,16 @@ describe('App contextmenu wiring (T32 — source assertions)', () => {
     expect(handler![0]).toMatch(/shouldSuppressContextMenu/);
   });
 });
+
+describe('App: "Show only this category / type" (#70)', () => {
+  it('searches every loaded model, with the same query in each, rather than the clicked model only', () => {
+    const method = appSrc.match(/private async showOnlySimilar\([\s\S]*?\n {2}\}/);
+    expect(method).not.toBeNull();
+    // The query is run per model (`modelId: m`) through the cross-model search.
+    expect(method![0]).toMatch(/showOnlyFound\(/);
+    expect(method![0]).toMatch(/\{ \.\.\.query, modelId: m \}/);
+    const found = appSrc.match(/private showOnlyFound\([\s\S]*?\n {2}\}/);
+    expect(found![0]).toMatch(/findAcrossModels\(/);
+    expect(found![0]).toMatch(/models: \(\) => this\.modelManager\.getModelIds\(\)/);
+  });
+});

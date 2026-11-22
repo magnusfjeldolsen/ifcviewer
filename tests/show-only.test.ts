@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { crossModelUnitKey, showOnlyStatus } from '../src/inspector/showOnly';
+import { crossModelUnitKey, findAcrossModels, InOrder, Latest, showOnlyStatus } from '../src/inspector/showOnly';
 import { ColumnBuilder, columnRowsWithValue } from '../src/inspector/parameterColumn';
 import type { ElementProperties, PropertyFlatRow } from '../src/inspector/types';
 
@@ -80,5 +80,89 @@ describe('the status line after a show-only', () => {
     expect(showOnlyStatus('Type = A', { shown: 3, fresh: false, switchedOff: 2, cutAway: 1 }, false)).toBe(
       'Showing only 3 elements — Type = A; 2 in a model that is switched off, 1 behind the section cut',
     );
+  });
+});
+
+describe('searching every loaded model', () => {
+  const later = () => {
+    let resolve!: (v: number[]) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<number[]>((res, rej) => ((resolve = res), (reject = rej)));
+    return { promise, resolve, reject };
+  };
+
+  it('takes the model list once loads are done, so a model that was loading is searched', async () => {
+    let models = ['A'];
+    let idle!: () => void;
+    const searched: string[] = [];
+    const p = findAcrossModels(
+      { idle: () => new Promise<void>((r) => (idle = r)), models: () => models, isLoaded: () => true },
+      async (m) => (searched.push(m), [1]),
+    );
+    models = ['A', 'B']; // B finished loading meanwhile
+    idle();
+    expect(await p).toEqual([{ modelId: 'A', expressId: 1 }, { modelId: 'B', expressId: 1 }]);
+    expect(searched).toEqual(['A', 'B']);
+  });
+
+  it('drops a model closed during the search, and its failure is not an error', async () => {
+    const loaded = new Set(['A', 'B', 'C']);
+    const b = later();
+    const c = later();
+    const p = findAcrossModels(
+      { idle: async () => {}, models: () => ['A', 'B', 'C'], isLoaded: (m) => loaded.has(m) },
+      (m) => (m === 'A' ? Promise.resolve([1]) : m === 'B' ? b.promise : c.promise),
+    );
+    await Promise.resolve();
+    loaded.delete('B');
+    loaded.delete('C');
+    b.resolve([2]); // finished, but the model is gone
+    c.reject(new Error('model closed'));
+    expect(await p).toEqual([{ modelId: 'A', expressId: 1 }]);
+  });
+
+  it('any other failure rejects', async () => {
+    await expect(
+      findAcrossModels({ idle: async () => {}, models: () => ['A'], isLoaded: () => true }, async () => {
+        throw new Error('worker broke');
+      }),
+    ).rejects.toThrow('worker broke');
+  });
+});
+
+describe('the newest show-only wins, in the order clicked', () => {
+  it('a plain request outdates earlier ones; a Ctrl/Shift one joins them', () => {
+    const latest = new Latest();
+    const a = latest.next();
+    const b = latest.current(); // Shift: as well
+    expect(latest.isLatest(a) && latest.isLatest(b)).toBe(true);
+    const c = latest.next();
+    expect(latest.isLatest(a)).toBe(false);
+    expect(latest.isLatest(c)).toBe(true);
+  });
+
+  it('applies in the order started, however the searches finish', async () => {
+    const order = new InOrder();
+    const applied: string[] = [];
+    let finishFirst!: () => void;
+    const first = order.run(() => new Promise<string>((r) => (finishFirst = () => r('narrow'))), (v) => applied.push(v));
+    const second = order.run(async () => 'add', (v) => applied.push(v));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(applied).toEqual([]); // the add waits for the narrow before it
+    finishFirst();
+    await Promise.all([first, second]);
+    expect(applied).toEqual(['narrow', 'add']);
+  });
+
+  it('a request that outdates the earlier ones does not wait for them, and a failure never blocks the queue', async () => {
+    const order = new InOrder();
+    const applied: string[] = [];
+    void order.run(() => new Promise<string>(() => {}), (v) => applied.push(v)); // never finishes
+    await order.run(async () => 'plain', (v) => applied.push(v), false);
+    expect(applied).toEqual(['plain']);
+    await order.run(async () => { throw new Error('x'); }, () => {}).catch(() => {});
+    await order.run(async () => 'after', (v) => applied.push(v));
+    expect(applied).toEqual(['plain', 'after']);
   });
 });

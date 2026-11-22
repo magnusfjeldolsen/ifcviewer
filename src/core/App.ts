@@ -48,7 +48,7 @@ import { TotalsController, type TotalsScope } from '../inspector/TotalsControlle
 import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
-import { crossModelUnitKey, showOnlyStatus } from '../inspector/showOnly';
+import { crossModelUnitKey, findAcrossModels, InOrder, Latest, showOnlyStatus } from '../inspector/showOnly';
 import { StatusTimer } from '../ui/statusTimer';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
@@ -1495,33 +1495,15 @@ ${parameter.key}`);
    *
    * See dev/plans/handoff-select-similar.md.
    */
-  private async runSelectSimilar(
-    query: SimilarQuery,
-    /** `show-only` (#70): show only the result instead of selecting it. */
-    then: 'select' | 'show-only' = 'select',
-  ): Promise<void> {
+  private async runSelectSimilar(query: SimilarQuery): Promise<void> {
     // A previous query (or an inspector intersection) still running would
     // sit ahead of this one in the worker's serial queue.
     this.propertyRepository.cancelBulk();
     this.setStatus(`Finding ${query.label}…`);
 
     try {
-      const ids =
-        query.kind === 'class'
-          ? await this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcTypeCode)
-          : await this.propertyRepository.findMatching(
-              query.modelId,
-              query.ifcTypeCode,
-              query.selector,
-              query.value,
-              (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
-            );
-
+      const ids = await this.similarIds(query, (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`));
       const identities = identitiesFromIds(query, ids);
-      if (then === 'show-only') {
-        this.showOnlyElements(identities, query.label, false);
-        return;
-      }
       if (identities.length > 0) {
         this.selectionManager.selectExactly(identities);
       }
@@ -1534,6 +1516,16 @@ ${parameter.key}`);
       this.setStatus('Could not complete the search');
       this.clearStatusAfter(STATUS_CLEAR_MS);
     }
+  }
+
+  /** Newest pick of a value wins: an older one finishing later never selects. */
+  private readonly selectValueRequests = new Latest();
+
+  /** The ids a select-similar query finds in its model (worker side). */
+  private similarIds(query: SimilarQuery, onProgress?: (done: number, total: number) => void): Promise<number[]> {
+    return query.kind === 'class'
+      ? this.propertyRepository.enumerateExpressIds(query.modelId, query.ifcTypeCode)
+      : this.propertyRepository.findMatching(query.modelId, query.ifcTypeCode, query.selector, query.value, onProgress);
   }
 
   /**
@@ -1565,6 +1557,8 @@ ${parameter.key}`);
     const unit = typeof value === 'number' && symbol ? ` ${symbol}` : '';
     const query = { label: `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}` };
     this.setStatus(`Finding ${query.label}…`);
+    // A Ctrl/Shift pick adds to the ones before it, so it does not outdate them.
+    const ticket = additive ? this.selectValueRequests.current() : this.selectValueRequests.next();
     try {
       // Urgent: a column built in case goes ahead of any other background
       // work now that someone is waiting on it, and is no longer given up.
@@ -1574,6 +1568,8 @@ ${parameter.key}`);
         (done, total) => this.setStatus(`Finding ${query.label}… ${done} / ${total}`),
         { urgent: true },
       );
+      // A newer pick, or the model closed meanwhile: this one is out of date.
+      if (!this.selectValueRequests.isLatest(ticket) || !this.modelManager.getModel(modelId)) return;
       const ids = columnIdsWithValue(column, value, valueUnit?.key);
       // The class of each match is not known here: the inspector fills it in,
       // as it does for an all-products select-similar.
@@ -1605,6 +1601,15 @@ ${parameter.key}`);
     label: string,
     additive: boolean,
   ): void {
+    void this.showOnlyQueued(label, additive, async () => elements);
+  }
+
+  /** Hide the rest now, and say what happened. */
+  private applyShowOnly(
+    elements: readonly { modelId: string; expressId: number }[],
+    label: string,
+    additive: boolean,
+  ): void {
     const start = performance.now();
     const result = this.appearanceManager.showOnly(elements, additive ? 'add' : 'narrow');
     // Readable from the page (`performance.getEntriesByName('show-only')`) for measuring.
@@ -1628,29 +1633,80 @@ ${parameter.key}`);
     valueUnit?: UnitRef,
   ): Promise<void> {
     const key = parameter.key;
-    this.propertyRepository.cancelBulk();
     const symbol = valueUnit ? valueUnit.symbol : parameter.unit;
     const unit = typeof value === 'number' && symbol ? ` ${symbol}` : '';
     const label = `${key.slice(key.lastIndexOf('.') + 1)} = ${valueText(value)}${unit}`;
-    this.setStatus(`Finding ${label}…`);
     const crossKey = crossModelUnitKey(parameter, value, valueUnit);
-    const models = this.modelManager.getModelIds().filter((m) => m === modelId || crossKey !== null);
+    await this.showOnlyFound(label, additive, async (m) => {
+      if (m !== modelId) {
+        if (crossKey === null) return [];
+        const described = await this.propertyRepository.describeParameters(m, this.modelManager.elementIds(m));
+        if (!described.parameters.some((p) => p.key === key)) return [];
+      }
+      const column = await this.propertyRepository.getColumn(m, key, undefined, { urgent: true });
+      return columnIdsWithValue(column, value, m === modelId ? valueUnit?.key : (crossKey ?? undefined));
+    });
+  }
+
+  /**
+   * The right-click menu's "Show only this category / type": what
+   * select-similar would find, in every loaded model. A class and a
+   * predefined type, or a type name within a class, mean the same in any
+   * model (the class's type code is the schema's), so the query is run in
+   * each. Elements without geometry are not drawn and not counted.
+   */
+  private async showOnlySimilar(query: SimilarQuery): Promise<void> {
+    await this.showOnlyFound(query.label, false, (m) => this.similarIds({ ...query, modelId: m }));
+  }
+
+  /**
+   * Newest show-only wins: a plain one outdates every earlier one still
+   * searching; a Ctrl/Shift one joins them and lands after them.
+   */
+  private readonly showOnlyRequests = new Latest();
+  private readonly showOnlyOrder = new InOrder();
+
+  /**
+   * Search every loaded model (after any load, so a model still loading is
+   * searched rather than wholly hidden) and show only what was found.
+   */
+  private showOnlyFound(
+    label: string,
+    additive: boolean,
+    search: (modelId: string) => Promise<readonly number[]>,
+  ): Promise<void> {
+    this.propertyRepository.cancelBulk();
+    this.setStatus(`Finding ${label}…`);
+    return this.showOnlyQueued(label, additive, () =>
+      findAcrossModels(
+        {
+          idle: () => this.loadGate.idle(),
+          models: () => this.modelManager.getModelIds(),
+          isLoaded: (m) => !!this.modelManager.getModel(m),
+        },
+        search,
+      ),
+    );
+  }
+
+  /** Show only what `find` gives, unless a newer show-only has outdated it by then. */
+  private async showOnlyQueued(
+    label: string,
+    additive: boolean,
+    find: () => Promise<readonly { modelId: string; expressId: number }[]>,
+    waitForEarlier = additive,
+  ): Promise<void> {
+    const ticket = additive ? this.showOnlyRequests.current() : this.showOnlyRequests.next();
     try {
-      await this.loadGate.idle();
-      const found = await Promise.all(
-        models.map(async (m) => {
-          if (m !== modelId) {
-            const described = await this.propertyRepository.describeParameters(m, this.modelManager.elementIds(m));
-            if (!described.parameters.some((p) => p.key === key)) return [];
-          }
-          const column = await this.propertyRepository.getColumn(m, key, undefined, { urgent: true });
-          const ids = columnIdsWithValue(column, value, m === modelId ? valueUnit?.key : (crossKey ?? undefined));
-          return ids.map((expressId) => ({ modelId: m, expressId }));
-        }),
+      await this.showOnlyOrder.run(
+        find,
+        (found) => {
+          if (this.showOnlyRequests.isLatest(ticket)) this.applyShowOnly(found, label, additive);
+        },
+        waitForEarlier,
       );
-      this.showOnlyElements(found.flat(), label, additive);
     } catch (err) {
-      if (err instanceof BulkRequestCancelled) return;
+      if (err instanceof BulkRequestCancelled || !this.showOnlyRequests.isLatest(ticket)) return;
       console.error('App: show only failed', err);
       this.setStatus('Could not complete the search');
       this.clearStatusAfter(STATUS_CLEAR_MS);
@@ -1728,12 +1784,12 @@ ${parameter.key}`);
         },
         showOnlySimilarCategory: () => {
           if (!similar) return;
-          void this.runSelectSimilar(categoryQuery(similar), 'show-only');
+          void this.showOnlySimilar(categoryQuery(similar));
         },
         showOnlySimilarType: () => {
           if (!similar) return;
           const query = typeQuery(similar);
-          if (query) void this.runSelectSimilar(query, 'show-only');
+          if (query) void this.showOnlySimilar(query);
         },
         colourBy: () => void this.openColourPicker(x, y, state),
         clearColours: () => this.colourBy.clear(),
