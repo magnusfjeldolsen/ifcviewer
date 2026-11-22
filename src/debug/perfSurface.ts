@@ -101,7 +101,8 @@ export interface PerfSurface {
     repeat?: number;
     area?: 'model' | 'screen';
   }): PickResult;
-  camera(): { near: number; far: number; position: number[]; fov: number; aspect: number };
+  /** quaternion and mode (who drives the camera) let a script check that a mode switch left the view alone. */
+  camera(): { near: number; far: number; position: number[]; quaternion: number[]; mode: string; fov: number; aspect: number };
   /** Put the camera at `position` looking at `target` (world space), e.g. to compare builds from one pose. */
   setCamera(position: number[], target: number[]): void;
   model(): {
@@ -385,7 +386,15 @@ export function installPerfSurface(handles: DebugHandles): PerfSurface {
 
     camera() {
       const c = viewer.getCamera();
-      return { near: c.near, far: c.far, position: c.position.toArray(), fov: c.fov, aspect: c.aspect };
+      return {
+        near: c.near,
+        far: c.far,
+        position: c.position.toArray(),
+        quaternion: c.quaternion.toArray(),
+        mode: viewer.getControlsMode(),
+        fov: c.fov,
+        aspect: c.aspect,
+      };
     },
 
     setCamera(position, target) {

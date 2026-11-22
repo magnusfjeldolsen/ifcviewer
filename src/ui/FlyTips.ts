@@ -17,7 +17,7 @@ const TIPS: ReadonlyArray<readonly [string, string]> = [
   ['Drag', 'Look around'],
   ['Scroll, X / Z', 'Faster / slower'],
   ['Shift', 'Hold to go 4× faster'],
-  ['Space', 'Hold to go slow and precise'],
+  ['Space', 'Hold for slow and precise'],
   ['Esc or G', 'Back to orbit'],
 ];
 
