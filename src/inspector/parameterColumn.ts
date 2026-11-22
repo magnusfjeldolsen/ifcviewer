@@ -61,6 +61,13 @@ export interface DiscreteColumnData extends ColumnCommon {
   codes: Int32Array;
   /** The distinct values, in order of first appearance. */
   dictionary: ParameterValue[];
+  /**
+   * When some values are numbers (a mix): the units those numbers are in,
+   * and per row an index into them (null when there is one). Lets totals
+   * add up a scope whose own values are all numbers (#69).
+   */
+  units?: UnitRef[];
+  unitIndex?: Uint16Array | Uint32Array | null;
 }
 
 /** A column as the worker sends it: without the scope, which the main thread already has. */
@@ -75,7 +82,9 @@ export type ParameterColumn = ColumnData & {
 
 /** The buffers to transfer (not copy) with a column. */
 export function columnTransferables(c: ColumnData): ArrayBuffer[] {
-  if (c.type === 'discrete') return [c.codes.buffer as ArrayBuffer];
+  if (c.type === 'discrete') {
+    return c.unitIndex ? [c.codes.buffer as ArrayBuffer, c.unitIndex.buffer as ArrayBuffer] : [c.codes.buffer as ArrayBuffer];
+  }
   return c.unitIndex
     ? [c.values.buffer as ArrayBuffer, c.unitIndex.buffer as ArrayBuffer]
     : [c.values.buffer as ArrayBuffer];
@@ -153,7 +162,13 @@ export class ColumnBuilder {
         unitIndex: this.units.length > 1 ? this.unitOf : null,
       };
     }
-    return { type: 'discrete', key: this.key, count: this.count, codes: this.codes, dictionary: this.dictionary };
+    const column: DiscreteColumnData = { type: 'discrete', key: this.key, count: this.count, codes: this.codes, dictionary: this.dictionary };
+    // Numbers among text: keep their units (only then), as a number column would.
+    if (this.units.length > 0) {
+      column.units = this.units;
+      column.unitIndex = this.units.length > 1 ? this.unitOf : null;
+    }
+    return column;
   }
 }
 
@@ -252,6 +267,6 @@ export function columnUnits(c: ColumnData, rows?: Iterable<number>): UnitCount[]
 
 /** Bytes held in the column's typed arrays (not counting the shared `ids`). */
 export function columnBytes(c: ColumnData): number {
-  if (c.type === 'discrete') return c.codes.byteLength;
+  if (c.type === 'discrete') return c.codes.byteLength + (c.unitIndex?.byteLength ?? 0);
   return c.values.byteLength + (c.unitIndex?.byteLength ?? 0);
 }

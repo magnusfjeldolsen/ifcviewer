@@ -125,6 +125,11 @@ export class ModelManager {
     return true;
   }
 
+  /** Whether a model is loaded and switched on. */
+  isVisible(id: string): boolean {
+    return this.models.get(id)?.visible ?? false;
+  }
+
   setVisible(id: string, visible: boolean): boolean {
     const entry = this.models.get(id);
     if (!entry) return false;

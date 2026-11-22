@@ -51,7 +51,16 @@ export interface ParametersPanelDeps {
   release?(modelId: string, parameter: ParameterSummary): void;
   /** Colour the elements by this parameter (#68). */
   colourBy?(modelId: string, parameter: ParameterSummary): void;
+  /**
+   * The Totals tab (#69), shown beside the list. Told when it is shown and
+   * hidden: it works only while shown.
+   */
+  totals?: { getElement(): HTMLElement; setShown(on: boolean): void };
+  /** Add a parameter as a row of the Totals tab (the list's Σ button). */
+  addToTotals?(parameter: ParameterSummary): void;
 }
+
+export type ParametersTab = 'parameters' | 'totals';
 
 const counts = new Intl.NumberFormat('en-US');
 
@@ -69,6 +78,9 @@ export class ParametersPanel {
   /** Bumped on every open: replies for an earlier one are dropped. */
   private generation = 0;
   private clearanceObserver: ResizeObserver | null = null;
+  private tab: ParametersTab = 'parameters';
+  private tabButtons = new Map<ParametersTab, HTMLButtonElement>();
+  private paramsBody: HTMLElement;
 
   constructor(
     parent: HTMLElement,
@@ -80,9 +92,46 @@ export class ParametersPanel {
 
     const header = document.createElement('div');
     header.className = 'params-panel-header';
-    const title = document.createElement('span');
-    title.className = 'params-panel-title';
-    title.textContent = 'Parameters';
+    let title: HTMLElement;
+    if (deps.totals) {
+      // Two tabs: the model's parameters, and totals over the selection.
+      title = document.createElement('div');
+      title.className = 'params-panel-tabs';
+      title.setAttribute('role', 'tablist');
+      for (const [tab, text] of [
+        ['parameters', 'Parameters'],
+        ['totals', 'Totals'],
+      ] as const) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'params-panel-tab';
+        b.dataset.tab = tab;
+        b.setAttribute('role', 'tab');
+        b.textContent = text;
+        b.addEventListener('click', () => this.showTab(tab));
+        title.appendChild(b);
+        this.tabButtons.set(tab, b);
+      }
+      // The tabs pattern: one tab is in the Tab order; the arrow keys, Home
+      // and End move between tabs and show the one they land on.
+      title.addEventListener('keydown', (e) => {
+        const order: ParametersTab[] = ['parameters', 'totals'];
+        const i = order.indexOf(this.tab);
+        let next: ParametersTab | null = null;
+        if (e.key === 'ArrowRight') next = order[(i + 1) % order.length];
+        else if (e.key === 'ArrowLeft') next = order[(i + order.length - 1) % order.length];
+        else if (e.key === 'Home') next = order[0];
+        else if (e.key === 'End') next = order[order.length - 1];
+        if (next === null) return;
+        e.preventDefault();
+        this.showTab(next);
+        this.tabButtons.get(this.tab)?.focus();
+      });
+    } else {
+      title = document.createElement('span');
+      title.className = 'params-panel-title';
+      title.textContent = 'Parameters';
+    }
     this.titleModel = document.createElement('span');
     this.titleModel.className = 'params-panel-model';
 
@@ -115,9 +164,20 @@ export class ParametersPanel {
     this.progressEl.appendChild(this.progressFill);
 
     this.container.appendChild(header);
-    this.container.appendChild(this.statusEl);
-    this.container.appendChild(this.progressEl);
-    this.list = new ParameterList(this.container, {
+    // The Parameters tab's body; the Totals tab's sits beside it.
+    this.paramsBody = document.createElement('div');
+    this.paramsBody.className = 'params-panel-body';
+    this.paramsBody.setAttribute('role', 'tabpanel');
+    this.container.appendChild(this.paramsBody);
+    this.paramsBody.appendChild(this.statusEl);
+    this.paramsBody.appendChild(this.progressEl);
+    if (deps.totals) {
+      const totalsEl = deps.totals.getElement();
+      totalsEl.classList.add('params-panel-body', 'hidden');
+      totalsEl.setAttribute('role', 'tabpanel');
+      this.container.appendChild(totalsEl);
+    }
+    this.list = new ParameterList(this.paramsBody, {
       loadValues: deps.loadValues
         ? (key, onProgress) => {
             const modelId = this.modelId;
@@ -141,8 +201,74 @@ export class ParametersPanel {
             if (this.modelId !== null) deps.colourBy!(this.modelId, parameter);
           }
         : undefined,
+      onTotals:
+        deps.totals && deps.addToTotals
+          ? (parameter) => {
+              deps.addToTotals!(parameter);
+              this.showTab('totals');
+            }
+          : undefined,
     });
     parent.appendChild(this.container);
+    this.markTabs();
+  }
+
+  /** The tab shown. */
+  currentTab(): ParametersTab {
+    return this.tab;
+  }
+
+  /**
+   * Show the Totals tab (opening the panel when it is closed), or the
+   * Parameters tab of the model shown last (or the first model).
+   */
+  showTab(tab: ParametersTab): void {
+    if (tab === 'totals' && !this.deps.totals) return;
+    if (tab === 'parameters') {
+      const modelId = this.modelId ?? this.deps.getModels()[0]?.id;
+      if (modelId === undefined) return;
+      if (this.modelId === null || !this.isOpen()) {
+        this.open(modelId);
+        return;
+      }
+    }
+    const wasOpen = this.isOpen();
+    this.container.classList.remove('hidden');
+    if (this.tab === tab && wasOpen) return;
+    this.tab = tab;
+    this.markTabs();
+    if (!wasOpen) this.refreshModels();
+  }
+
+  /** Open the panel on its Totals tab. */
+  openTotals(): void {
+    this.showTab('totals');
+  }
+
+  private markTabs(): void {
+    const totals = this.tab === 'totals';
+    for (const [tab, b] of this.tabButtons) {
+      b.setAttribute('aria-selected', String(tab === this.tab));
+      b.classList.toggle('active', tab === this.tab);
+      b.tabIndex = tab === this.tab ? 0 : -1;
+    }
+    this.container.classList.toggle('totals-tab', totals);
+    this.paramsBody.classList.toggle('hidden', totals);
+    this.deps.totals?.getElement().classList.toggle('hidden', !totals);
+    // The model's name and picker belong to the Parameters tab.
+    this.modelArea(!totals);
+    this.deps.totals?.setShown(totals && this.isOpen());
+  }
+
+  private modelArea(on: boolean): void {
+    if (!on) {
+      this.modelSelect.classList.add('hidden');
+      this.titleModel.classList.add('hidden');
+      return;
+    }
+    const several = this.deps.getModels().length > 1;
+    this.modelSelect.classList.toggle('hidden', !several);
+    this.titleModel.classList.toggle('hidden', several);
   }
 
   /** Show `modelId`'s parameters, starting discovery if it has not run. */
@@ -150,6 +276,10 @@ export class ParametersPanel {
     const gen = ++this.generation;
     this.modelId = modelId;
     this.container.classList.remove('hidden');
+    if (this.tab !== 'parameters') {
+      this.tab = 'parameters';
+      this.markTabs();
+    }
     this.refreshModels();
     this.list.setData(null);
     this.markColoured();
@@ -197,6 +327,8 @@ export class ParametersPanel {
     this.list.open(null);
     this.modelId = null;
     this.container.classList.add('hidden');
+    // Totals stop counting and give up their builds while the panel is closed.
+    this.deps.totals?.setShown(false);
   }
 
   isOpen(): boolean {
@@ -225,11 +357,22 @@ export class ParametersPanel {
   /** A model was removed: show another one, or close when none is left. */
   onModelRemoved(id: string): void {
     if (!this.isOpen()) return;
+    const next = this.deps.getModels().find((m) => m.id !== id);
+    if (this.tab === 'totals') {
+      // Totals cover every model: the tab stays while any is left.
+      if (this.modelId === id) {
+        this.list.open(null);
+        this.list.setData(null);
+        this.modelId = null;
+      }
+      if (next) this.refreshModels();
+      else this.close();
+      return;
+    }
     if (this.modelId !== id) {
       this.refreshModels();
       return;
     }
-    const next = this.deps.getModels().find((m) => m.id !== id);
     if (next) this.open(next.id);
     else this.close();
   }
@@ -245,9 +388,7 @@ export class ParametersPanel {
       this.modelSelect.appendChild(opt);
     }
     if (this.modelId !== null) this.modelSelect.value = this.modelId;
-    const several = models.length > 1;
-    this.modelSelect.classList.toggle('hidden', !several);
-    this.titleModel.classList.toggle('hidden', several);
+    this.modelArea(this.tab === 'parameters');
     const current = models.find((m) => m.id === this.modelId);
     this.titleModel.textContent = current ? current.name : '';
     this.titleModel.title = this.titleModel.textContent;

@@ -18,8 +18,16 @@ export class LoadGate {
         const waiters = this.waiters;
         this.waiters = [];
         for (const w of waiters) w();
+        for (const l of this.idleListeners) l();
       }
     };
+  }
+
+  private idleListeners: Array<() => void> = [];
+
+  /** Call `listener` every time the last running load ends. */
+  onIdle(listener: () => void): void {
+    this.idleListeners.push(listener);
   }
 
   get busy(): boolean {

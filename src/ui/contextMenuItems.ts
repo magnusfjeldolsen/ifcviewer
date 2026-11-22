@@ -58,6 +58,8 @@ export interface ContextMenuActions {
   clearColours?: () => void;
   /** Work the colouring shown now out again over what is visible. */
   refreshColours?: () => void;
+  /** Open the Totals tab (#69): count, sum, min, max, average of the selection. */
+  totals?: () => void;
 }
 
 export interface AppearanceFlags {
@@ -75,7 +77,8 @@ export interface AppearanceFlags {
  * - **Selection present** → header (single element line, or "N elements") +
  *   Hide / Isolate / Show all (disabled iff nothing hidden) | Make transparent
  *   / Make opaque (disabled iff nothing transparent) | Colour by parameter…
- *   (and Clear colours while a colouring is shown) | Add to basket (M+).
+ *   (and Clear colours while a colouring is shown), Totals for selection |
+ *   Add to basket (M+).
  * - **No selection but something hidden/transparent/coloured** → recovery
  *   only: Show all (iff hidden) / Clear transparency (iff transparent) /
  *   Clear colours (iff coloured).
@@ -112,6 +115,10 @@ export function buildContextMenuItems(
     items.push({ label: 'Colour by parameter…', onClick: actions.colourBy });
     if (flags.hasColouring && actions.refreshColours) items.push({ label: 'Refresh colours', onClick: actions.refreshColours });
     if (flags.hasColouring && actions.clearColours) items.push({ label: 'Clear colours', onClick: actions.clearColours });
+    if (actions.totals) items.push({ label: 'Totals for selection', onClick: actions.totals });
+    items.push({ separator: true });
+  } else if (actions.totals) {
+    items.push({ label: 'Totals for selection', onClick: actions.totals });
     items.push({ separator: true });
   }
 

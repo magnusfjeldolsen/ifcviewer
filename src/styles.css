@@ -2481,3 +2481,488 @@ html, body {
   border-radius: 4px;
   flex-shrink: 0;
 }
+
+/* ── Totals (#69) ─────────────────────────────────────────── */
+
+/* Tabs in the Parameters panel's header. */
+.params-panel-tabs {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.params-panel-tab {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6b7280;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.params-panel-tab:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.params-panel-tab.active {
+  color: #1f2937;
+  background: #eef2f7;
+}
+
+/* Each tab's body fills the panel below the header. */
+.params-panel-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+/* Wider for the tables, and the legend moves over with it. */
+.params-panel.totals-tab {
+  width: 420px;
+}
+
+.params-panel.totals-tab:not(.hidden) ~ .colour-legend {
+  right: calc(12px + 420px + 12px);
+}
+
+/* The wider tab needs the legend docked under it sooner: below about
+   1040 px (80 px more than for the Parameters tab) the legend beside it
+   would cover the inspector. */
+@media (max-width: 1040px) {
+  .params-panel.totals-tab:not(.hidden) ~ .colour-legend {
+    top: auto;
+    right: 12px;
+    bottom: calc(40px + var(--legend-clearance, 44px) + 6px);
+    width: 420px;
+    max-width: calc(100% - 24px);
+    max-height: calc((100% - 56px - 40px - var(--legend-clearance, 44px)) * 0.45);
+  }
+
+  #app:has(.colour-legend:not(.hidden)) .params-panel.totals-tab {
+    max-height: calc((100% - 56px - 40px - var(--params-clearance, 44px)) * 0.55 - 12px);
+  }
+}
+
+/* Σ on a parameter row: left of the colour swatch. */
+.param-row.totalable {
+  position: relative;
+}
+
+.param-row.totalable > .param-head {
+  padding-right: 34px;
+}
+
+.param-row.totalable.colourable > .param-head {
+  padding-right: 58px;
+}
+
+.param-totals-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  font: 600 12px/1 system-ui, sans-serif;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.param-row.colourable > .param-totals-btn {
+  right: 32px;
+}
+
+.param-totals-btn:hover,
+.param-totals-btn:focus-visible {
+  opacity: 1;
+}
+
+.totals-head {
+  padding: 6px 10px 6px;
+  border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
+}
+
+.totals-scope {
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 6px;
+}
+
+.totals-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.totals-add,
+.totals-copy,
+.totals-group-btn {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  color: #1f2937;
+  cursor: pointer;
+}
+
+.totals-add:hover,
+.totals-copy:hover:not(:disabled),
+.totals-group-btn:hover {
+  background: #f3f4f6;
+}
+
+.totals-copy {
+  margin-left: auto;
+}
+
+.totals-copy:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.totals-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.totals-group-label {
+  color: #6b7280;
+}
+
+.totals-group-btn {
+  max-width: 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.totals-group-clear,
+.totals-row-remove,
+.totals-chart-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.totals-group-clear:hover,
+.totals-row-remove:hover,
+.totals-chart-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: #1f2937;
+}
+
+.totals .hidden {
+  display: none;
+}
+
+.totals-status {
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+.totals-status:empty {
+  display: none;
+}
+
+.totals-status.error {
+  color: #b91c1c;
+}
+
+.totals-head .params-panel-progress {
+  margin: 4px 0 0;
+}
+
+.totals-rows {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  padding: 4px 0 8px;
+}
+
+.totals-empty {
+  padding: 12px 10px;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+.totals-row {
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.totals-row.absent {
+  opacity: 0.7;
+}
+
+.totals-row-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.totals-row-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.totals-row-group {
+  color: #9ca3af;
+}
+
+.totals-row-param {
+  font-weight: 600;
+}
+
+.totals-note {
+  color: #6b7280;
+  margin-top: 3px;
+}
+
+.totals-note.quiet {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.totals-note.warn {
+  color: #92400e;
+}
+
+.totals-note.error {
+  color: #b91c1c;
+}
+
+.totals-row-body .params-panel-progress {
+  margin: 4px 0 0;
+}
+
+.totals-unit + .totals-unit {
+  margin-top: 6px;
+}
+
+.totals-numbers {
+  margin-top: 2px;
+}
+
+.totals-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.totals-sum-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+  font-variant-numeric: tabular-nums;
+}
+
+.totals-sum-unit {
+  font-size: 13px;
+  color: #374151;
+}
+
+.totals-sum-label {
+  color: #9ca3af;
+}
+
+.totals-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 2px;
+  color: #374151;
+}
+
+.totals-stat {
+  display: inline-flex;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.totals-stat-label {
+  color: #9ca3af;
+}
+
+/* A grouped table: one line per group, a bar behind each. */
+.totals-table {
+  margin-top: 6px;
+}
+
+.totals-line {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--totals-grid, minmax(60px, 1fr) 34px 64px 50px 50px 50px);
+  gap: 4px;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.totals-line:hover,
+.totals-line:focus-visible {
+  background: #f3f4f6;
+  outline: none;
+}
+
+.totals-line.none .totals-label {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.totals-line-head {
+  cursor: default;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #e5e7eb;
+  margin-bottom: 2px;
+}
+
+.totals-line-head:hover {
+  background: transparent;
+}
+
+.totals-bar {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  background: rgba(243, 132, 0, 0.22);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.totals-cell {
+  position: relative;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.totals-label {
+  text-align: left;
+}
+
+.totals-sort {
+  font: inherit;
+  font-weight: 600;
+  color: #6b7280;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: right;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.totals-sort:first-child {
+  text-align: left;
+}
+
+.totals-sort.active,
+.totals-sort:hover {
+  color: #1f2937;
+}
+
+.totals-find {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 4px;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+}
+
+/* Share chart: a donut and its key. */
+.totals-pie {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.totals-donut {
+  flex-shrink: 0;
+}
+
+.totals-pie-key {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  flex: 1;
+}
+
+.totals-pie-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 2px;
+  border-radius: 3px;
+}
+
+.totals-pie-entry.pickable {
+  cursor: pointer;
+}
+
+.totals-pie-entry.pickable:hover {
+  background: #f3f4f6;
+}
+
+.totals-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.totals-pie-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.totals-pie-share {
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
+.totals-table.compact .totals-line {
+  padding: 1px 4px;
+}
+
+@media (max-width: 520px) {
+  .params-panel.totals-tab {
+    width: auto;
+  }
+}
