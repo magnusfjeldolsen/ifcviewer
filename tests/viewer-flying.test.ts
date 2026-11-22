@@ -222,6 +222,32 @@ describe('flying — no jump', () => {
     expect(after.q.angleTo(flown.q)).toBeLessThan(1e-6);
   });
 
+  for (const polar of [1e-6, 1e-4, 0.005]) {
+    it(`entering from a plan view (polar ${polar}), a 1 px drag turns the view by 1 px worth and keeps the heading`, () => {
+      // Orbit's plan view: looking down, the top of the screen towards −Z.
+      viewer.restoreCameraState({
+        position: { x: 0, y: 50, z: 0 },
+        target: { x: 0, y: 50 - 10 * Math.cos(polar), z: -10 * Math.sin(polar) },
+      });
+      frame();
+      viewer.enterFlying();
+      const before = pose();
+      const right0 = new THREE.Vector3(1, 0, 0).applyQuaternion(before.q);
+      Object.defineProperty(canvas, 'clientHeight', { value: 800, configurable: true });
+      const at = (type: string, x: number): boolean =>
+        canvas.dispatchEvent(new PointerEvent(type, { button: 0, pointerId: 7, clientX: x, clientY: 100, bubbles: true }));
+      at('pointerdown', 100);
+      at('pointermove', 104); // crosses the click threshold
+      at('pointermove', 105); // one pixel of look
+      at('pointerup', 105);
+      const after = pose();
+      const onePixel = Math.PI / 800;
+      expect(after.q.angleTo(before.q)).toBeLessThanOrEqual(onePixel * 1.0001 + 1e-7);
+      const right1 = new THREE.Vector3(1, 0, 0).applyQuaternion(after.q);
+      expect(right1.angleTo(right0)).toBeCloseTo(onePixel, 5);
+    });
+  }
+
   it('a mouse drag while flying turns the view in place', () => {
     viewer.enterFlying();
     const before = pose();
@@ -272,7 +298,7 @@ describe('flying — keys', () => {
     expect(viewer.getCamera().position.distanceTo(p)).toBe(0);
   });
 
-  it('fly keys win over other listeners while flying', () => {
+  it('fly keys win over other listeners when focus is on the view', () => {
     const heard: string[] = [];
     const listener = (e: KeyboardEvent): void => {
       heard.push(e.code);
@@ -296,6 +322,85 @@ describe('flying — keys', () => {
     }
   });
 
+  it('leaves keys alone when focus is in a panel or on a control', () => {
+    const panel = document.createElement('div');
+    const tab = document.createElement('button'); // a Parameters tab, a Totals line …
+    const handle = document.createElement('div'); // the panel resize handle
+    handle.tabIndex = 0;
+    panel.append(tab, handle);
+    document.body.appendChild(panel);
+    const heard: string[] = [];
+    const listener = (e: KeyboardEvent): void => {
+      heard.push(e.code);
+    };
+    panel.addEventListener('keydown', listener);
+    try {
+      viewer.enterFlying();
+      const start = pose();
+      for (const [target, code] of [[tab, 'Space'], [handle, 'ArrowLeft'], [tab, 'ArrowRight'], [handle, 'KeyW']] as const) {
+        const down = key('keydown', code, {}, target);
+        expect(down.defaultPrevented).toBe(false);
+        expect(key('keyup', code, {}, target).defaultPrevented).toBe(false);
+      }
+      expect(heard).toEqual(['Space', 'ArrowLeft', 'ArrowRight', 'KeyW']);
+      frames(20);
+      const after = pose();
+      expect(after.p.distanceTo(start.p)).toBe(0);
+      expect(after.q.angleTo(start.q)).toBeLessThan(1e-6);
+    } finally {
+      panel.remove();
+    }
+  });
+
+  it('clicking the view takes focus back from a panel', () => {
+    const tab = document.createElement('button');
+    document.body.appendChild(tab);
+    try {
+      tab.focus();
+      expect(document.activeElement).toBe(tab);
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, pointerId: 3, clientX: 5, clientY: 5, bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerId: 3, clientX: 5, clientY: 5, bubbles: true }));
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      tab.remove();
+    }
+  });
+
+  it('fly keys do nothing while something else has the keyboard (menu, help card)', () => {
+    let open = true;
+    viewer.setFlyKeysSuspended(() => open);
+    viewer.enterFlying();
+    const p = viewer.getCamera().position.clone();
+    expect(key('keydown', 'KeyW').defaultPrevented).toBe(false);
+    frames(20);
+    expect(viewer.getCamera().position.distanceTo(p)).toBe(0);
+    key('keyup', 'KeyW');
+    open = false;
+    expect(key('keydown', 'KeyW').defaultPrevented).toBe(true);
+    frames(20);
+    expect(viewer.getCamera().position.distanceTo(p)).toBeGreaterThan(0.5);
+  });
+
+  it('a Cmd chord lets go of held keys (macOS sends no keyup for them)', () => {
+    viewer.enterFlying();
+    key('keydown', 'KeyW');
+    key('keydown', 'MetaLeft', { metaKey: true });
+    // W is released under Cmd: its keyup never comes.
+    frames(60);
+    const stopped = viewer.getCamera().position.clone();
+    frames(20);
+    expect(viewer.getCamera().position.distanceTo(stopped)).toBe(0);
+  });
+
+  it('releasing Cmd lets go of held keys too', () => {
+    viewer.enterFlying();
+    key('keydown', 'KeyD');
+    key('keyup', 'MetaRight', { key: 'Meta' });
+    frames(60);
+    const stopped = viewer.getCamera().position.clone();
+    frames(20);
+    expect(viewer.getCamera().position.distanceTo(stopped)).toBe(0);
+  });
   it('Ctrl / Cmd / Alt chords pass through untouched (undo, browser keys)', () => {
     viewer.enterFlying();
     for (const mod of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
@@ -322,18 +427,11 @@ describe('flying — keys', () => {
     }
   });
 
-  it('Space is kept from pressing a focused button', () => {
+  it('Space on the view is kept from scrolling the page', () => {
     viewer.enterFlying();
-    const button = document.createElement('button');
-    document.body.appendChild(button);
-    try {
-      expect(key('keydown', 'Space', {}, button).defaultPrevented).toBe(true);
-      expect(key('keyup', 'Space', {}, button).defaultPrevented).toBe(true);
-    } finally {
-      button.remove();
-    }
+    expect(key('keydown', 'Space', {}, document.body).defaultPrevented).toBe(true);
+    expect(key('keyup', 'Space', {}, document.body).defaultPrevented).toBe(true);
   });
-
   it('X / Z and the wheel step the speed, and it is kept across flights', () => {
     viewer.enterFlying();
     key('keydown', 'KeyX');

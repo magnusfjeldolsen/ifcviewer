@@ -126,6 +126,7 @@ export class Viewer {
   /** Small wheel deltas, summed until they make a speed step. */
   private wheelAccumulator = 0;
   private readonly flyForward = new THREE.Vector3();
+  private flyKeysSuspended: () => boolean = () => false;
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -457,23 +458,53 @@ export class Viewer {
     return this.fly.onSpeedChange(cb);
   }
 
+  /**
+   * Whether a key event is aimed at the 3D view rather than at a control.
+   * Fly keys act only then: with focus in a panel, on the toolbar or in any
+   * other control, Space and the arrows keep doing what that control does.
+   */
+  private keyIsForView(target: EventTarget | null): boolean {
+    // Not an element at all (the window, the document): nothing has focus.
+    if (!(target instanceof Element)) return true;
+    return target === document.body || target === document.documentElement || target === this.canvas;
+  }
+
+  /**
+   * Something else is using the keyboard (an open menu or help card, say).
+   * Wired by App; fly keys leave every key alone while it answers true.
+   */
+  setFlyKeysSuspended(isSuspended: () => boolean): void {
+    this.flyKeysSuspended = isSuspended;
+  }
+
   private onFlyKeyDown = (e: KeyboardEvent): void => {
-    if (isTypingTarget(e.target)) return;
-    // Ctrl / Cmd / Alt chords are never ours: undo keeps working, and the
+    // macOS sends no keyup for a key released while Cmd is held, so a held W
+    // would stick. Any Cmd chord lets go of everything instead.
+    if (e.metaKey) {
+      this.fly.releaseAll();
+      return;
+    }
+    if (!this.keyIsForView(e.target) || isTypingTarget(e.target)) return;
+    if (this.flyKeysSuspended()) return;
+    // Ctrl / Alt chords are never ours: undo keeps working, and the
     // browser's own Ctrl+W / Alt+D are not something a page should touch.
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.ctrlKey || e.altKey) return;
     if (!this.fly.keyDown(e.code, e.repeat)) return;
-    // Fly keys win while flying: no tool shortcut (S toggles snapping while
-    // measuring), focused button (Space) or page scroll (arrows, Space) sees
-    // them. Capture on window runs before every other listener.
+    // With focus on the view, fly keys win: no tool shortcut (S toggles
+    // snapping while measuring) or page scroll (arrows, Space) sees them.
+    // Capture on window runs before every other listener.
     e.preventDefault();
     e.stopPropagation();
   };
 
   private onFlyKeyUp = (e: KeyboardEvent): void => {
+    if (e.code === 'MetaLeft' || e.code === 'MetaRight' || e.key === 'Meta') {
+      this.fly.releaseAll();
+      return;
+    }
     // Always let go, wherever focus went in between, so no key sticks.
     if (!this.fly.keyUp(e.code)) return;
-    if (e.code === 'Space' && !isTypingTarget(e.target)) e.preventDefault();
+    if (e.code === 'Space' && this.keyIsForView(e.target)) e.preventDefault();
   };
 
   private onFlyBlur = (): void => {
@@ -731,6 +762,11 @@ export class Viewer {
 
   private onPointerDown = (e: PointerEvent): void => {
     this.lastPointer = { x: e.clientX, y: e.clientY };
+    // Clicking the view gives the keyboard back to the view. Browsers do this
+    // on mousedown by themselves, but not when a pointerdown handler has
+    // called preventDefault (middle-drag pan, Alt-drag marquee).
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused !== document.body && focused !== this.canvas) focused.blur();
 
     if (e.pointerType === 'touch') {
       this.touchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
