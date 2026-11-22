@@ -49,6 +49,7 @@ import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
 import { crossModelUnitKey, showOnlyStatus } from '../inspector/showOnly';
+import { StatusTimer } from '../ui/statusTimer';
 import { columnIdsWithValue, columnValueCounts } from '../inspector/parameterColumn';
 import { LoadGate } from './LoadGate';
 import { WorkerPropertyRepository } from '../inspector/repository/WorkerPropertyRepository';
@@ -2018,13 +2019,14 @@ ${parameter.key}`);
    * then: a message's clearing never wipes a newer one early.
    */
   private clearStatusAfter(ms: number): void {
-    const text = this.statusEl?.textContent ?? '';
-    window.setTimeout(() => {
-      if ((this.statusEl?.textContent ?? '') === text) this.setStatus('');
-    }, ms);
+    this.statusTimer.clearAfter(ms);
   }
 
+  /** Tells status messages apart, so a clearing only clears its own. */
+  private readonly statusTimer = new StatusTimer(() => this.setStatus(''));
+
   private setStatus(text: string): void {
+    this.statusTimer.shown();
     // While storage is blocked, an otherwise empty status keeps saying so.
     if (text === '' && this.sessionStore?.isStorageBlocked()) text = STORAGE_BLOCKED_STATUS;
     if (this.statusEl) this.statusEl.textContent = text;
