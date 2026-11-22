@@ -370,7 +370,7 @@ describe('opening a parameter', () => {
     head('P.Profile').click();
     const eyes = parent.querySelectorAll<HTMLButtonElement>('[data-key="P.Profile"] .show-only-btn');
     expect(eyes).toHaveLength(parent.querySelectorAll('[data-key="P.Profile"] .param-value').length);
-    expect(eyes[0].getAttribute('aria-label')).toBe('Show only HEA140');
+    expect(eyes[0].getAttribute('aria-label')).toBe('Show only HEA140 (Shift or Ctrl: show as well)');
     expect(eyes[0].title).toMatch(/^Show only the elements with HEA140, hide the rest/);
     eyes[0].click();
     eyes[1].dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
@@ -379,6 +379,24 @@ describe('opening a parameter', () => {
       ['P.Profile', 'HEA160', true],
     ]);
     expect(onPickValue).not.toHaveBeenCalled();
+  });
+
+  it('Shift+Enter or Ctrl+Space on a focused eye shows as well; a plain key leaves it to the click', () => {
+    const onShowOnly = vi.fn();
+    const { parent, head } = listWith({ onShowOnly });
+    head('P.Profile').click();
+    const eye = parent.querySelector<HTMLButtonElement>('[data-key="P.Profile"] .show-only-btn')!;
+    const press = (init: KeyboardEventInit) => {
+      const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+      eye.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    expect(press({ key: 'Enter', shiftKey: true })).toBe(true);
+    expect(press({ key: ' ', ctrlKey: true })).toBe(true);
+    // Plain Enter: the browser turns it into a click, which shows only.
+    expect(press({ key: 'Enter' })).toBe(false);
+    expect(press({ key: 'a', shiftKey: true })).toBe(false);
+    expect(onShowOnly.mock.calls.map((c) => c[2])).toEqual([true, true]);
   });
 
   it('has no eye without a show-only handler', () => {

@@ -131,7 +131,7 @@ describe('colour legend', () => {
     await controller.colourBy('P.Material', { kind: 'model', modelId: 'm' });
     const painted = paint.setDataColors.mock.calls.length;
     const eye = () => legend.getContainer().querySelector<HTMLButtonElement>('.colour-legend-entry .show-only-btn')!;
-    expect(eye().getAttribute('aria-label')).toBe('Show only a');
+    expect(eye().getAttribute('aria-label')).toBe('Show only a (Shift or Ctrl: show as well)');
     eye().click();
     expect(showOnly).toHaveBeenCalledWith(
       [

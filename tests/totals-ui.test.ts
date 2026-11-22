@@ -182,7 +182,7 @@ describe('TotalsView', () => {
       const eye = line.parentElement!.querySelector<HTMLButtonElement>('.show-only-btn')!;
       // Beside the line, not inside it.
       expect(line.contains(eye)).toBe(false);
-      expect(eye.getAttribute('aria-label')).toBe('Show only IfcBeam');
+      expect(eye.getAttribute('aria-label')).toBe('Show only IfcBeam (Shift or Ctrl: show as well)');
       eye.click();
       expect(t.deps.showOnly).toHaveBeenCalledWith(
         [
