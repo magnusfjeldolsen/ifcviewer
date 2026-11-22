@@ -237,7 +237,18 @@ export function columnRowsWithValue(c: ColumnData, value: ParameterValue, unitKe
   }
   const code = c.dictionary.indexOf(value);
   if (code < 0) return rows;
-  for (let i = 0; i < c.codes.length; i++) if (c.codes[i] === code) rows.push(i);
+  // A number among text, asked for in one unit: only rows in that unit.
+  let only = -1;
+  if (unitKey !== undefined && typeof value === 'number' && c.units) {
+    only = c.units.findIndex((u) => u.key === unitKey);
+    if (only < 0) return rows;
+  }
+  const unitIndex = c.unitIndex ?? null;
+  for (let i = 0; i < c.codes.length; i++) {
+    if (c.codes[i] !== code) continue;
+    if (only >= 0 && (unitIndex ? unitIndex[i] : 0) !== only) continue;
+    rows.push(i);
+  }
   return rows;
 }
 
