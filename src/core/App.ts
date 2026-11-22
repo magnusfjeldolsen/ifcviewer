@@ -1492,7 +1492,11 @@ ${parameter.key}`);
    *
    * See dev/plans/handoff-select-similar.md.
    */
-  private async runSelectSimilar(query: SimilarQuery): Promise<void> {
+  private async runSelectSimilar(
+    query: SimilarQuery,
+    /** `show-only` (#70): show only the result instead of selecting it. */
+    then: 'select' | 'show-only' = 'select',
+  ): Promise<void> {
     // A previous query (or an inspector intersection) still running would
     // sit ahead of this one in the worker's serial queue.
     this.propertyRepository.cancelBulk();
@@ -1511,6 +1515,10 @@ ${parameter.key}`);
             );
 
       const identities = identitiesFromIds(query, ids);
+      if (then === 'show-only') {
+        this.showOnlyElements(identities, query.label, false);
+        return;
+      }
       if (identities.length > 0) {
         this.selectionManager.selectExactly(identities);
       }
@@ -1714,6 +1722,15 @@ ${parameter.key}`);
           if (!similar) return;
           const query = typeQuery(similar);
           if (query) void this.runSelectSimilar(query);
+        },
+        showOnlySimilarCategory: () => {
+          if (!similar) return;
+          void this.runSelectSimilar(categoryQuery(similar), 'show-only');
+        },
+        showOnlySimilarType: () => {
+          if (!similar) return;
+          const query = typeQuery(similar);
+          if (query) void this.runSelectSimilar(query, 'show-only');
         },
         colourBy: () => void this.openColourPicker(x, y, state),
         clearColours: () => this.colourBy.clear(),

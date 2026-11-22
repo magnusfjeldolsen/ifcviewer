@@ -177,6 +177,17 @@ export function typeMenuLabel(identity: SimilarSource): string | null {
   return label === null ? null : `Select all of this type · ${elide(label)}`;
 }
 
+/** Menu row text for showing only the category (#70). */
+export function categoryShowOnlyLabel(identity: SimilarSource): string {
+  return `Show only this category · ${elide(categoryLabel(identity))}`;
+}
+
+/** Menu row text for showing only the type (#70), or null when there's no type to offer. */
+export function typeShowOnlyLabel(identity: SimilarSource): string | null {
+  const label = typeLabel(identity);
+  return label === null ? null : `Show only this type · ${elide(label)}`;
+}
+
 /**
  * "Select every element of this element's category." With a PredefinedType
  * this is a value match on `Identity.PredefinedType` scoped to the class, so

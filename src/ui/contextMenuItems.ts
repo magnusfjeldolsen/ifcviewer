@@ -11,7 +11,13 @@
  */
 
 import type { MenuItem } from './ContextMenu';
-import { categoryMenuLabel, sharedSource, typeMenuLabel } from '../inspector/selectSimilar';
+import {
+  categoryMenuLabel,
+  categoryShowOnlyLabel,
+  sharedSource,
+  typeMenuLabel,
+  typeShowOnlyLabel,
+} from '../inspector/selectSimilar';
 import type { ElementIdentity, SelectionState } from '../inspector/types';
 
 // Re-export so callers have a single import site for the menu's opacity
@@ -49,6 +55,12 @@ export interface ContextMenuActions {
    */
   selectSimilarCategory: () => void;
   selectSimilarType: () => void;
+  /**
+   * Show only what select-similar would select (#70), hiding the rest.
+   * Optional: offered beside the select rows when given.
+   */
+  showOnlySimilarCategory?: () => void;
+  showOnlySimilarType?: () => void;
   /**
    * Colour by a parameter (#68): opens a picker of the clicked element's
    * parameters. Optional, so callers without colouring build the same menu.
@@ -132,6 +144,13 @@ export function buildContextMenuItems(
     const typeRow = typeMenuLabel(similar);
     if (typeRow) {
       items.push({ label: typeRow, onClick: actions.selectSimilarType });
+    }
+    if (actions.showOnlySimilarCategory) {
+      items.push({ label: categoryShowOnlyLabel(similar), onClick: actions.showOnlySimilarCategory });
+    }
+    const typeShowRow = typeShowOnlyLabel(similar);
+    if (typeShowRow && actions.showOnlySimilarType) {
+      items.push({ label: typeShowRow, onClick: actions.showOnlySimilarType });
     }
     items.push({ separator: true });
   }

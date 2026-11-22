@@ -249,6 +249,35 @@ describe('buildContextMenuItems', () => {
     expect(actions.calls).toEqual(['selectSimilarType']);
   });
 
+  it('T26c2: show only this category / type sit beside the select rows when offered (#70)', () => {
+    const state: SelectionState = {
+      kind: 'single',
+      identities: [{ modelId: 'A', expressId: 1, ifcClass: 'IfcBeam', ifcTypeCode: 7, objectType: 'HEA140' }],
+    };
+    const actions = {
+      ...makeActions(),
+      showOnlySimilarCategory: vi.fn(),
+      showOnlySimilarType: vi.fn(),
+    };
+    const labels = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, actions)!.map((i) => i.label ?? '|');
+    const at = labels.indexOf('Select all of this category · IfcBeam');
+    expect(labels.slice(at, at + 5)).toEqual([
+      'Select all of this category · IfcBeam',
+      'Select all of this type · HEA140',
+      'Show only this category · IfcBeam',
+      'Show only this type · HEA140',
+      '|',
+    ]);
+    const items = buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, actions)!;
+    items.find((i) => i.label === 'Show only this type · HEA140')!.onClick!();
+    expect(actions.showOnlySimilarType).toHaveBeenCalledOnce();
+    // Without the actions, no rows; and no type row for an element without a type.
+    expect(buildContextMenuItems(state, { hasHidden: false, hasTransparent: false }, makeActions())!.some((i) => /^Show only/.test(i.label ?? ''))).toBe(false);
+    const noType = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, actions)!;
+    expect(noType.some((i) => /^Show only this type/.test(i.label ?? ''))).toBe(false);
+    expect(noType.some((i) => /^Show only this category/.test(i.label ?? ''))).toBe(true);
+  });
+
   it('T26d: no type option when the element declares no ObjectType', () => {
     // A row that could only ever find nothing is worse than no row.
     const items = buildContextMenuItems(singleState(), { hasHidden: false, hasTransparent: false }, makeActions())!;
