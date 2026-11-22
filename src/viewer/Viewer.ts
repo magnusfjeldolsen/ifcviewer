@@ -12,6 +12,27 @@ import {
   type CameraPose,
   type ResolvedPivot,
 } from './orbitMath';
+import { FlyController } from './FlyController';
+import { exitAnchorDistance } from './flyMath';
+
+/**
+ * Who drives the camera. Exactly one at a time — see "Camera Ownership" in
+ * CLAUDE.md.
+ *
+ * - `user`: orbit, zoom and pan; the loop polls `controls.update()`.
+ * - `animating`: a `CameraAnimator` tween; the loop leaves the controls alone.
+ * - `flying`: `FlyController` moves and turns the camera from keys and drags;
+ *   the loop does not poll the controls, and OrbitControls' pan is off.
+ */
+export type ControlsMode = 'user' | 'animating' | 'flying';
+
+/**
+ * Wheel delta, in pixels, that counts as one speed step when a device sends
+ * many small deltas (a trackpad). A mouse notch is ~100 px and steps once.
+ */
+const WHEEL_STEP_PX = 100;
+/** A single wheel event at least this large is one notch on its own. */
+const WHEEL_NOTCH_PX = 40;
 
 /** Radians of rotation per screen height dragged. Matches OrbitControls' feel. */
 const ROTATE_SPEED = 1;
@@ -55,6 +76,15 @@ interface RotateGesture {
   pivot: THREE.Vector3;
   transient: boolean;
   active: boolean;
+  /** A flying-mode drag: turns the view in place instead of orbiting. */
+  look: boolean;
+}
+
+/** Keys typed into these go to the field, never to flying. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
 export class Viewer {
@@ -82,7 +112,20 @@ export class Viewer {
 
   // Pivot picking state
   private pickingPivot = false;
-  private _controlsMode: 'user' | 'animating' = 'user';
+  private _controlsMode: ControlsMode = 'user';
+
+  /** Flying state; only consulted while `_controlsMode` is 'flying'. */
+  private fly = new FlyController();
+  private flyingListeners: Array<(flying: boolean) => void> = [];
+  /** `performance.now()` of the last flying frame, null when not moving. */
+  private lastFlyFrame: number | null = null;
+  /** Distance the view anchor rides in front of the camera while flying. */
+  private flyAnchorDistance = 1;
+  /** OrbitControls' pan setting before flying switched it off. */
+  private panBeforeFlying = true;
+  /** Small wheel deltas, summed until they make a speed step. */
+  private wheelAccumulator = 0;
+  private readonly flyForward = new THREE.Vector3();
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -284,7 +327,9 @@ export class Viewer {
    */
   cancelCameraAnimation(): void {
     this.animator.cancel();
-    this._controlsMode = 'user';
+    // Flying is not an animation: grabbing the section handle mid-flight must
+    // not take the camera away from the fly controls.
+    if (this._controlsMode === 'animating') this._controlsMode = 'user';
   }
 
   /**
@@ -313,12 +358,146 @@ export class Viewer {
     };
   }
 
+  /**
+   * Hand the camera to the user or to an animation. Flying has its own way in
+   * and out (`enterFlying` / `exitFlying`), because leaving it has to put the
+   * view anchor back; asking for another owner while flying leaves it first.
+   */
   setControlsMode(mode: 'user' | 'animating'): void {
+    if (this._controlsMode === 'flying') this.exitFlying();
     this._controlsMode = mode;
   }
 
-  getControlsMode(): 'user' | 'animating' {
+  getControlsMode(): ControlsMode {
     return this._controlsMode;
+  }
+
+  // ── Flying (#98) ───────────────────────────────────────────
+
+  isFlying(): boolean {
+    return this._controlsMode === 'flying';
+  }
+
+  toggleFlying(): void {
+    if (this.isFlying()) this.exitFlying();
+    else this.enterFlying();
+  }
+
+  /**
+   * Take the camera for flying. Leaves the camera exactly where it is; a
+   * running fly-to stops where it has got to.
+   */
+  enterFlying(): void {
+    if (this._controlsMode === 'flying') return;
+    // The animator's interrupt hands back to 'user'; flying takes it from there.
+    this.animator.cancel();
+    this.endRotateGesture();
+    this._controlsMode = 'flying';
+    // OrbitControls' pan is the only gesture it still owns. Its 'start' would
+    // claim the camera for 'user' mid-flight, so it sits out.
+    this.panBeforeFlying = this.controls.enablePan;
+    this.controls.enablePan = false;
+    this.flyAnchorDistance = Math.max(this.camera.position.distanceTo(this.controls.target), 1e-3);
+    this.lastFlyFrame = null;
+    this.wheelAccumulator = 0;
+    window.addEventListener('keydown', this.onFlyKeyDown, { capture: true });
+    window.addEventListener('keyup', this.onFlyKeyUp, { capture: true });
+    window.addEventListener('blur', this.onFlyBlur);
+    document.addEventListener('visibilitychange', this.onFlyBlur);
+    this.needsRender = true;
+    for (const cb of this.flyingListeners) cb(true);
+  }
+
+  /**
+   * Give the camera back to orbit. The camera does not move; the view anchor
+   * goes onto its forward axis at the distance of whatever is straight ahead,
+   * so OrbitControls' `lookAt` has nothing to correct and the first orbit
+   * afterwards turns from exactly this view. The orbit fallback centre goes
+   * there too, so an orbit over empty space turns about something in front of
+   * you rather than the centre of a fit you have long since flown away from.
+   */
+  exitFlying(): void {
+    if (this._controlsMode !== 'flying') return;
+    this.fly.stop();
+    this.endRotateGesture();
+    window.removeEventListener('keydown', this.onFlyKeyDown, { capture: true });
+    window.removeEventListener('keyup', this.onFlyKeyUp, { capture: true });
+    window.removeEventListener('blur', this.onFlyBlur);
+    document.removeEventListener('visibilitychange', this.onFlyBlur);
+    this.controls.enablePan = this.panBeforeFlying;
+
+    const rect = this.canvas.getBoundingClientRect();
+    const hit = this.raycastAt(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    this.camera.getWorldDirection(this.flyForward);
+    this.controls.target
+      .copy(this.camera.position)
+      .addScaledVector(this.flyForward, exitAnchorDistance(hit ? hit.distance : null));
+    this.defaultTarget.copy(this.controls.target);
+
+    this._controlsMode = 'user';
+    this.lastFlyFrame = null;
+    this.needsRender = true;
+    for (const cb of this.flyingListeners) cb(false);
+  }
+
+  /** Hear when flying starts or stops. Returns an unsubscribe. */
+  onFlyingChange(cb: (flying: boolean) => void): () => void {
+    this.flyingListeners.push(cb);
+    return () => {
+      this.flyingListeners = this.flyingListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Flying cruising speed, metres per second. Kept for the session. */
+  getFlySpeed(): number {
+    return this.fly.getSpeed();
+  }
+
+  onFlySpeedChange(cb: (speed: number) => void): () => void {
+    return this.fly.onSpeedChange(cb);
+  }
+
+  private onFlyKeyDown = (e: KeyboardEvent): void => {
+    if (isTypingTarget(e.target)) return;
+    // Ctrl / Cmd / Alt chords are never ours: undo keeps working, and the
+    // browser's own Ctrl+W / Alt+D are not something a page should touch.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!this.fly.keyDown(e.code, e.repeat)) return;
+    // Fly keys win while flying: no tool shortcut (S toggles snapping while
+    // measuring), focused button (Space) or page scroll (arrows, Space) sees
+    // them. Capture on window runs before every other listener.
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  private onFlyKeyUp = (e: KeyboardEvent): void => {
+    // Always let go, wherever focus went in between, so no key sticks.
+    if (!this.fly.keyUp(e.code)) return;
+    if (e.code === 'Space' && !isTypingTarget(e.target)) e.preventDefault();
+  };
+
+  private onFlyBlur = (): void => {
+    // Keyups that happen in another window never arrive.
+    this.fly.releaseAll();
+  };
+
+  /** One frame of flying. Runs only while flying and something is moving. */
+  private tickFlying(): void {
+    if (!this.fly.isMoving()) {
+      this.lastFlyFrame = null;
+      return;
+    }
+    const now = performance.now();
+    const dt = this.lastFlyFrame === null ? 1 / 60 : (now - this.lastFlyFrame) / 1000;
+    this.lastFlyFrame = now;
+    if (this.fly.tick(this.camera, dt)) this.syncFlyAnchor();
+  }
+
+  /** Keep the view anchor on the forward axis while the fly controls turn the camera. */
+  private syncFlyAnchor(): void {
+    this.camera.getWorldDirection(this.flyForward);
+    this.controls.target.copy(this.camera.position).addScaledVector(this.flyForward, this.flyAnchorDistance);
+    this.needsRender = true;
   }
 
   /**
@@ -336,6 +515,9 @@ export class Viewer {
   }
 
   restoreCameraState(state: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } }): void {
+    // Every programmatic camera move leaves flying first: whoever asked for a
+    // pose wants that pose, not a flight that carries on from it.
+    this.exitFlying();
     this._controlsMode = 'user';
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
     this.controls.target.set(state.target.x, state.target.y, state.target.z);
@@ -350,6 +532,8 @@ export class Viewer {
     // frames where something visible actually changed.
     if (this._controlsMode === 'user') {
       this.controls.update();
+    } else if (this._controlsMode === 'flying') {
+      this.tickFlying();
     }
     if (!this.needsRender) return;
     this.needsRender = false;
@@ -384,6 +568,7 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return;
 
+    this.exitFlying();
     this.refreshSceneBounds(box);
     this.camera.position.copy(fit.position);
     this.camera.near = fit.near;
@@ -400,6 +585,9 @@ export class Viewer {
     const fit = computeFitPosition(box);
     if (!fit) return Promise.resolve();
 
+    // Fit View while flying means "show me the whole thing": leave flying and
+    // animate out, rather than tween a camera the fly controls also drive.
+    this.exitFlying();
     this.refreshSceneBounds(box);
 
     return this.animator.flyTo({
@@ -438,12 +626,12 @@ export class Viewer {
 
   /** Forget the placed pivot; orbits fall back to the fit centre again. */
   resetPivot(): void {
-    this._controlsMode = 'user';
+    if (this._controlsMode !== 'flying') this._controlsMode = 'user';
     this.forgetPivot();
   }
 
   clearPivot(): void {
-    this._controlsMode = 'user';
+    if (this._controlsMode !== 'flying') this._controlsMode = 'user';
     if (this.pickingPivot) this.cancelPivotPicking();
     this.forgetPivot();
   }
@@ -458,6 +646,7 @@ export class Viewer {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }
+    this.exitFlying();
     window.removeEventListener('resize', this.onResize);
     this.canvas.removeEventListener('click', this.boundPivotClick);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
@@ -559,12 +748,31 @@ export class Viewer {
       // pointerdown itself.
       if (e.button === 1) e.preventDefault();
       if (e.button !== 0) return;
-      // Alt-drag belongs to the marquee selector; ctrl / shift / meta stay
-      // with OrbitControls' pan, and are the selection modifiers besides.
-      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      // Alt-drag belongs to the marquee selector, flying or not.
+      if (e.altKey) return;
+      // Ctrl / shift / meta stay with OrbitControls' pan, and are the
+      // selection modifiers besides. While flying pan is off and Shift is the
+      // boost, so a drag with Shift held still looks around.
+      if (!this.isFlying() && (e.ctrlKey || e.metaKey || e.shiftKey)) return;
     }
 
     if (!this.canNavigate()) return;
+
+    if (this.isFlying()) {
+      // Looking turns in place; there is no pivot to find, so no raycast.
+      this.rotateGesture = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        x: e.clientX,
+        y: e.clientY,
+        pivot: this.defaultTarget,
+        transient: false,
+        active: false,
+        look: true,
+      };
+      return;
+    }
 
     const { point, transient } = this.pivotFor(e.clientX, e.clientY);
     this.rotateGesture = {
@@ -576,6 +784,7 @@ export class Viewer {
       pivot: point,
       transient,
       active: false,
+      look: false,
     };
   };
 
@@ -619,6 +828,15 @@ export class Viewer {
     gesture.y = e.clientY;
 
     const height = this.canvas.clientHeight || this.canvas.height || 1;
+    if (gesture.look) {
+      if (!this.isFlying()) {
+        this.endRotateGesture();
+        return;
+      }
+      this.fly.look(this.camera, dx, dy, height);
+      this.syncFlyAnchor();
+      return;
+    }
     this.applyPose(
       rotateAboutPivot({
         position: this.camera.position,
@@ -654,10 +872,36 @@ export class Viewer {
     if (e.deltaY === 0) return;
     e.preventDefault();
 
+    if (this.isFlying()) {
+      this.wheelSpeedStep(e);
+      return;
+    }
+
     this.lastPointer = { x: e.clientX, y: e.clientY };
     const { point } = this.pivotFor(e.clientX, e.clientY);
     this.dollyTo(point, e.deltaY > 0 ? 1 / WHEEL_ZOOM_STEP : WHEEL_ZOOM_STEP);
   };
+
+  /**
+   * The wheel is the gas pedal while flying: wheel up (away from you) is one
+   * step faster, down one step slower. A mouse notch is one step; a trackpad's
+   * stream of small deltas is summed until it makes one.
+   */
+  private wheelSpeedStep(e: WheelEvent): void {
+    const pixels = e.deltaMode === 0 ? e.deltaY : e.deltaY * WHEEL_STEP_PX;
+    if (Math.abs(pixels) >= WHEEL_NOTCH_PX) {
+      this.wheelAccumulator = 0;
+      this.fly.stepSpeed(pixels < 0 ? 1 : -1);
+      return;
+    }
+    // A change of direction starts the sum afresh.
+    if (Math.sign(pixels) !== Math.sign(this.wheelAccumulator)) this.wheelAccumulator = 0;
+    this.wheelAccumulator += pixels;
+    if (Math.abs(this.wheelAccumulator) >= WHEEL_STEP_PX) {
+      this.fly.stepSpeed(this.wheelAccumulator < 0 ? 1 : -1);
+      this.wheelAccumulator = 0;
+    }
+  }
 
   private currentPinchDistance(): number | null {
     const points = [...this.touchPointers.values()];
@@ -716,6 +960,9 @@ export class Viewer {
    * the same reason, under "Auto Depth".)
    */
   private onControlsStart = (): void => {
+    // Pan is off while flying, so this cannot normally fire then; if it ever
+    // did, flying keeps the camera rather than half-handing it back.
+    if (this._controlsMode === 'flying') return;
     this._controlsMode = 'user';
     this.syncAnchorDepth();
   };
