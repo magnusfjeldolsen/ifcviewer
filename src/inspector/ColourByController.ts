@@ -110,6 +110,11 @@ export interface ColourByDeps {
   /** Select exactly these elements (one undo step). */
   select?(elements: { modelId: string; expressId: number }[]): void;
   /**
+   * Show only these elements, hiding the rest (#70); `additive`: show them
+   * as well. `label` names them for the status line.
+   */
+  showOnly?(elements: { modelId: string; expressId: number }[], label: string, additive: boolean): void;
+  /**
    * Which of a model's elements can be seen now; null or absent for all.
    * Only these are coloured, counted, and set a scale's ends.
    */
@@ -289,6 +294,24 @@ export class ColourByController {
     if (this.state.phase !== 'shown' || !this.deps.select) return;
     const elements = entryElements(this.state.plan, entry);
     if (elements.length > 0) this.deps.select(elements);
+  }
+
+  /** Whether legend entries can show only their elements. */
+  canShowOnly(): boolean {
+    return !!this.deps.showOnly;
+  }
+
+  /**
+   * Show only the elements of one legend entry (#70): those it counted.
+   * Hiding the rest makes the colouring out of date, as any hiding does.
+   */
+  showOnlyEntry(entry: number, additive: boolean): void {
+    const s = this.state;
+    if (s.phase !== 'shown' || !this.deps.showOnly) return;
+    const e = s.plan.entries[entry];
+    if (!e) return;
+    const name = s.key.slice(s.key.lastIndexOf('.') + 1);
+    this.deps.showOnly(entryElements(s.plan, entry), `${name}: ${e.label}`, additive);
   }
 
   /** End the colouring: every element is drawn as it was before. */

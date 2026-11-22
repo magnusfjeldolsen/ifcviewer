@@ -782,6 +782,7 @@ ${parameter.key}`);
       paint: this.modelManager,
       select: (elements) =>
         this.selectionManager.selectExactly(elements.map((e) => ({ ...e, ifcClass: '', ifcTypeCode: 0 }))),
+      showOnly: (elements, label, additive) => this.showOnlyElements(elements, label, additive),
       // Only what can be seen is coloured: not hidden, its model shown, and
       // not wholly behind the section plane.
       visibility: (modelId) => this.modelManager.visibleElements(modelId, this.clippingTool.getClipPlane()),

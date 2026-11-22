@@ -112,6 +112,49 @@ describe('colour legend', () => {
     expect(paint.clearDataColors).toHaveBeenCalledWith('m');
   });
 
+  it("an entry's eye shows only its elements (as well with Ctrl), and the legend turns out of date, not recoloured", async () => {
+    const column = textColumn('m', ['a', 'b', 'a']);
+    const paint = { setDataColors: vi.fn(), clearDataColors: vi.fn() };
+    const select = vi.fn();
+    const controller = new ColourByController({
+      loadColumn: async () => column,
+      paint,
+      select,
+      showOnly: (elements, label, additive) => {
+        showOnly(elements, label, additive);
+        // What App does on any change of what can be seen.
+        controller.markStale();
+      },
+    });
+    const showOnly = vi.fn();
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('P.Material', { kind: 'model', modelId: 'm' });
+    const painted = paint.setDataColors.mock.calls.length;
+    const eye = () => legend.getContainer().querySelector<HTMLButtonElement>('.colour-legend-entry .show-only-btn')!;
+    expect(eye().getAttribute('aria-label')).toBe('Show only a');
+    eye().click();
+    expect(showOnly).toHaveBeenCalledWith(
+      [
+        { modelId: 'm', expressId: 1 },
+        { modelId: 'm', expressId: 3 },
+      ],
+      'Material: a',
+      false,
+    );
+    expect(select).not.toHaveBeenCalled();
+    expect(controller.getState()).toMatchObject({ phase: 'shown', stale: true });
+    expect(paint.setDataColors.mock.calls.length).toBe(painted);
+    eye().dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+    expect(showOnly.mock.calls[1][2]).toBe(true);
+  });
+
+  it('has no eye when nothing can show only', async () => {
+    const { controller } = makeController(textColumn('m', ['a']));
+    const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
+    await controller.colourBy('k', { kind: 'model', modelId: 'm' });
+    expect(legend.getContainer().querySelector('.show-only-btn')).toBeNull();
+  });
+
   it('a numeric colouring shows its scale with the unit, and offers the colour scales', async () => {
     const values = Array.from({ length: 40 }, (_, i) => 100 + i * 25);
     const { controller } = makeController(numberColumn('m', values));
