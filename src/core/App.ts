@@ -694,6 +694,7 @@ ${key}`. */
       },
       select: (elements) =>
         this.selectionManager.selectExactly(elements.map((e) => ({ ...e, ifcClass: '', ifcTypeCode: 0 }))),
+      showOnly: (elements, label, additive) => this.showOnlyElements(elements, label, additive),
     });
     this.totalsView = new TotalsView({
       controller: this.totals,

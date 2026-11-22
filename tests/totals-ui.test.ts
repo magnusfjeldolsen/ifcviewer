@@ -48,6 +48,7 @@ function setup(columns: Record<string, ColumnData>, ids: number[], scope: Totals
     loadColumn: async (m, key): Promise<ParameterColumn> => ({ ...columns[key], modelId: m, ids: Int32Array.from(ids) }),
     releaseColumn: () => {},
     select: vi.fn(),
+    showOnly: vi.fn(),
     storage: { getItem: (k) => store[k] ?? null, setItem: (k, v) => void (store[k] = v) },
     debounceMs: 0,
   };
@@ -173,6 +174,27 @@ describe('TotalsView', () => {
         { modelId: 'a', expressId: 11 },
         { modelId: 'a', expressId: 14 },
       ]);
+    });
+
+    it("shows only a group's elements with the eye beside its line, as well with Ctrl, never selecting", async () => {
+      const t = await grouped();
+      const line = t.root.querySelectorAll<HTMLElement>('.totals-line:not(.totals-line-head)')[1];
+      const eye = line.parentElement!.querySelector<HTMLButtonElement>('.show-only-btn')!;
+      // Beside the line, not inside it.
+      expect(line.contains(eye)).toBe(false);
+      expect(eye.getAttribute('aria-label')).toBe('Show only IfcBeam');
+      eye.click();
+      expect(t.deps.showOnly).toHaveBeenCalledWith(
+        [
+          { modelId: 'a', expressId: 11 },
+          { modelId: 'a', expressId: 14 },
+        ],
+        'IfcClass: IfcBeam',
+        false,
+      );
+      eye.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+      expect(vi.mocked(t.deps.showOnly!).mock.calls[1][2]).toBe(true);
+      expect(t.deps.select).not.toHaveBeenCalled();
     });
 
     it('switches a row to a share chart and back', async () => {
