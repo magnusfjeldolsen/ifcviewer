@@ -146,6 +146,24 @@ export interface ColourByTimings {
   clearMs: number;
 }
 
+/**
+ * Anything that changes what can be seen (hide, isolate, show only, the
+ * section plane) leaves the colours out of date: the legend says so, and
+ * only Refresh works them out again.
+ */
+export function staleWhenVisibilityChanges(
+  controller: Pick<ColourByController, 'markStale'>,
+  sources: {
+    appearance: { onChange(listener: () => void): unknown };
+    clipping: { onStateChange(listener: () => void): unknown; onPlaneMoved(listener: () => void): unknown };
+  },
+): void {
+  const stale = (): void => controller.markStale();
+  sources.appearance.onChange(stale);
+  sources.clipping.onStateChange(stale);
+  sources.clipping.onPlaneMoved(stale);
+}
+
 export class ColourByController {
   private state: ColourByState = { phase: 'off' };
   /** Per model in the scope: its value column, and the scope's rows of it (null: all). */

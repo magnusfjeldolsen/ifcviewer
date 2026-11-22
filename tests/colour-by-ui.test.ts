@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ColourByController } from '../src/inspector/ColourByController';
+import { ColourByController, staleWhenVisibilityChanges } from '../src/inspector/ColourByController';
+import { AppearanceManager } from '../src/viewer/AppearanceManager';
+import { boxModel, makeModelManager } from './helpers/models';
 import type { ParameterColumn } from '../src/inspector/parameterColumn';
 import { ColourLegend, ENTRIES_SHOWN, countsText, loadColourValueCount, scopeText } from '../src/ui/ColourLegend';
 import { ParameterPicker, filterPickerRows } from '../src/ui/ParameterPicker';
@@ -116,17 +118,14 @@ describe('colour legend', () => {
     const column = textColumn('m', ['a', 'b', 'a']);
     const paint = { setDataColors: vi.fn(), clearDataColors: vi.fn() };
     const select = vi.fn();
-    const controller = new ColourByController({
-      loadColumn: async () => column,
-      paint,
-      select,
-      showOnly: (elements, label, additive) => {
-        showOnly(elements, label, additive);
-        // What App does on any change of what can be seen.
-        controller.markStale();
-      },
-    });
-    const showOnly = vi.fn();
+    // The real appearance manager, wired to the legend as App wires it.
+    const { modelManager } = makeModelManager([boxModel('m', [1, 2, 3])]);
+    const appearance = new AppearanceManager({ modelManager });
+    const showOnly = vi.fn((elements: { modelId: string; expressId: number }[], _label: string, additive: boolean) =>
+      appearance.showOnly(elements, additive ? 'add' : 'narrow'),
+    );
+    const controller = new ColourByController({ loadColumn: async () => column, paint, select, showOnly });
+    staleWhenVisibilityChanges(controller, { appearance, clipping: { onStateChange: () => {}, onPlaneMoved: () => {} } });
     const legend = new ColourLegend(document.body, { controller, modelName: () => 'Tower' });
     await controller.colourBy('P.Material', { kind: 'model', modelId: 'm' });
     const painted = paint.setDataColors.mock.calls.length;
@@ -142,6 +141,7 @@ describe('colour legend', () => {
       false,
     );
     expect(select).not.toHaveBeenCalled();
+    expect(appearance.getStateFor('m', 2)).toBe('hidden');
     expect(controller.getState()).toMatchObject({ phase: 'shown', stale: true });
     expect(paint.setDataColors.mock.calls.length).toBe(painted);
     eye().dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));

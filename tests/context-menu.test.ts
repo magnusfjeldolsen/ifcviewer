@@ -497,4 +497,8 @@ describe('App: "Show only this category / type" (#70)', () => {
     expect(found![0]).toMatch(/findAcrossModels\(/);
     expect(found![0]).toMatch(/models: \(\) => this\.modelManager\.getModelIds\(\)/);
   });
+
+  it('marks the colouring out of date through the shared wiring the legend test exercises', () => {
+    expect(appSrc).toMatch(/staleWhenVisibilityChanges\(this\.colourBy, \{ appearance: this\.appearanceManager, clipping: this\.clippingTool \}\)/);
+  });
 });

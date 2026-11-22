@@ -41,7 +41,7 @@ import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
 import { valueText } from '../ui/ParameterList';
-import { ColourByController, colourScopeFor, isColouringBy, type ColourScope } from '../inspector/ColourByController';
+import { ColourByController, colourScopeFor, isColouringBy, staleWhenVisibilityChanges, type ColourScope } from '../inspector/ColourByController';
 import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import { TotalsController, type TotalsScope } from '../inspector/TotalsController';
@@ -793,10 +793,7 @@ ${parameter.key}`);
     }, { maxValues: loadColourValueCount() });
     // Anything that changes what can be seen may leave the colours out of
     // date: the legend says so, and Refresh works them out again.
-    const stale = (): void => this.colourBy.markStale();
-    this.appearanceManager.onChange(stale);
-    this.clippingTool.onStateChange(stale);
-    this.clippingTool.onPlaneMoved(stale);
+    staleWhenVisibilityChanges(this.colourBy, { appearance: this.appearanceManager, clipping: this.clippingTool });
     // Appended after the Parameters panel: the stylesheet moves the legend
     // left of the panel while the panel is open (a sibling selector).
     this.colourLegend = new ColourLegend(appEl, {

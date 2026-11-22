@@ -289,7 +289,9 @@ describe('App select-similar wiring (source assertions)', () => {
   });
 
   it('routes the class preset to enumerateExpressIds and a value match to findMatching', () => {
-    const body = runner();
+    // The routing lives in `similarIds`, shared with "Show only this category / type".
+    expect(runner()).toMatch(/this\.similarIds\(query/);
+    const body = appSrc.match(/private similarIds\([\s\S]*?\n {2}\}/)![0];
     expect(body).toMatch(/enumerateExpressIds\(/);
     expect(body).toMatch(/findMatching\(/);
   });
