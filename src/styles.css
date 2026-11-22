@@ -2966,3 +2966,89 @@ html, body {
     width: auto;
   }
 }
+
+/* Flying (#98): the keys, only while flying. Under the toolbar, in the gap
+   between the Models panel (left, 252px) and the Parameters panel / colour
+   legend (right, 352px), so it covers neither at 1024px and up. */
+.fly-tips {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 228px;
+  padding: 8px 10px;
+  background: rgba(17, 24, 39, 0.78);
+  color: #f9fafb;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  font-size: 12px;
+  line-height: 1.35;
+  z-index: 10;
+  pointer-events: none;
+  user-select: none;
+}
+
+.fly-tips[hidden] {
+  display: none;
+}
+
+.fly-tips.collapsed {
+  width: auto;
+  padding: 4px 6px 4px 10px;
+}
+
+.fly-tips-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fly-tips-title {
+  font-weight: 600;
+}
+
+.fly-tips-speed {
+  font-variant-numeric: tabular-nums;
+  margin-right: auto;
+}
+
+.fly-tips-toggle {
+  pointer-events: auto;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.15);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fly-tips-toggle:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.fly-tips-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 8px;
+  margin: 8px 0 0;
+}
+
+.fly-tips-list[hidden] {
+  display: none;
+}
+
+.fly-tips-list dt,
+.fly-tips-list dd {
+  margin: 0;
+}
+
+.fly-tips-list kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  white-space: nowrap;
+}

@@ -20,6 +20,7 @@ import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
 import { HistoryShortcuts } from '../ui/HistoryShortcuts';
 import { HistoryManager } from './history/HistoryManager';
 import { HelpOverlay } from '../ui/HelpOverlay';
+import { FlyTips } from '../ui/FlyTips';
 import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
@@ -132,6 +133,7 @@ export class App {
   private history: HistoryManager;
   private historyShortcuts!: HistoryShortcuts;
   private helpOverlay!: HelpOverlay;
+  private flyTips: FlyTips;
   // Bottom-right floating action tray. Currently hosts the Remove clipping
   // button; future contextual buttons (Remove measurements, Show hidden
   // elements, etc.) will register here. Constructed in start().
@@ -392,10 +394,27 @@ ${key}`. */
       icon: '📍',
       title: 'Position marker — read X, Y, Z (P)',
     });
+    this.toolbar.addButton({
+      name: 'fly',
+      icon: '✈',
+      title: 'Fly through the model (G)',
+      toggle: true,
+      onClick: () => this.viewer.toggleFlying(),
+    });
     this.toolbar.addButton({ name: 'fit', icon: '⊡', title: 'Fit View (F)', onClick: () => this.fitSmart() });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', onClick: () => this.resetView() });
     this.toolbar.finalize();
+
+    // Flying (#98): the button shows the mode, and the keys show only while
+    // flying. Every way out — the button, G, Esc, Fit, a load — lands here.
+    this.flyTips = new FlyTips(appEl, this.viewer.getFlySpeed());
+    this.viewer.onFlyingChange((flying) => {
+      this.toolbar.setPressed('fly', flying);
+      if (flying) this.flyTips.show();
+      else this.flyTips.hide();
+    });
+    this.viewer.onFlySpeedChange((speed) => this.flyTips.setSpeed(speed));
 
     // Model tree panel
     this.modelTreePanel = new ModelTreePanel(appEl, {
@@ -590,6 +609,13 @@ ${key}`. */
       action: () => this.fitSmart(),
     });
 
+    // Flying (#98). F is Fit View, so the mode key is its neighbour G ("go").
+    this.keyboardShortcuts.register({
+      key: 'g',
+      label: 'Fly through the model',
+      action: () => this.viewer.toggleFlying(),
+    });
+
     this.keyboardShortcuts.register({
       key: 'Escape',
       label: 'Cancel',
@@ -598,6 +624,11 @@ ${key}`. */
           this.viewer.cancelPivotPicking();
         } else if (this.toolManager.getActiveTool() !== null) {
           this.toolManager.abort();
+        } else if (this.viewer.isFlying()) {
+          // An open menu or the help card closes on this Escape by itself
+          // (their listeners run after this one); leaving flying waits for
+          // the next, so one press never does two things.
+          if (!this.contextMenu?.isOpen() && !this.helpOverlay.isOpen()) this.viewer.exitFlying();
         } else {
           // No tool active, no pivot picking: clear both selections. A
           // measurement selection is as much "a thing Escape should let go of"
