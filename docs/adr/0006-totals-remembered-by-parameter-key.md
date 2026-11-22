@@ -1,7 +1,7 @@
 # 6. Totals count the selection, and remember their rows by parameter key
 
 Date: 2026-11-19
-Status: proposed
+Status: accepted
 Issue: #69
 
 ## Context
