@@ -1607,8 +1607,13 @@ ${parameter.key}`);
     // Readable from the page (`performance.getEntriesByName('show-only')`) for measuring.
     performance.measure('show-only', { start });
     this.setStatus(showOnlyStatus(label, result, additive));
-    window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
+    // Eyes are clicked in quick succession: an earlier message's clearing
+    // must not wipe this one early.
+    window.clearTimeout(this.showOnlyStatusTimer);
+    this.showOnlyStatusTimer = window.setTimeout(() => this.setStatus(''), STATUS_CLEAR_MS);
   }
+
+  private showOnlyStatusTimer: number | undefined;
 
   /**
    * The Parameters list's eye: show only the elements with `value`, in
