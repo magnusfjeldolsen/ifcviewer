@@ -50,7 +50,7 @@ import { ColourByController, colourScopeFor, isColouringBy, staleWhenVisibilityC
 import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import { TotalsController, type TotalsScope } from '../inspector/TotalsController';
-import { VisibleCountsController } from '../inspector/VisibleCountsController';
+import { followVisibility, VisibleCountsController } from '../inspector/VisibleCountsController';
 import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
@@ -459,7 +459,6 @@ ${key}`. */
         this.positionTool.setModelVisible(id, visible);
         this.colourBy?.markStale();
         this.totals?.invalidate();
-        this.visibleCounts?.invalidate();
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -788,24 +787,21 @@ ${key}`. */
       onView: (view) => this.parametersPanel.getList().setVisible(view),
     });
     const recount = (): void => this.totals.invalidate();
-    const recountVisible = (): void => this.visibleCounts.invalidate();
     this.selectionManager.onChange(recount);
-    this.appearanceManager.onChange(() => {
-      recount();
-      recountVisible();
-    });
-    this.clippingTool.onStateChange(() => {
-      recount();
-      recountVisible();
-    });
-    this.clippingTool.onPlaneMoved(() => {
-      recount();
-      recountVisible();
-    });
-    this.loadGate.onIdle(() => {
-      recount();
-      recountVisible();
-    });
+    this.appearanceManager.onChange(recount);
+    this.clippingTool.onStateChange(recount);
+    this.clippingTool.onPlaneMoved(recount);
+    this.loadGate.onIdle(recount);
+    followVisibility(
+      {
+        appearanceChanged: (cb) => this.appearanceManager.onChange(cb),
+        modelToggled: (cb) => this.modelManager.onModelVisibility(cb),
+        clipStateChanged: (cb) => this.clippingTool.onStateChange(cb),
+        clipPlaneMoved: (cb) => this.clippingTool.onPlaneMoved(cb),
+        loadIdle: (cb) => this.loadGate.onIdle(cb),
+      },
+      this.visibleCounts,
+    );
 
     // Parameters panel (#67): which parameters a model has, opened from the
     // model's row in the Models panel. Discovery runs in the worker, never

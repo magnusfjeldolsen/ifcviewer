@@ -2024,10 +2024,12 @@ html, body {
 }
 
 /* Counts that follow what can be seen (#115): a value nobody can see now stays listed, dimmed. */
-.param-value-item.none .param-value,
-.param-value-item.none .show-only-btn,
-.param-row.none > .param-head {
-  opacity: 0.5;
+/* Dimmed by colour, not opacity: #5b6472 is 5.9:1 on white, so it stays readable. */
+.param-value-item.none .param-value-text,
+.param-value-item.none .param-value-count,
+.param-row.none > .param-head .param-name,
+.param-row.none > .param-head .param-group {
+  color: #5b6472;
 }
 
 .param-count.partial {

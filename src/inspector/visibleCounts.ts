@@ -52,24 +52,42 @@ export function visibleRows(ids: Int32Array, visible: (expressId: number) => boo
 export function countVisible(c: ColumnData, rows: Int32Array): VisibleParameter {
   const values = new Map<string, number>();
   let count = 0;
-  const bump = (key: string): void => {
-    values.set(key, (values.get(key) ?? 0) + 1);
-    count++;
-  };
   if (c.type === 'discrete') {
-    // The list keeps a discrete column's values apart by value alone.
+    // The list keeps a discrete column's values apart by value alone. Tally
+    // per dictionary code in a typed array, and build one key per distinct value.
+    const tally = new Int32Array(c.dictionary.length);
+    const codes = c.codes;
     for (let r = 0; r < rows.length; r++) {
-      const code = c.codes[rows[r]];
-      if (code >= 0) bump(visibleValueKey(c.dictionary[code]));
+      const code = codes[rows[r]];
+      if (code >= 0) tally[code]++;
+    }
+    for (let code = 0; code < tally.length; code++) {
+      if (tally[code] === 0) continue;
+      values.set(visibleValueKey(c.dictionary[code]), tally[code]);
+      count += tally[code];
     }
     return { count, values };
   }
+  // Numbers: tally per number (and unit) with numeric map keys, then one string key per distinct value.
+  const perUnit: Map<number, number>[] = (c.units.length > 0 ? c.units : [{ key: '', symbol: '' }]).map(
+    () => new Map<number, number>(),
+  );
   const unitIndex = c.unitIndex;
+  const data = c.values;
+  const single = perUnit[0];
   for (let r = 0; r < rows.length; r++) {
     const i = rows[r];
-    const v = c.values[i];
-    if (Number.isNaN(v)) continue;
-    bump(visibleValueKey(v, unitIndex ? c.units[unitIndex[i]]?.key : undefined));
+    const v = data[i];
+    if (v !== v) continue;
+    const tally = unitIndex ? perUnit[unitIndex[i]] : single;
+    tally.set(v, (tally.get(v) ?? 0) + 1);
+  }
+  for (let u = 0; u < perUnit.length; u++) {
+    const unitKey = unitIndex ? c.units[u]?.key : undefined;
+    for (const [v, n] of perUnit[u]) {
+      values.set(visibleValueKey(v, unitKey), n);
+      count += n;
+    }
   }
   return { count, values };
 }

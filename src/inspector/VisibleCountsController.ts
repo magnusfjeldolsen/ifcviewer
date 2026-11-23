@@ -91,3 +91,27 @@ export class VisibleCountsController {
     this.timer = null;
   }
 }
+
+/** The things that change what can be seen, as subscriptions. */
+export interface VisibilitySources {
+  /** Hide, show, show only, transparency: any change of how elements look. */
+  appearanceChanged(cb: () => void): unknown;
+  /** A model switched on or off. */
+  modelToggled(cb: () => void): unknown;
+  /** The section plane was created or removed. */
+  clipStateChanged(cb: () => void): unknown;
+  /** The section plane's handle drag ended. */
+  clipPlaneMoved(cb: () => void): unknown;
+  /** No model is loading any more. */
+  loadIdle(cb: () => void): unknown;
+}
+
+/** Recount `controller` whenever any of `sources` says what can be seen may have changed. */
+export function followVisibility(sources: VisibilitySources, controller: Pick<VisibleCountsController, 'invalidate'>): void {
+  const recount = (): void => controller.invalidate();
+  sources.appearanceChanged(recount);
+  sources.modelToggled(recount);
+  sources.clipStateChanged(recount);
+  sources.clipPlaneMoved(recount);
+  sources.loadIdle(recount);
+}

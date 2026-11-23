@@ -166,11 +166,15 @@ export function visibleParameters(
   parameters: readonly ParameterSummary[],
   filter: string,
   sort: ParameterSort,
+  view: VisibleView | null = null,
 ): ParameterSummary[] {
   const needle = filter.trim().toLowerCase();
   const out = needle ? parameters.filter((p) => p.key.toLowerCase().includes(needle)) : [...parameters];
   const byKey = (a: ParameterSummary, b: ParameterSummary): number => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-  out.sort(sort === 'count' ? (a, b) => b.count - a.count || byKey(a, b) : byKey);
+  // With part of the model out of sight, "by count" follows the counts shown:
+  // visible where counted, ties by the whole model's count.
+  const shownCount = (p: ParameterSummary): number => view?.parameters.get(p.key)?.count ?? p.count;
+  out.sort(sort === 'count' ? (a, b) => shownCount(b) - shownCount(a) || b.count - a.count || byKey(a, b) : byKey);
   return out;
 }
 
@@ -294,7 +298,20 @@ export class ParameterList {
       const li = this.rowEls.get(p.key);
       if (li) this.paintCount(li, p, data.scopeSize, active);
     }
+    if (this.sort === 'count') this.reorderRows(data, active);
     this.refreshOpen?.();
+  }
+
+  /** Put the existing rows in the order the counts now give, keeping whatever has focus. */
+  private reorderRows(data: ModelParameters, active: VisibleView | null): void {
+    const order = visibleParameters(data.parameters, this.filterInput.value, this.sort, active)
+      .map((p) => this.rowEls.get(p.key))
+      .filter((li): li is HTMLElement => !!li);
+    const current = this.listEl.children;
+    if (order.length === current.length && order.every((li, i) => current[i] === li)) return;
+    const focused = this.listEl.contains(document.activeElement) ? (document.activeElement as HTMLElement) : null;
+    this.listEl.replaceChildren(...order);
+    if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
   }
 
   /** The view, if it is of the model shown. */
@@ -404,7 +421,7 @@ export class ParameterList {
       this.summaryEl.textContent = '';
       return;
     }
-    const shown = visibleParameters(data.parameters, this.filterInput.value, this.sort);
+    const shown = visibleParameters(data.parameters, this.filterInput.value, this.sort, this.activeView());
 
     const frag = document.createDocumentFragment();
     for (const p of shown) {
@@ -569,31 +586,70 @@ export class ParameterList {
     const without = document.createElement('div');
     without.className = 'param-values-without';
 
+    /** Rendered entries by value, reused so redrawing does not replace a focused button. */
+    const items = new Map<string, HTMLElement>();
+
+    /** The number on an entry, and whether nobody can see any of its elements. */
+    const paintValue = (li: HTMLElement, v: ValueCount, seen: number | null): void => {
+      const count = li.querySelector<HTMLElement>('.param-value-count');
+      if (count) {
+        count.textContent = visibleValueCountText(v.count, seen);
+        count.title = seen !== null && seen !== v.count ? `${counts.format(seen)} of ${counts.format(v.count)} can be seen` : '';
+      }
+      li.classList.toggle('none', seen === 0);
+    };
+
+    /**
+     * Make the list these entries. Only touches the DOM when the entries or
+     * their order differ, and gives focus back to what had it: moving a node
+     * drops focus in a browser.
+     */
+    const setItems = (nodes: HTMLElement[]): void => {
+      const current = list.children;
+      if (current.length === nodes.length && nodes.every((n, i) => current[i] === n)) return;
+      const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement) : null;
+      list.replaceChildren(...nodes);
+      if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+    };
+
     const draw = (): void => {
       const active = this.activeView();
       const seenParam = active?.parameters.get(p.key);
       const missing = seenParam && active ? active.elements - seenParam.count : scopeSize - p.count;
       if (missing > 0) {
-        without.textContent = `${counts.format(missing)} without this parameter`;
+        // Not counted for what can be seen yet: say it is the whole model's number.
+        without.textContent = `${counts.format(missing)} without this parameter${active && !seenParam ? ' in model' : ''}`;
         body.appendChild(without);
       } else {
         without.remove();
       }
-      list.replaceChildren();
       status.textContent = '';
       if (state.error) {
         status.textContent = `Could not read the values: ${state.error}`;
+        setItems([]);
         return;
       }
       if (!state.values) {
         status.textContent = state.progress
           ? `Reading values… ${counts.format(state.progress.done)} of ${counts.format(state.progress.total)} elements`
           : 'Reading values…';
+        setItems([]);
         return;
       }
       // A unique-per-element parameter lists nothing until asked for something.
-      if (p.uniquePerElement && !this.valueFilter.trim()) return;
-      const matching = filterValues(state.values, this.valueFilter);
+      if (p.uniquePerElement && !this.valueFilter.trim()) {
+        setItems([]);
+        return;
+      }
+      const seenOf = (v: ValueCount): number | null =>
+        seenParam ? (seenParam.values.get(visibleValueKey(v.value, v.unit?.key)) ?? 0) : null;
+      let matching = filterValues(state.values, this.valueFilter);
+      // With part of the model out of sight, the order follows the numbers shown:
+      // most visible first, ties by the whole model's count (the sort is stable).
+      if (seenParam) {
+        const seenCount = new Map(matching.map((v) => [v, seenOf(v) ?? 0] as const));
+        matching = matching.sort((a, b) => seenCount.get(b)! - seenCount.get(a)! || b.count - a.count);
+      }
       const shown = matching.slice(0, VALUES_SHOWN);
       if (matching.length > shown.length) {
         status.textContent = this.valueFilter.trim()
@@ -603,8 +659,17 @@ export class ParameterList {
         status.textContent = 'No value matches';
       }
       const unit = p.kind === 'numeric' && p.unit && !p.unitsDiffer ? ` ${p.unit}` : '';
-      const frag = document.createDocumentFragment();
+      const nodes: HTMLElement[] = [];
       for (const v of shown) {
+        const itemKey = visibleValueKey(v.value, v.unit?.key);
+        const seen = seenOf(v);
+        const cached = items.get(itemKey);
+        if (cached) {
+          // The same entry again: only its numbers change, so a focused button stays focused.
+          paintValue(cached, v, seen);
+          nodes.push(cached);
+          continue;
+        }
         const li = document.createElement('li');
         const b = document.createElement('button');
         b.type = 'button';
@@ -618,10 +683,6 @@ export class ParameterList {
         label.textContent = text;
         const count = document.createElement('span');
         count.className = 'param-value-count';
-        // With part of the model out of sight: how many of them can be seen.
-        const seen = seenParam ? (seenParam.values.get(visibleValueKey(v.value, v.unit?.key)) ?? 0) : null;
-        count.textContent = visibleValueCountText(v.count, seen);
-        if (seen !== null && seen !== v.count) count.title = `${counts.format(seen)} of ${counts.format(v.count)} can be seen`;
         b.appendChild(label);
         b.appendChild(count);
         if (this.options.onPickValue) {
@@ -633,7 +694,6 @@ export class ParameterList {
         }
         li.appendChild(b);
         const onShowOnly = this.options.onShowOnly;
-        if (seen === 0) li.classList.add('none');
         if (onShowOnly) {
           li.classList.add('param-value-item');
           li.appendChild(
@@ -642,9 +702,11 @@ export class ParameterList {
             ),
           );
         }
-        frag.appendChild(li);
+        paintValue(li, v, seen);
+        items.set(itemKey, li);
+        nodes.push(li);
       }
-      list.appendChild(frag);
+      setItems(nodes);
     };
     this.refreshOpen = draw;
     draw();
