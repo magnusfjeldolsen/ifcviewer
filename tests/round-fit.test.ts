@@ -243,18 +243,214 @@ describe('roundFitsAt — the curved side', () => {
     for (let t = 0; t < geo.triangles.length / 3; t++) expect(roundFitsAt(geo, t)).toEqual([]);
   });
 
-  it('does not grow round a bend: a bent bar is fitted to the straight run that was hit', () => {
-    // An L of two cylinders would weld at the joint only by luck; a torus is
-    // nothing but bend, so the side may never extend beyond one ring of facets.
-    const torus = buildSnapGeometry(new THREE.TorusGeometry(1, 0.05, 12, 48));
-    const found = fitCurvedSide(torus, 0);
-    // One segment of 48 is two triangles per facet, twelve facets round.
-    expect(found.triangles.length).toBeLessThanOrEqual(24);
-    if (found.fit) {
-      // Whatever it found is on the tube's centreline, which is radius 1 about z.
-      const c = found.fit.centre;
-      expect(Math.abs(Math.hypot(c.x, c.y) - 1)).toBeLessThan(0.01);
-      expect(Math.abs(c.z)).toBeLessThan(0.01);
+  it('on a bend, fits one ring of facets, on the centre line of its chord', () => {
+    // A torus is nothing but bend. Each ring of facets is a straight piece of
+    // tube along its chord, so its centre is off the true arc by the chord's
+    // sag, R(1 − cos(Δθ/2)) — and the snap is held to that one piece.
+    for (const segments of [12, 48, 180]) {
+      const torus = buildSnapGeometry(new THREE.TorusGeometry(1, 0.05, 12, segments));
+      const found = fitCurvedSide(torus, 0);
+      const half = Math.PI / segments;
+      expect(found.fit).not.toBeNull();
+      // Twelve facets round, two triangles each: one ring and nothing more.
+      expect(found.ring.length).toBe(24);
+      const c = found.fit!.centre;
+      expect(Math.abs(Math.hypot(c.x, c.y) - 1)).toBeLessThanOrEqual(1 - Math.cos(half) + 1e-4);
+      expect(Math.abs(c.z)).toBeLessThan(1e-4);
+      // Held within the chord, whose half-length is at most (R + r)·sin(Δθ/2).
+      expect(found.fit!.halfLength).toBeLessThanOrEqual((1 + 0.05) * Math.sin(half) + 1e-4);
+    }
+  });
+});
+
+/**
+ * A tube built ring by ring, so a test can put a straight run and a bend in
+ * one piece the way a bent bar or a pipe with an elbow arrives from web-ifc.
+ * Each ring is a function from the angle round the tube to a point.
+ */
+function tube(rings: Array<(a: number) => [number, number, number]>, segments: number, phase: number) {
+  const positions: number[] = [];
+  const index: number[] = [];
+  const starts: number[] = [];
+  for (const ring of rings) {
+    starts.push(positions.length / 3);
+    for (let i = 0; i < segments; i++) positions.push(...ring(((i + phase) * 2 * Math.PI) / segments));
+  }
+  for (let k = 0; k + 1 < starts.length; k++) {
+    const a = starts[k];
+    const b = starts[k + 1];
+    for (let i = 0; i < segments; i++) {
+      const j = (i + 1) % segments;
+      index.push(a + i, a + j, b + j, a + i, b + j, b + i);
+    }
+  }
+  const first = starts[0];
+  const last = starts[starts.length - 1];
+  for (let i = 1; i < segments - 1; i++) {
+    index.push(first, first + i + 1, first + i);
+    index.push(last, last + i, last + i + 1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  g.setIndex(index);
+  return buildSnapGeometry(g);
+}
+
+describe('roundFitsAt — a bend in the same piece', () => {
+  const r = 0.05;
+
+  /** A 1 m straight run along x into a 90° elbow of bend radius 0.15 m, turning to +y. */
+  function pipeWithElbow(steps: number, phase: number) {
+    const R = 0.15;
+    const rings: Array<(a: number) => [number, number, number]> = [(a) => [-1, r * Math.cos(a), r * Math.sin(a)]];
+    for (let k = 0; k <= steps; k++) {
+      const th = ((k / steps) * Math.PI) / 2;
+      rings.push((a) => {
+        const rad = R - r * Math.cos(a);
+        return [rad * Math.sin(th), R - rad * Math.cos(th), r * Math.sin(a)];
+      });
+    }
+    return tube(rings, 12, phase);
+  }
+
+  it('snaps the straight run of a pipe to its axis, whatever the elbow is cut into', () => {
+    for (const phase of [0, 0.25, 0.5]) {
+      for (const steps of [3, 6, 12, 32]) {
+        const geo = pipeWithElbow(steps, phase);
+        // The straight run is the first ring band: triangles 0–23.
+        for (let t = 0; t < 24; t++) {
+          const fit = roundFitsAt(geo, t).find((f) => f.slides);
+          expect(fit, `phase ${phase}, ${steps} steps, triangle ${t}`).toBeDefined();
+          expect(Math.hypot(fit!.centre.y, fit!.centre.z)).toBeLessThan(1e-5);
+          expect(fit!.radius).toBeCloseTo(r, 5);
+          // The run stops where the elbow starts, at x = 0.
+          expect(fit!.centre.x + fit!.halfLength).toBeCloseTo(0, 4);
+        }
+      }
+    }
+  });
+
+  it('snaps the first leg of a mitred bend to its axis', () => {
+    const L = 1;
+    for (const phase of [0, 0.5]) {
+      const geo = tube(
+        [
+          (a) => [0, r * Math.cos(a), r * Math.sin(a)],
+          (a) => [L - r * Math.cos(a), r * Math.cos(a), r * Math.sin(a)],
+          (a) => [L - r * Math.cos(a), L, r * Math.sin(a)],
+        ],
+        12,
+        phase,
+      );
+      for (let t = 0; t < 24; t++) {
+        const fit = roundFitsAt(geo, t).find((f) => f.slides);
+        expect(fit, `phase ${phase}, triangle ${t}`).toBeDefined();
+        expect(Math.hypot(fit!.centre.y, fit!.centre.z)).toBeLessThan(1e-5);
+      }
+    }
+  });
+});
+
+describe('roundFitsAt — the answer does not depend on hover order', () => {
+  /** A 12-segment turned column, shaft radius 0.3 m, with whatever top `profile` gives it. */
+  function shaft(profile: Array<[number, number]>) {
+    const geo = buildSnapGeometry(new THREE.LatheGeometry(profile.map(([x, y]) => new THREE.Vector2(x, y)), 12));
+    const n = new THREE.Vector3();
+    const triangles: number[] = [];
+    for (let t = 0; t < geo.triangles.length / 3; t++) {
+      n.set(geo.normals[t * 3], geo.normals[t * 3 + 1], geo.normals[t * 3 + 2]);
+      if (Math.abs(n.y) < 1e-3) triangles.push(t);
+    }
+    return { geo, triangles };
+  }
+
+  const tops: Record<string, Array<[number, number]>> = {
+    plain: [[0, 0], [0.3, 0], [0.3, 3], [0, 3]],
+    // A capital flaring out at 30°, and a 45° chamfer: both put a fold that
+    // runs round the column right next to the shaft.
+    'flared capital': [[0, 0], [0.3, 0], [0.3, 2.7], [0.3 + 0.3 * Math.tan(Math.PI / 6), 3], [0, 3]],
+    chamfer: [[0, 0], [0.3, 0], [0.3, 2.95], [0.25, 3], [0, 3]],
+  };
+
+  for (const [name, profile] of Object.entries(tops)) {
+    for (const order of ['bottom first', 'top first'] as const) {
+      it(`finds the shaft's axis from every shaft triangle — ${name}, ${order}`, () => {
+        const { geo, triangles } = shaft(profile);
+        expect(triangles.length).toBe(24);
+        const sequence = order === 'bottom first' ? triangles : [...triangles].reverse();
+        for (const t of sequence) {
+          const fit = roundFitsAt(geo, t).find((f) => f.slides);
+          expect(fit, `triangle ${t}`).toBeDefined();
+          expect(fit!.radius).toBeCloseTo(0.3, 5);
+          expect(Math.abs(fit!.axis.y)).toBeCloseTo(1, 6);
+          expect(Math.hypot(fit!.centre.x, fit!.centre.z)).toBeLessThan(1e-5);
+        }
+      });
+    }
+  }
+});
+
+describe('roundFitsAt — finely cut cylinders', () => {
+  const y = new THREE.Vector3(0, 1, 0);
+  const firstSide = (geo: SnapGeometry) => triangleWhere(geo, (n) => Math.abs(n.dot(y)) < 1e-3);
+
+  it('fits a tank or large pipe cut into many segments and many rows', () => {
+    // 300 × 170 is about 100 000 triangles; the cut crosses only one ring.
+    for (const [segments, rows] of [[64, 32], [300, 170]]) {
+      const geo = buildSnapGeometry(new THREE.CylinderGeometry(0.3, 0.3, 30, segments, rows));
+      const fit = roundFitsAt(geo, firstSide(geo)).find((f) => f.slides);
+      expect(fit, `${segments} × ${rows}`).toBeDefined();
+      expect(fit!.radius).toBeCloseTo(0.3, 5);
+      // The run is the whole height, found by following the facet edges.
+      expect(fit!.halfLength).toBeCloseTo(15, 3);
+    }
+  });
+
+  it('fits cylinders cut finer than one degree a facet', () => {
+    for (const segments of [400, 1000]) {
+      const geo = buildSnapGeometry(new THREE.CylinderGeometry(0.3, 0.3, 3, segments));
+      expect(roundFitsAt(geo, firstSide(geo)).some((f) => f.slides), `${segments}`).toBe(true);
+    }
+  });
+});
+
+describe('roundFitsAt — thin bars far from the chunk anchor (float32)', () => {
+  it('fits 3–8 mm bars up to 1.5 km out', () => {
+    for (const radius of [0.003, 0.005, 0.008]) {
+      for (const offset of [200, 500, 1500]) {
+        for (let k = 0; k < 20; k++) {
+          const g = new THREE.CylinderGeometry(radius, radius, 2, 12);
+          g.rotateZ(0.3 + k * 0.17);
+          g.rotateX(0.2 + k * 0.05);
+          g.translate(offset + k * 0.37, offset * 0.3 + k * 0.11, -offset * 0.7);
+          const geo = buildSnapGeometry(g);
+          const axis = new THREE.Vector3(0, 1, 0)
+            .applyAxisAngle(new THREE.Vector3(0, 0, 1), 0.3 + k * 0.17)
+            .applyAxisAngle(new THREE.Vector3(1, 0, 0), 0.2 + k * 0.05);
+          const side = triangleWhere(geo, (n) => Math.abs(n.dot(axis)) < 0.1);
+          const fit = roundFitsAt(geo, side).find((f) => f.slides);
+          expect(fit, `${radius * 1000} mm at ${offset} m, bar ${k}`).toBeDefined();
+          expect(fit!.radius).toBeCloseTo(radius, 3);
+        }
+      }
+    }
+  });
+});
+
+describe('roundFitsAt — more shapes that are not round', () => {
+  it('rejects an ellipse, a sphere and a cone', () => {
+    const ellipse = new THREE.Shape();
+    ellipse.absellipse(0, 0, 0.3, 0.27, 0, Math.PI * 2, false, 0);
+    const shapes = [
+      prism(ellipse, 3),
+      new THREE.SphereGeometry(0.5, 12, 12),
+      new THREE.CylinderGeometry(0.3, 0.2, 3, 12),
+    ];
+    for (const g of shapes) {
+      const geo = buildSnapGeometry(g);
+      for (let t = 0; t < geo.triangles.length / 3; t++) {
+        expect(roundFitsAt(geo, t).filter((f) => f.slides)).toEqual([]);
+      }
     }
   });
 });
@@ -306,7 +502,7 @@ describe('roundFitsAt — a flat round outline', () => {
 });
 
 describe('roundFitsAt — caching', () => {
-  it('fits a side once, and every triangle on it shares the answer', () => {
+  it('gives every triangle round a column the same centre, and remembers it', () => {
     const geo = buildSnapGeometry(new THREE.CylinderGeometry(0.3, 0.3, 3, 12));
     const y = new THREE.Vector3(0, 1, 0);
     const sides: number[] = [];
@@ -316,7 +512,13 @@ describe('roundFitsAt — caching', () => {
       if (Math.abs(n.dot(y)) < 1e-3) sides.push(t);
     }
     const first: RoundFit = roundFitsAt(geo, sides[0])[0];
-    for (const t of sides) expect(roundFitsAt(geo, t)[0]).toBe(first);
+    for (const t of sides) {
+      const fit = roundFitsAt(geo, t)[0];
+      expect(fit.centre.distanceTo(first.centre)).toBeLessThan(1e-6);
+      expect(fit.radius).toBeCloseTo(first.radius, 9);
+      // Asking again is a lookup, not a second fit.
+      expect(roundFitsAt(geo, t)[0]).toBe(fit);
+    }
   });
 
   it('returns nothing for a triangle that does not exist', () => {

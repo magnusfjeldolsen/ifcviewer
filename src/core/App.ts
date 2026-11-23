@@ -11,6 +11,7 @@ import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
 import { PositionMarkerTool } from '../tools/PositionMarkerTool';
 import type { SnapTarget } from '../tools/snapCandidates';
+import { allowedSnapTargets, toggleSnapTarget } from '../tools/snapSettings';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
@@ -239,25 +240,11 @@ ${key}`. */
     // One set of snap settings, shared by every tool that places a point.
     const snapSettings = {
       snappingEnabled: () => this.settings.get('measurementSnapping'),
-      allowedSnapTargets: () => {
-        const allowed = new Set<SnapTarget>(['point']);
-        if (this.settings.get('snapToVertices')) allowed.add('vertex');
-        if (this.settings.get('snapToEdges')) allowed.add('edge');
-        if (this.settings.get('snapToSurfaces')) allowed.add('face');
-        if (this.settings.get('snapToCentres')) allowed.add('centre');
-        return allowed;
-      },
+      allowedSnapTargets: () => allowedSnapTargets(this.settings),
       onToggleSnapTarget: (target: SnapTarget) => {
-        const toggles = {
-          vertex: { key: 'snapToVertices', name: 'Corners' },
-          edge: { key: 'snapToEdges', name: 'Edges' },
-          face: { key: 'snapToSurfaces', name: 'Surfaces' },
-          centre: { key: 'snapToCentres', name: 'Round centres' },
-        } as const;
-        if (target === 'point') return;
-        const { key, name } = toggles[target];
-        const on = this.settings.toggle(key);
-        this.setStatus(`${name} ${on ? 'on' : 'off'}`);
+        const message = toggleSnapTarget(this.settings, target);
+        if (!message) return;
+        this.setStatus(message);
         this.clearStatusAfter(STATUS_CLEAR_MS);
       },
       onToggleSnapping: () => {
