@@ -216,8 +216,10 @@ export function growCoplanarPatch(
   const sum = new THREE.Vector3();
   const probe = new THREE.Vector3();
 
-  while (queue.length > 0 && triangles.length < maxTriangles) {
-    const t = queue.shift()!;
+  // An index into the queue rather than `shift()`, which moves every
+  // remaining entry and made a full-size patch cost quadratic time.
+  for (let head = 0; head < queue.length && triangles.length < maxTriangles; head++) {
+    const t = queue[head];
     triangles.push(t);
     readVertex(geo.normals, t, probe);
     sum.add(probe);
