@@ -420,7 +420,9 @@ ${key}`. */
       if (flying) this.flyTips.show();
       else this.flyTips.hide();
       this.updateCentreMark();
+      this.fitFlyTips();
     });
+    window.addEventListener('resize', () => this.fitFlyTips());
     // What is under the centre mark, looked at only when the flying view has
     // moved (the viewer throttles it and skips busy frames).
     this.viewer.onFlyProbe((fast) => this.probeCentreMark(fast));
@@ -1877,6 +1879,13 @@ ${parameter.key}`);
   private updateCentreMark(): void {
     if (this.viewer.isFlying() && this.viewer.getFlyLook() === 'mouse') this.centreMark.show();
     else this.centreMark.hide();
+  }
+
+  /** On a short window the key list would cover the centre mark: fold it there. */
+  private fitFlyTips(): void {
+    if (!this.viewer.isFlying()) return;
+    // Clear of the ring (12 px radius) with a little room.
+    this.flyTips.fitAbove(this.viewer.getViewCentre().y - 20);
   }
 
   /** Raycast once at the centre (the same pick the hover uses) and tell the mark. */

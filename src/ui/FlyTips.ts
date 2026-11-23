@@ -17,16 +17,12 @@ export function flyTips(look: FlyTipsLook): ReadonlyArray<readonly [string, stri
   return [
     ['W A S D', 'Forward, left, back, right'],
     ['E / Q', 'Up / down'],
-    ['← →', 'Turn left / right'],
-    ['↑ ↓', 'Look up / down'],
-    look === 'mouse'
-      ? ['Mouse', 'Move it to look']
-      : ['Drag', 'Drag to look (click the view to capture the mouse)'],
-    look === 'mouse' ? ['Click', 'Selects what is under the ring'] : ['Click', 'Selects what you click'],
+    ['← → ↑ ↓', 'Turn and look up / down'],
+    look === 'mouse' ? ['Mouse', 'Move it to look'] : ['Drag', 'Drag to look (click to capture the mouse)'],
+    look === 'mouse' ? ['Click', 'Selects under the ring'] : ['Click', 'Selects what you click'],
     ['Right-click', 'Menu (leaves flying)'],
     ['Scroll, X / Z', 'Faster / slower'],
-    ['Shift', 'Hold to go 4× faster'],
-    ['Space', 'Hold for slow and precise'],
+    ['Shift / Space', 'Hold: 4× faster / slow'],
     ['H', 'Hide or show these keys'],
     ['Esc', 'Leaves flying (G too)'],
   ];
@@ -55,6 +51,8 @@ export class FlyTips {
   private toggleBtn: HTMLButtonElement;
   private collapsed: boolean;
   private look: FlyTipsLook = 'mouse';
+  /** Folded for lack of room above the centre of the view (not remembered). */
+  private tight = false;
 
   constructor(parent: HTMLElement, initialSpeed: number) {
     this.collapsed = readCollapsed();
@@ -78,7 +76,7 @@ export class FlyTips {
     this.toggleBtn.type = 'button';
     this.toggleBtn.className = 'fly-tips-toggle';
     this.toggleBtn.addEventListener('click', () => {
-      this.setCollapsed(!this.collapsed);
+      this.toggleCollapsed();
       // Off the button, so Space (slow) cannot press it.
       this.toggleBtn.blur();
     });
@@ -116,7 +114,32 @@ export class FlyTips {
 
   /** Fold to the speed or unfold the keys (the H key). */
   toggleCollapsed(): void {
+    // Folded only for lack of room: asking for the keys shows them.
+    if (this.tight) {
+      this.tight = false;
+      this.applyCollapsed();
+      return;
+    }
     this.setCollapsed(!this.collapsed);
+  }
+
+  /**
+   * Fold the key list, without remembering it, when it would reach below
+   * y — on a short window it would otherwise cover the centre of the view.
+   */
+  fitAbove(y: number): void {
+    this.tight = false;
+    this.applyCollapsed();
+    if (this.collapsed || !this.isShown()) return;
+    if (this.el.getBoundingClientRect().bottom > y) {
+      this.tight = true;
+      this.applyCollapsed();
+    }
+  }
+
+  /** Folded, by choice or for lack of room. */
+  isFolded(): boolean {
+    return this.collapsed || this.tight;
   }
 
   private renderList(): void {
@@ -155,11 +178,12 @@ export class FlyTips {
   }
 
   private applyCollapsed(): void {
-    this.el.classList.toggle('collapsed', this.collapsed);
-    this.listEl.hidden = this.collapsed;
-    this.toggleBtn.textContent = this.collapsed ? 'Keys' : 'Hide';
-    this.toggleBtn.title = this.collapsed ? 'Show the flying keys (H)' : 'Hide the flying keys, keep the speed (H)';
-    this.toggleBtn.setAttribute('aria-expanded', String(!this.collapsed));
+    const folded = this.collapsed || this.tight;
+    this.el.classList.toggle('collapsed', folded);
+    this.listEl.hidden = folded;
+    this.toggleBtn.textContent = folded ? 'Keys' : 'Hide';
+    this.toggleBtn.title = folded ? 'Show the flying keys (H)' : 'Hide the flying keys, keep the speed (H)';
+    this.toggleBtn.setAttribute('aria-expanded', String(!folded));
   }
 }
 

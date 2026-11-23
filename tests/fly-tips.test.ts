@@ -29,7 +29,7 @@ describe('FlyTips', () => {
     tips.show();
     expect(tips.isShown()).toBe(true);
     const text = parent.textContent ?? '';
-    for (const k of ['W A S D', 'E / Q', '← →', '↑ ↓', 'Move it to look', 'Selects what is under the ring', 'Menu (leaves flying)', 'X / Z', 'Shift', 'Space', 'Hide or show these keys', 'Leaves flying']) {
+    for (const k of ['W A S D', 'E / Q', '← → ↑ ↓', 'Move it to look', 'Selects under the ring', 'Menu (leaves flying)', 'X / Z', 'Shift / Space', 'Hide or show these keys', 'Leaves flying']) {
       expect(text).toContain(k);
     }
     expect(text).toContain('5 m/s');
@@ -160,11 +160,11 @@ describe('FlyTips — captured mouse or drag-to-look', () => {
   it('says how to look in each case', () => {
     const tips = new FlyTips(document.body, 5);
     tips.setLook('drag');
-    expect(document.body.textContent).toContain('Drag to look (click the view to capture the mouse)');
+    expect(document.body.textContent).toContain('Drag to look (click to capture the mouse)');
     expect(document.body.textContent).not.toContain('under the ring');
     tips.setLook('mouse');
     expect(document.body.textContent).toContain('Move it to look');
-    expect(document.body.textContent).toContain('Selects what is under the ring');
+    expect(document.body.textContent).toContain('Selects under the ring');
   });
 
   it('H folds and unfolds without the mouse', () => {
@@ -173,5 +173,28 @@ describe('FlyTips — captured mouse or drag-to-look', () => {
     expect(tips.isCollapsed()).toBe(true);
     tips.toggleCollapsed();
     expect(tips.isCollapsed()).toBe(false);
+  });
+});
+
+describe('FlyTips — short windows', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = '';
+  });
+
+  it('folds the keys, without remembering it, when they would reach the centre', () => {
+    const tips = new FlyTips(document.body, 5);
+    tips.show();
+    const el = document.querySelector('.fly-tips') as HTMLElement;
+    el.getBoundingClientRect = () => ({ top: 60, bottom: 330, left: 0, right: 0, width: 0, height: 270, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    tips.fitAbove(400);
+    expect(tips.isFolded()).toBe(false);
+    tips.fitAbove(300);
+    expect(tips.isFolded()).toBe(true);
+    expect(tips.isCollapsed()).toBe(false); // not the remembered choice
+    expect(localStorage.getItem('ifcviewer:fly-tips-collapsed')).toBeNull();
+    // H asks for the keys anyway.
+    tips.toggleCollapsed();
+    expect(tips.isFolded()).toBe(false);
   });
 });
