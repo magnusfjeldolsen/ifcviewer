@@ -20,6 +20,10 @@ import { KeyboardShortcuts } from '../ui/KeyboardShortcuts';
 import { HistoryShortcuts } from '../ui/HistoryShortcuts';
 import { HistoryManager } from './history/HistoryManager';
 import { HelpOverlay } from '../ui/HelpOverlay';
+import { FlyTips, looksTouchOnly } from '../ui/FlyTips';
+import { CentreMark } from '../ui/CentreMark';
+import { elementTagLabel } from '../inspector/elementLabel';
+import { elementOfHit } from '../viewer/ModelBatch';
 import { ContextualActions } from '../ui/ContextualActions';
 import { CookieConsent } from '../services/CookieConsent';
 import { Analytics } from '../services/Analytics';
@@ -33,7 +37,7 @@ import { SelectionManager } from '../inspector/SelectionManager';
 import { MarqueeSelector } from '../inspector/MarqueeSelector';
 import { CandidateResolver } from '../inspector/CandidateResolver';
 import { CandidateInput } from '../inspector/CandidateInput';
-import { elementCandidatesAt } from '../inspector/elementCandidates';
+import { elementCandidatesAt, elementHit } from '../inspector/elementCandidates';
 import { measurementPayload } from '../tools/measurementPicking';
 import { Settings } from '../services/Settings';
 import { InspectorPanel } from '../inspector/InspectorPanel';
@@ -134,6 +138,9 @@ export class App {
   private history: HistoryManager;
   private historyShortcuts!: HistoryShortcuts;
   private helpOverlay!: HelpOverlay;
+  private flyTips: FlyTips;
+  /** Dot in a ring at the centre of the view while flying with the mouse captured. */
+  private centreMark: CentreMark;
   // Bottom-right floating action tray. Currently hosts the Remove clipping
   // button; future contextual buttons (Remove measurements, Show hidden
   // elements, etc.) will register here. Constructed in start().
@@ -396,10 +403,46 @@ ${key}`. */
       icon: '📍',
       title: 'Position marker — read X, Y, Z (P)',
     });
+    this.toolbar.addButton({
+      name: 'fly',
+      icon: '✈',
+      title: 'Fly through the model (G)',
+      toggle: true,
+      onClick: () => this.viewer.toggleFlying(),
+    });
     this.toolbar.addButton({ name: 'fit', icon: '⊡', title: 'Fit View (F)', onClick: () => this.fitSmart() });
     this.toolbar.addButton({ name: 'transparify', icon: '◻', title: 'Transparify All', disabled: true });
     this.toolbar.addButton({ name: 'reset', icon: '↺', title: 'Reset View', onClick: () => this.resetView() });
     this.toolbar.finalize();
+
+    // Flying (#98): the button shows the mode, and the keys show only while
+    // flying. Every way out — the button, G, Esc, Fit, a load — lands here.
+    this.flyTips = new FlyTips(appEl, this.viewer.getFlySpeed());
+    this.centreMark = new CentreMark(appEl, { anchor: this.viewer.getCanvas() });
+    this.viewer.onFlyingChange((flying) => {
+      this.toolbar.setPressed('fly', flying);
+      if (flying) this.flyTips.show();
+      else this.flyTips.hide();
+      this.updateCentreMark();
+      this.fitFlyTips();
+    });
+    window.addEventListener('resize', () => this.fitFlyTips());
+    // What is under the centre mark, looked at only when the flying view has
+    // moved (the viewer throttles it and skips busy frames).
+    this.viewer.onFlyProbe((fast) => this.probeCentreMark(fast));
+    this.viewer.onFlySpeedChange((speed) => this.flyTips.setSpeed(speed));
+    // Captured mouse or drag-to-look (the lock was refused): the tips and the
+    // crosshair say which.
+    this.viewer.onFlyLookChange((look) => {
+      this.flyTips.setLook(look);
+      this.updateCentreMark();
+    });
+    // A touch-only device has no way to fly, so it is not offered — until a
+    // key press shows a keyboard is there after all.
+    if (looksTouchOnly()) {
+      this.toolbar.setHidden('fly', true);
+      window.addEventListener('keydown', () => this.toolbar.setHidden('fly', false), { once: true });
+    }
 
     // Model tree panel
     this.modelTreePanel = new ModelTreePanel(appEl, {
@@ -594,6 +637,25 @@ ${key}`. */
       action: () => this.fitSmart(),
     });
 
+    // Flying (#98). F is Fit View, so the mode key is its neighbour G ("go").
+    this.keyboardShortcuts.register({
+      key: 'g',
+      label: 'Fly through the model',
+      plainOnly: true,
+      action: () => this.viewer.toggleFlying(),
+    });
+
+    // While flying the mouse is captured, so the tips' Hide button cannot be
+    // clicked: H does the same. Outside flying the key does nothing.
+    this.keyboardShortcuts.register({
+      key: 'h',
+      label: 'Show / hide the flying keys',
+      plainOnly: true,
+      action: () => {
+        if (this.viewer.isFlying()) this.flyTips.toggleCollapsed();
+      },
+    });
+
     this.keyboardShortcuts.register({
       key: 'Escape',
       label: 'Cancel',
@@ -602,6 +664,11 @@ ${key}`. */
           this.viewer.cancelPivotPicking();
         } else if (this.toolManager.getActiveTool() !== null) {
           this.toolManager.abort();
+        } else if (this.viewer.isFlying()) {
+          // An open menu or the help card closes on this Escape by itself
+          // (their listeners run after this one); leaving flying waits for
+          // the next, so one press never does two things.
+          if (!this.contextMenu?.isOpen() && !this.helpOverlay.isOpen()) this.viewer.exitFlying();
         } else {
           // No tool active, no pivot picking: clear both selections. A
           // measurement selection is as much "a thing Escape should let go of"
@@ -615,6 +682,8 @@ ${key}`. */
     // Help overlay — ? button at top-left, also toggled by ? key
     const appEl = document.getElementById('app')!;
     this.helpOverlay = new HelpOverlay(appEl, this.keyboardShortcuts);
+    // An open menu or help card has the keyboard; fly keys wait for it.
+    this.viewer.setFlyKeysSuspended(() => !!this.contextMenu?.isOpen() || this.helpOverlay.isOpen());
 
     this.keyboardShortcuts.register({
       key: '?',
@@ -1943,6 +2012,52 @@ ${parameter.key}`);
       '.contextual-action[data-action-id="show-hidden"] .contextual-action-label',
     );
     if (btn) btn.textContent = this.showHiddenLabel();
+  }
+
+  /**
+   * The centre mark shows only while flying with the mouse captured. In the
+   * drag-to-look fallback clicks land under the cursor, so a mark in the
+   * middle would point at the wrong place: it is hidden there.
+   */
+  private updateCentreMark(): void {
+    if (this.viewer.isFlying() && this.viewer.getFlyLook() === 'mouse') this.centreMark.show();
+    else this.centreMark.hide();
+  }
+
+  /** On a short window the key list would cover the centre mark: fold it there. */
+  private fitFlyTips(): void {
+    if (!this.viewer.isFlying()) return;
+    // Clear of the ring (12 px radius) with a little room.
+    this.flyTips.fitAbove(this.viewer.getViewCentre().y - 20);
+  }
+
+  /** Raycast once at the centre (the same pick the hover uses) and tell the mark. */
+  private probeCentreMark(fast: boolean): void {
+    if (!this.centreMark.isShown()) return;
+    const canvas = this.viewer.getCanvas();
+    const rect = canvas.getBoundingClientRect();
+    const centre = this.viewer.getViewCentre();
+    const [candidate] = elementCandidatesAt(
+      { camera: this.viewer.getCamera(), scene: this.viewer.getScene(), renderer: this.viewer.getRenderer(), canvas },
+      { x: centre.x - rect.left, y: centre.y - rect.top },
+    );
+    const hit = candidate ? elementHit(candidate) : null;
+    const element = hit ? elementOfHit(hit) : null;
+    this.centreMark.setMoving(fast);
+    if (!element) {
+      this.centreMark.setTarget(null);
+      return;
+    }
+    const { modelId, expressId } = element;
+    this.centreMark.setTarget({
+      key: `${modelId}:${expressId}`,
+      // Once per rested element; the repository memoises the read.
+      name: async (signal) => {
+        if (!this.propertyRepository) return null;
+        const props = await this.propertyRepository.get(modelId, expressId);
+        return signal.aborted ? null : elementTagLabel(props.identity);
+      },
+    });
   }
 
   private fitSmart(): void {

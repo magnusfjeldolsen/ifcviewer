@@ -54,6 +54,7 @@ interface Env {
   selectionManager: SelectionManager;
   toolState: { active: Tool | null };
   pivotState: { picking: boolean };
+  flyingState: { flying: boolean };
   controlsState: { enabled: boolean };
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -84,6 +85,7 @@ function makeEnv(): Env {
 
   const toolState = { active: null as Tool | null };
   const pivotState = { picking: false };
+  const flyingState = { flying: false };
   const controlsState = { enabled: true };
 
   const viewer = {
@@ -92,6 +94,7 @@ function makeEnv(): Env {
     getCamera: () => camera,
     getRenderer: () => renderer as unknown as THREE.WebGLRenderer,
     isPivotPicking: () => pivotState.picking,
+    isFlying: () => flyingState.flying,
     setControlsEnabled: (enabled: boolean) => {
       controlsState.enabled = enabled;
     },
@@ -121,6 +124,7 @@ function makeEnv(): Env {
     selectionManager,
     toolState,
     pivotState,
+    flyingState,
     controlsState,
     scene,
     camera,
@@ -201,6 +205,15 @@ describe('MarqueeSelector — pointer gating', () => {
 
   it('bails silently when a tool is active', () => {
     env.toolState.active = { name: 'measurement' } as Tool;
+    pointerDown(env.canvas, 50, 50, { altKey: true });
+    pointerMove(env.canvas, 100, 100);
+    pointerUp(env.canvas, 100, 100);
+    expect(env.marqueeRoot.querySelector('.marquee-window, .marquee-crossing')).toBeNull();
+    expect(env.applyManyCalls).toEqual([]);
+  });
+
+  it('bails silently while flying (no cursor to drag a box with)', () => {
+    env.flyingState.flying = true;
     pointerDown(env.canvas, 50, 50, { altKey: true });
     pointerMove(env.canvas, 100, 100);
     pointerUp(env.canvas, 100, 100);

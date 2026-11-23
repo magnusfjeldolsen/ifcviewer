@@ -235,6 +235,22 @@ describe('ClippingTool — the handle drag owns the gesture', () => {
     pointerDown(5, 5);
     expect(navigation).toHaveBeenCalledTimes(1);
   });
+
+  it('with the mouse captured (flying) the handle is not dragged and the press passes through', () => {
+    const capture = vi.fn(() => {
+      throw new DOMException('locked', 'InvalidStateError');
+    });
+    canvas.setPointerCapture = capture;
+    Object.defineProperty(document, 'pointerLockElement', { get: () => canvas, configurable: true });
+    try {
+      pointerDown(50, 50); // the centre press lands on the handle
+      expect(capture).not.toHaveBeenCalled();
+      expect(navigation).toHaveBeenCalledTimes(1); // selection and the rest still see the click
+      expect(canvas.style.cursor).not.toBe('ns-resize');
+    } finally {
+      delete (document as unknown as { pointerLockElement?: unknown }).pointerLockElement;
+    }
+  });
 });
 
 /**

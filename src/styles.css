@@ -3021,3 +3021,193 @@ html, body {
     width: auto;
   }
 }
+
+/* Flying (#98): the keys, only while flying. Under the toolbar, in the gap
+   between the Models panel (left, 252px) and the Parameters panel / colour
+   legend (right, 352px), so it covers neither at 1024px and up. */
+.fly-tips {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 228px;
+  padding: 8px 10px;
+  background: rgba(17, 24, 39, 0.78);
+  color: #f9fafb;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  font-size: 12px;
+  line-height: 1.35;
+  z-index: 10;
+  pointer-events: none;
+  user-select: none;
+}
+
+.fly-tips[hidden] {
+  display: none;
+}
+
+.fly-tips.collapsed {
+  width: auto;
+  padding: 4px 6px 4px 10px;
+}
+
+.fly-tips-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fly-tips-title {
+  font-weight: 600;
+}
+
+.fly-tips-speed {
+  font-variant-numeric: tabular-nums;
+  margin-right: auto;
+}
+
+.fly-tips-toggle {
+  pointer-events: auto;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.15);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fly-tips-toggle:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.fly-tips-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 8px;
+  margin: 8px 0 0;
+}
+
+.fly-tips-list[hidden] {
+  display: none;
+}
+
+.fly-tips-list dt,
+.fly-tips-list dd {
+  margin: 0;
+}
+
+.fly-tips-list kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  white-space: nowrap;
+}
+
+/* A hidden toolbar button (fly, on a touch-only device): the flex display
+   above would otherwise override the attribute. */
+.toolbar-btn[hidden] {
+  display: none;
+}
+
+/* Below 1024px the gap between the Models panel and the Parameters panel /
+   legend is too narrow for the key list: fold to the speed alone, just right
+   of the Models panel, and sit under any panel that still reaches it. */
+@media (max-width: 1023px) {
+  .fly-tips {
+    left: 264px;
+    transform: none;
+    width: auto;
+    padding: 4px 10px;
+    z-index: 9;
+  }
+
+  .fly-tips-list,
+  .fly-tips-toggle {
+    display: none !important;
+  }
+}
+
+
+/* The centre mark (CentreMark.ts): a dot in a ring at the centre of the 3D
+   view, where clicks land while the mouse is captured. Positioned by script
+   on the canvas centre; the ring turns blue over an element. */
+.centre-mark {
+  position: fixed;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 9;
+}
+
+.centre-mark[hidden] {
+  display: none;
+}
+
+.centre-mark-svg {
+  position: absolute;
+  left: -12px;
+  top: -12px;
+  overflow: visible;
+}
+
+.centre-mark-ring-edge {
+  fill: none;
+  stroke: rgba(17, 24, 39, 0.55);
+  stroke-width: 3;
+  transition: stroke-width 120ms ease-out;
+}
+
+.centre-mark-ring {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  transition: stroke 120ms ease-out, stroke-width 120ms ease-out;
+}
+
+.centre-mark-dot {
+  fill: #fff;
+  stroke: rgba(17, 24, 39, 0.55);
+  stroke-width: 1;
+}
+
+.centre-mark.on-target .centre-mark-ring {
+  stroke: #3b82f6;
+  stroke-width: 2.5;
+}
+
+.centre-mark.on-target .centre-mark-ring-edge {
+  stroke-width: 4;
+}
+
+.centre-mark-tag {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  transform: translateX(-50%);
+  max-width: 320px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(17, 24, 39, 0.8);
+  color: #f9fafb;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.centre-mark-tag[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .centre-mark-ring,
+  .centre-mark-ring-edge {
+    transition: none;
+  }
+}
