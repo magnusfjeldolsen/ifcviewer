@@ -202,9 +202,10 @@ describe('value columns', () => {
     expect(columnIdsWithValue(c, 'nope')).toEqual([]);
   });
 
-  it('compares numbers exactly, and never a number with text', () => {
+  it('compares numbers as they show, and never a number with text', () => {
     const c = build('Q.N', [props(1, [row('Q.N', single(0.1 + 0.2))]), props(2, [row('Q.N', single(0.3))])]);
-    expect(columnRowsWithValue(c, 0.3)).toEqual([1]);
+    // 0.1 + 0.2 shows as 0.3, so it is the same value as 0.3 (#114).
+    expect(columnRowsWithValue(c, 0.3)).toEqual([0, 1]);
     expect(columnRowsWithValue(c, '0.3')).toEqual([]);
   });
 });
@@ -363,5 +364,50 @@ describe('column builds sharing one read', () => {
     expect(old.msg).toMatchObject({ type: 'error', message: 'Superseded by a newer request' });
     if (fresh.msg.type !== 'column') throw new Error('expected a column');
     expect(fresh.msg.column.count).toBe(2);
+  });
+});
+
+describe('numbers that show the same are one value (#114)', () => {
+  // Unit conversion leaves 16.7083 ft a hair apart on different elements.
+  const spans = [16.7083, 16.708300000001, 16.7083, 22.25].map((v, i) =>
+    props(i + 1, [row('P.Span', single(v), { unit: 'ft', unitKey: 'conv:foot' })]),
+  );
+
+  it('counts them as one line, in the description and in the column alike', () => {
+    const fold = new ParameterFold();
+    for (const e of spans) fold.add(e);
+    const described = fold.result('m', 4).parameters[0].values!;
+    expect(described.map((v) => [v.value, v.count])).toEqual([
+      [16.7083, 3],
+      [22.25, 1],
+    ]);
+    expect(columnValueCounts(build('P.Span', spans))).toEqual(described);
+  });
+
+  it('keeps them as one line in a mixed-unit column, and apart by unit', () => {
+    const mixed = [
+      props(1, [row('P.Span', single(3), { unit: 'mm', unitKey: 'si:mm' })]),
+      props(2, [row('P.Span', single(3.0000000001), { unit: 'mm', unitKey: 'si:mm' })]),
+      props(3, [row('P.Span', single(3), { unit: 'm', unitKey: 'si:m' })]),
+    ];
+    const counts = columnValueCounts(build('P.Span', mixed));
+    expect(counts.map((v) => [v.value, v.count, v.unit?.key])).toEqual([
+      [3, 2, 'si:mm'],
+      [3, 1, 'si:m'],
+    ]);
+  });
+
+  it('merges them in a column that also holds text', () => {
+    const withText = [...spans, props(9, [row('P.Span', single('n/a'))])];
+    const counts = columnValueCounts(build('P.Span', withText));
+    expect(counts.find((v) => v.value === 16.7083)?.count).toBe(3);
+  });
+
+  it('picks all of them: the column, and the matcher select-similar uses', () => {
+    const column = withIds(build('P.Span', spans), [1, 2, 3, 4]);
+    expect(columnIdsWithValue(column, 16.7083)).toEqual([1, 2, 3]);
+    expect(columnIdsWithValue(column, 16.7083, 'conv:foot')).toEqual([1, 2, 3]);
+    const target = { kind: 'parameter-value' as const, value: 16.7083 };
+    expect(spans.map((e) => elementMatches(e, { path: 'P.Span' }, target))).toEqual([true, true, true, false]);
   });
 });

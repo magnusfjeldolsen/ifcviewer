@@ -38,6 +38,7 @@
 
 import { formatNumber } from './format';
 import type { ParameterColumn } from './parameterColumn';
+import { shownNumber } from './parameterFold';
 import { isNotStated, type UnitRef } from './units';
 import type { ParameterValue } from './types';
 import {
@@ -153,14 +154,6 @@ function globalUnitKey(modelId: string, unit: UnitRef): string {
 /** A number that can be coloured: not NaN (no value) and not infinite. */
 function hasNumber(v: number): boolean {
   return Number.isFinite(v);
-}
-
-/**
- * A number as the legend shows it, and the number that text stands for:
- * values that show the same (3000 and 3000.0000001) are one value here.
- */
-function shownNumber(v: number): number {
-  return Number.isInteger(v) ? v : Number(v.toPrecision(6));
 }
 
 /** Decide how to colour `inputs` and what every element gets. */

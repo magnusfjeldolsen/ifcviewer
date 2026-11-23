@@ -29,7 +29,7 @@
  * readers.
  */
 
-import { parameterValueOf, sortValueCounts, type ValueCount } from './parameterFold';
+import { parameterValueOf, shownNumber, sortValueCounts, type ValueCount } from './parameterFold';
 import type { ElementProperties, ParameterValue } from './types';
 import type { UnitCount, UnitRef } from './units';
 
@@ -189,7 +189,13 @@ export function columnValueCounts(c: ColumnData): ValueCount[] {
       const code = c.codes[i];
       if (code >= 0) n[code]++;
     }
-    return sortValueCounts(c.dictionary.map((value, i) => ({ value, count: n[i] })));
+    // Numbers that show alike are one value, whatever code they were given.
+    const merged = new Map<ParameterValue, number>();
+    c.dictionary.forEach((v, i) => {
+      const k = typeof v === 'number' ? shownNumber(v) : v;
+      merged.set(k, (merged.get(k) ?? 0) + n[i]);
+    });
+    return sortValueCounts([...merged.entries()].map(([value, count]) => ({ value, count })));
   }
   if (c.unitIndex) {
     const unitIndex = c.unitIndex;
@@ -198,7 +204,8 @@ export function columnValueCounts(c: ColumnData): ValueCount[] {
       const v = c.values[i];
       if (Number.isNaN(v)) continue;
       const counts = perUnit[unitIndex[i]];
-      counts.set(v, (counts.get(v) ?? 0) + 1);
+      const shown = shownNumber(v);
+      counts.set(shown, (counts.get(shown) ?? 0) + 1);
     }
     return sortValueCounts(
       perUnit.flatMap((counts, u) => [...counts.entries()].map(([value, count]) => ({ value, count, unit: c.units[u] }))),
@@ -207,7 +214,10 @@ export function columnValueCounts(c: ColumnData): ValueCount[] {
   const counts = new Map<number, number>();
   for (let i = 0; i < c.values.length; i++) {
     const v = c.values[i];
-    if (!Number.isNaN(v)) counts.set(v, (counts.get(v) ?? 0) + 1);
+    if (!Number.isNaN(v)) {
+      const shown = shownNumber(v);
+      counts.set(shown, (counts.get(shown) ?? 0) + 1);
+    }
   }
   return sortValueCounts([...counts.entries()].map(([value, count]) => ({ value, count })));
 }
@@ -228,15 +238,21 @@ export function columnRowsWithValue(c: ColumnData, value: ParameterValue, unitKe
       if (only < 0) return rows;
     }
     const unitIndex = c.unitIndex;
+    const shown = shownNumber(value);
     for (let i = 0; i < c.values.length; i++) {
-      if (c.values[i] !== value) continue;
+      if (shownNumber(c.values[i]) !== shown) continue;
       if (only >= 0 && (unitIndex ? unitIndex[i] : 0) !== only) continue;
       rows.push(i);
     }
     return rows;
   }
-  const code = c.dictionary.indexOf(value);
-  if (code < 0) return rows;
+  // Every code whose value shows the same as `value` (numbers by how they show).
+  const want = typeof value === 'number' ? shownNumber(value) : value;
+  const codes = new Set<number>();
+  c.dictionary.forEach((v, i) => {
+    if ((typeof v === 'number' ? shownNumber(v) : v) === want) codes.add(i);
+  });
+  if (codes.size === 0) return rows;
   // A number among text, asked for in one unit: only rows in that unit.
   let only = -1;
   if (unitKey !== undefined && typeof value === 'number' && c.units) {
@@ -245,7 +261,7 @@ export function columnRowsWithValue(c: ColumnData, value: ParameterValue, unitKe
   }
   const unitIndex = c.unitIndex ?? null;
   for (let i = 0; i < c.codes.length; i++) {
-    if (c.codes[i] !== code) continue;
+    if (!codes.has(c.codes[i])) continue;
     if (only >= 0 && (unitIndex ? unitIndex[i] : 0) !== only) continue;
     rows.push(i);
   }
