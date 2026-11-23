@@ -480,6 +480,8 @@ describe('flying — pointer lock', () => {
   const grant = (): void => {
     lockEl = canvas;
     lockChanged();
+    // The first movement after a grant is dropped (it can be a spurious jump).
+    mouse('pointermove', { movementX: 1 });
   };
 
   beforeEach(() => {
@@ -697,6 +699,138 @@ describe('flying — pointer lock', () => {
     expect(viewer.getFlyLook()).toBe('drag');
   });
 
+  it('a lock granted (promise) after flying was left is released at once', async () => {
+    let resolveLock!: () => void;
+    requestLock.mockImplementation(() => new Promise<void>((r) => (resolveLock = r)));
+    viewer.enterFlying();
+    viewer.toggleFlying(); // G twice quickly: left while the request is pending
+    expect(viewer.isFlying()).toBe(false);
+    lockEl = canvas; // the browser grants it anyway
+    resolveLock();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(exitLock).toHaveBeenCalled();
+    expect(lockEl).toBeNull();
+    expect(viewer.getControlsMode()).toBe('user');
+    expect(internals(viewer).controls.enabled).toBe(true);
+  });
+
+  it('a lock granted (event) after flying was left is released at once', () => {
+    requestLock.mockImplementation(() => undefined); // older API: no promise
+    viewer.enterFlying();
+    viewer.fitToBox(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 1, 1))); // Fit during the pending window
+    lockEl = canvas;
+    lockChanged();
+    expect(exitLock).toHaveBeenCalled();
+    expect(lockEl).toBeNull();
+    expect(viewer.isFlying()).toBe(false);
+    expect(internals(viewer).controls.enabled).toBe(true);
+  });
+
+  it('a refused raw-movement lock does not flash drag mode while the plain retry runs', async () => {
+    const looks: string[] = [];
+    viewer.onFlyLookChange((l) => looks.push(l));
+    requestLock.mockImplementationOnce(() => {
+      queueMicrotask(() => document.dispatchEvent(new Event('pointerlockerror')));
+      return Promise.reject(new Error('NotSupportedError'));
+    });
+    requestLock.mockImplementationOnce(() => new Promise<void>(() => {})); // still pending
+    viewer.enterFlying();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(requestLock).toHaveBeenCalledTimes(2);
+    expect(viewer.getFlyLook()).toBe('mouse');
+    expect(looks).toEqual(['mouse']);
+  });
+
+  it('drops the first movement after a grant, and caps a single huge one', () => {
+    viewer.enterFlying();
+    lockEl = canvas;
+    lockChanged();
+    const q0 = pose().q;
+    mouse('pointermove', { movementX: 3000 }); // spurious jump right after the grant
+    expect(pose().q.angleTo(q0)).toBeLessThan(1e-6);
+    const q1 = pose().q;
+    mouse('pointermove', { movementX: 5000 }); // a glitch later on: capped
+    expect(pose().q.angleTo(q1)).toBeCloseTo((250 * Math.PI) / 600, 4);
+  });
+
+  it('releasing the left button after the view turned is not a click at the centre', () => {
+    viewer.enterFlying();
+    grant();
+    const ups: number[] = [];
+    let clicks = 0;
+    const onUp = (e: PointerEvent): void => {
+      ups.push(e.clientX);
+    };
+    const onClick = (): void => {
+      clicks++;
+    };
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('click', onClick);
+    try {
+      mouse('pointerdown', { button: 0 });
+      mouse('pointermove', { movementX: 20 });
+      mouse('pointerup', { button: 0 });
+      mouse('click', { button: 0 });
+      expect(clicks).toBe(0);
+      expect(Math.abs(ups[0] - 400)).toBeGreaterThan(10); // downstream sees a drag
+      // A still press and release is still a click at the centre.
+      mouse('pointerdown', { button: 0 });
+      mouse('pointerup', { button: 0 });
+      mouse('click', { button: 0 });
+      expect(clicks).toBe(1);
+      expect(ups[1]).toBe(400);
+    } finally {
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('click', onClick);
+    }
+  });
+
+  it('releasing the right button after the view turned opens no menu and keeps flying', () => {
+    viewer.enterFlying();
+    grant();
+    let menus = 0;
+    const onMenu = (): void => {
+      menus++;
+    };
+    canvas.addEventListener('contextmenu', onMenu);
+    try {
+      mouse('pointerdown', { button: 2 });
+      mouse('pointermove', { movementX: -15, movementY: 10 });
+      mouse('pointerup', { button: 2 });
+      const native = mouse('contextmenu', { button: 2 }); // Firefox sends one while locked
+      expect(menus).toBe(0);
+      expect(native.defaultPrevented).toBe(true);
+      expect(viewer.isFlying()).toBe(true);
+    } finally {
+      canvas.removeEventListener('contextmenu', onMenu);
+    }
+  });
+
+  it("swallows the browser's own contextmenu right after ours", () => {
+    viewer.enterFlying();
+    grant();
+    const at: Array<[number, number]> = [];
+    const onMenu = (e: MouseEvent): void => {
+      at.push([e.clientX, e.clientY]);
+    };
+    canvas.addEventListener('contextmenu', onMenu);
+    try {
+      mouse('pointerdown', { button: 2 });
+      mouse('pointerup', { button: 2 });
+      expect(at).toEqual([[400, 300]]);
+      expect(viewer.isFlying()).toBe(false);
+      // Firefox on Windows: its own contextmenu on mouseup, at the frozen cursor.
+      const late = mouse('contextmenu', { button: 2, clientX: 5, clientY: 7 });
+      expect(late.defaultPrevented).toBe(true);
+      expect(at).toEqual([[400, 300]]);
+      // Only that one: the next right-click is the page's own again.
+      mouse('contextmenu', { button: 2, clientX: 9, clientY: 9 });
+      expect(at).toEqual([[400, 300], [9, 9]]);
+    } finally {
+      canvas.removeEventListener('contextmenu', onMenu);
+    }
+  });
   it('the mouse wheel still sets the speed while captured', () => {
     viewer.enterFlying();
     grant();
@@ -760,6 +894,7 @@ describe('flying — looking at what is under the centre', () => {
     viewer.enterFlying();
     lockEl = canvas;
     document.dispatchEvent(new Event('pointerlockchange'));
+    look(1); // the first movement after a grant is dropped
   };
   const look = (dx: number): void => {
     const e = new PointerEvent('pointermove', { bubbles: true, pointerId: 1 });

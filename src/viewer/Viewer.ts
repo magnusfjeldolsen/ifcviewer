@@ -47,6 +47,26 @@ const LOCKED_REMAP_TYPES = [
   'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu',
 ] as const;
 
+/**
+ * Largest look movement one mouse event may carry, px. A fast real flick
+ * gives well under this per event; anything larger is a glitch (Firefox and
+ * the plain lock report occasional jumps of thousands of pixels).
+ */
+const MAX_LOOK_DELTA_PX = 250;
+
+function clampLook(delta: number): number {
+  return Math.max(-MAX_LOOK_DELTA_PX, Math.min(MAX_LOOK_DELTA_PX, delta));
+}
+
+/**
+ * How far a release is moved off the centre after a captured press that
+ * turned the view, so every click-vs-drag check downstream sees a drag, px.
+ */
+const LOCKED_DRAG_OFFSET_PX = 50;
+
+/** How long the browser's own contextmenu is swallowed after ours, ms. */
+const MENU_SWALLOW_MS = 600;
+
 /** What is under the centre is looked at no more often than this while flying, ms. */
 const PROBE_INTERVAL_MS = 100;
 /** ...and not on a frame that has already taken this long, ms. */
@@ -165,6 +185,15 @@ export class Viewer {
   private flyProbeListeners: Array<(fast: boolean) => void> = [];
   /** OrbitControls' `enabled` before the lock switched it off. */
   private controlsEnabledBeforeLock = true;
+  /** The lock request returned a promise, so 'pointerlockerror' is not needed. */
+  private lockByPromise = false;
+  /** Drop the next look movement: the first after a grant can be a spurious jump. */
+  private dropNextLookMove = false;
+  /** A button held while captured, and how far the look has turned since. */
+  private lockPress: { button: number; travel: number } | null = null;
+  /** The last captured press turned the view before release: a drag, not a click. */
+  private lockPressDragged = false;
+  private swallowMenuTimer: ReturnType<typeof setTimeout> | null = null;
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -297,6 +326,8 @@ export class Viewer {
     this.setupNavigation();
 
     window.addEventListener('resize', this.onResize);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    document.addEventListener('pointerlockerror', this.onPointerLockError);
   }
 
   getScene(): THREE.Scene {
@@ -443,8 +474,6 @@ export class Viewer {
     window.addEventListener('keyup', this.onFlyKeyUp, { capture: true });
     window.addEventListener('blur', this.onFlyBlur);
     document.addEventListener('visibilitychange', this.onFlyBlur);
-    document.addEventListener('pointerlockchange', this.onPointerLockChange);
-    document.addEventListener('pointerlockerror', this.onPointerLockError);
     this.needsRender = true;
     for (const cb of this.flyingListeners) cb(true);
     // G and the fly button are user gestures, which pointer lock needs.
@@ -504,22 +533,50 @@ export class Viewer {
       this.flyLockPending = false;
       this.notifyFlyLook();
     };
+    // A grant that arrives after flying was left (G twice quickly, Fit or a
+    // load while the request was pending) is let go at once.
+    const granted = (): void => this.releaseStrayLock();
     // Raw mouse counts where the platform has them, so the OS pointer
     // acceleration does not make turning uneven; otherwise a plain lock.
+    this.lockByPromise = false;
     const first = attempt({ unadjustedMovement: true });
     if (first && typeof first.then === 'function') {
-      first.catch(() => {
+      // The promises say how it went; 'pointerlockerror' for the refused
+      // first try must not flash drag mode while the plain retry runs.
+      this.lockByPromise = true;
+      first.then(granted, () => {
         if (!this.isFlying() || this.flyLocked) return;
         const second = attempt();
-        if (second && typeof second.then === 'function') second.catch(refused);
+        if (second && typeof second.then === 'function') second.then(granted, refused);
+        else refused();
       });
     }
   }
 
+  /** The canvas holds the lock but flying is over: release it. */
+  private releaseStrayLock(): void {
+    if (!this.isFlying() && document.pointerLockElement === this.canvas) document.exitPointerLock?.();
+  }
+
+  /**
+   * Listens for the whole life of the viewer, not only while flying: a lock
+   * asked for while flying can be granted after flying has ended, and must
+   * then be released rather than leave a hidden, captured cursor in orbit.
+   */
   private onPointerLockChange = (): void => {
     const locked = document.pointerLockElement === this.canvas;
     if (locked) {
+      if (!this.isFlying()) {
+        this.releaseStrayLock();
+        return;
+      }
+      if (this.flyLocked) return;
       this.flyLocked = true;
+      // The first movement after a grant can be a spurious jump (seen with
+      // the plain lock and in Firefox): it is dropped.
+      this.dropNextLookMove = true;
+      this.lockPress = null;
+      this.lockPressDragged = false;
       this.flyLockPending = false;
       // A drag-to-look in progress ends: from here the mouse looks by itself.
       this.endRotateGesture();
@@ -548,7 +605,7 @@ export class Viewer {
   }
 
   private onPointerLockError = (): void => {
-    if (!this.isFlying() || this.flyLocked) return;
+    if (this.lockByPromise || !this.isFlying() || this.flyLocked) return;
     this.flyLockPending = false;
     this.notifyFlyLook();
   };
@@ -586,12 +643,37 @@ export class Viewer {
     }
     e.stopImmediatePropagation();
     const m = e as MouseEvent;
+
+    // A press held while the view turned is a drag, as with a cursor: no
+    // click at the centre, and no menu, after it.
+    if (e.type === 'pointerdown') {
+      this.lockPress = { button: m.button, travel: 0 };
+      this.lockPressDragged = false;
+    } else if (e.type === 'pointermove' && this.lockPress) {
+      this.lockPress.travel += Math.hypot(clampLook(m.movementX || 0), clampLook(m.movementY || 0));
+    }
+    const dragged = this.lockPress !== null && this.lockPress.travel >= DRAG_THRESHOLD;
+    if (e.type === 'pointerup') {
+      this.lockPressDragged = dragged;
+      this.lockPress = null;
+    }
+    if (this.lockPressDragged && (e.type === 'click' || e.type === 'auxclick' || e.type === 'contextmenu')) {
+      // The browser's own click or menu after a drag: not a click at all.
+      e.preventDefault();
+      return;
+    }
+    // Consumers judge click against drag by how far the pointer went between
+    // press and release; the cursor is frozen, so tell them through the
+    // release position how far the look travelled.
+    const release = e.type === 'pointerup' || e.type === 'mouseup';
+    const offset = release && this.lockPressDragged ? LOCKED_DRAG_OFFSET_PX : 0;
+
     const { x, y } = this.viewCentre();
     const init: PointerEventInit = {
       bubbles: m.bubbles,
       cancelable: m.cancelable,
       composed: m.composed,
-      clientX: x,
+      clientX: x + offset,
       clientY: y,
       screenX: m.screenX,
       screenY: m.screenY,
@@ -629,8 +711,8 @@ export class Viewer {
     if (clone.defaultPrevented) e.preventDefault();
     // Chrome sends no 'contextmenu' while the pointer is locked, so a right
     // button released is the menu: send one at the crosshair ourselves.
-    if (e.type === 'pointerup' && m.button === 2) {
-      const menu = new MouseEvent('contextmenu', { ...init, button: 2, buttons: 0 });
+    if (e.type === 'pointerup' && m.button === 2 && !this.lockPressDragged) {
+      const menu = new MouseEvent('contextmenu', { ...init, clientX: x, button: 2, buttons: 0 });
       this.remapClone = menu;
       try {
         this.canvas.dispatchEvent(menu);
@@ -638,6 +720,10 @@ export class Viewer {
         this.remapClone = null;
       }
       this.exitFlying();
+      // Some browsers (Firefox on Windows) send their own contextmenu after
+      // the release, even while locked; by then flying is over and it would
+      // open the menu a second time at the frozen cursor. Swallow it.
+      this.swallowNextMenu();
       return;
     }
     if (e.type === 'contextmenu') {
@@ -647,6 +733,26 @@ export class Viewer {
       this.exitFlying();
     }
   };
+
+  /** Eat the browser's own contextmenu for a moment after we opened the menu ourselves. */
+  private swallowNextMenu(): void {
+    this.stopSwallowingMenu();
+    window.addEventListener('contextmenu', this.swallowMenu, { capture: true });
+    this.swallowMenuTimer = setTimeout(() => this.stopSwallowingMenu(), MENU_SWALLOW_MS);
+  }
+
+  private swallowMenu = (e: Event): void => {
+    if (e === this.remapClone) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    this.stopSwallowingMenu();
+  };
+
+  private stopSwallowingMenu(): void {
+    window.removeEventListener('contextmenu', this.swallowMenu, { capture: true });
+    if (this.swallowMenuTimer !== null) clearTimeout(this.swallowMenuTimer);
+    this.swallowMenuTimer = null;
+  }
 
   /**
    * Hear when it is time to look at what is under the centre of the view
@@ -711,10 +817,12 @@ export class Viewer {
     window.removeEventListener('keyup', this.onFlyKeyUp, { capture: true });
     window.removeEventListener('blur', this.onFlyBlur);
     document.removeEventListener('visibilitychange', this.onFlyBlur);
-    // Listeners off first, so releasing the lock below does not call back in.
-    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
-    document.removeEventListener('pointerlockerror', this.onPointerLockError);
+    // Lock state off first, so the 'pointerlockchange' from releasing the
+    // lock below finds nothing left to do. The lock listeners themselves stay:
+    // a request still pending is released when (if) it is granted.
     this.releaseLockState();
+    this.lockPress = null;
+    this.lockPressDragged = false;
     this.flyLockPending = false;
     if (document.pointerLockElement === this.canvas) document.exitPointerLock?.();
     this.lastFlyLook = null;
@@ -981,6 +1089,10 @@ export class Viewer {
       cancelAnimationFrame(this.animationId);
     }
     this.exitFlying();
+    this.releaseStrayLock();
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    document.removeEventListener('pointerlockerror', this.onPointerLockError);
+    this.stopSwallowingMenu();
     window.removeEventListener('resize', this.onResize);
     this.canvas.removeEventListener('click', this.boundPivotClick);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
@@ -1135,9 +1247,13 @@ export class Viewer {
     if (this.flyLocked && this.isFlying()) {
       // Captured mouse: its movement turns the view, no button needed. The
       // position is the crosshair's and never changes, so it is not recorded.
-      const dx = e.movementX || 0;
-      const dy = e.movementY || 0;
+      const dx = clampLook(e.movementX || 0);
+      const dy = clampLook(e.movementY || 0);
       if (dx === 0 && dy === 0) return;
+      if (this.dropNextLookMove) {
+        this.dropNextLookMove = false;
+        return;
+      }
       const height = this.canvas.clientHeight || this.canvas.height || 1;
       this.fly.look(this.camera, dx, dy, height);
       this.syncFlyAnchor();
@@ -1172,7 +1288,8 @@ export class Viewer {
       // Rotate from here, so crossing the threshold doesn't jump the view.
       gesture.x = e.clientX;
       gesture.y = e.clientY;
-      this.canvas.setPointerCapture?.(e.pointerId);
+      // A locked pointer refuses capture with an exception (and needs none).
+      if (document.pointerLockElement !== this.canvas) this.canvas.setPointerCapture?.(e.pointerId);
       return;
     }
 
