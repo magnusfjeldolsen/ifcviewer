@@ -152,6 +152,9 @@ export class MarqueeSelector {
     // Bail when any tool or pivot picking owns the canvas.
     if (this.deps.toolManager.getActiveTool() !== null) return;
     if (this.deps.viewer.isPivotPicking()) return;
+    // No marquee while flying: there is no cursor to drag a box with, and in
+    // the drag-to-look fallback the drag belongs to looking.
+    if (this.deps.viewer.isFlying?.()) return;
 
     // Already dragging (pointer-capture lost?): cancel and start fresh.
     if (this.state.kind !== 'idle') {

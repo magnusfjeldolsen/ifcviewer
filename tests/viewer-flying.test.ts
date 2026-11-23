@@ -468,3 +468,209 @@ describe('flying — keys', () => {
     expect(render).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('flying — pointer lock', () => {
+  let lockEl: Element | null;
+  let requestLock: ReturnType<typeof vi.fn>;
+  let exitLock: ReturnType<typeof vi.fn>;
+
+  const lockChanged = (): void => {
+    document.dispatchEvent(new Event('pointerlockchange'));
+  };
+  const grant = (): void => {
+    lockEl = canvas;
+    lockChanged();
+  };
+
+  beforeEach(() => {
+    lockEl = null;
+    Object.defineProperty(document, 'pointerLockElement', { get: () => lockEl, configurable: true });
+    requestLock = vi.fn(() => Promise.resolve());
+    exitLock = vi.fn(() => {
+      lockEl = null;
+      lockChanged();
+    });
+    (canvas as unknown as { requestPointerLock: unknown }).requestPointerLock = requestLock;
+    (document as unknown as { exitPointerLock: unknown }).exitPointerLock = exitLock;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 600, right: 800, bottom: 600, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    Object.defineProperty(canvas, 'clientHeight', { value: 600, configurable: true });
+  });
+
+  afterEach(() => {
+    delete (document as unknown as { pointerLockElement?: unknown }).pointerLockElement;
+  });
+
+  /** A mouse event on the canvas, with movement (jsdom drops it from the init). */
+  function mouse(type: string, init: PointerEventInit & { movementX?: number; movementY?: number } = {}): PointerEvent | MouseEvent {
+    const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+    const e = new Ctor(type, { bubbles: true, cancelable: true, clientX: 5, clientY: 7, pointerId: 1, ...init });
+    Object.defineProperty(e, 'movementX', { value: init.movementX ?? 0 });
+    Object.defineProperty(e, 'movementY', { value: init.movementY ?? 0 });
+    canvas.dispatchEvent(e);
+    return e;
+  }
+
+  it('entering asks for the lock, with raw mouse movement', () => {
+    viewer.enterFlying();
+    expect(requestLock).toHaveBeenCalledWith({ unadjustedMovement: true });
+    expect(viewer.getFlyLook()).toBe('mouse');
+  });
+
+  it('falls back to a plain lock where raw movement is not supported', async () => {
+    requestLock.mockImplementationOnce(() => Promise.reject(new Error('NotSupportedError')));
+    viewer.enterFlying();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(requestLock).toHaveBeenCalledTimes(2);
+    expect(requestLock.mock.calls[1]).toEqual([undefined]);
+  });
+
+  it('moving the captured mouse turns the view with no button held', () => {
+    viewer.enterFlying();
+    grant();
+    const before = pose();
+    mouse('pointermove', { movementX: 60, movementY: 0 });
+    const after = pose();
+    expect(after.p.distanceTo(before.p)).toBe(0);
+    // Same feel as drag-to-look: half a turn per view height.
+    expect(after.q.angleTo(before.q)).toBeCloseTo((60 * Math.PI) / 600, 4);
+  });
+
+  it('a press while captured starts no gesture of ours', () => {
+    viewer.enterFlying();
+    grant();
+    const before = pose();
+    mouse('pointerdown', { button: 0 });
+    mouse('pointermove', { clientX: 300, clientY: 300 }); // no movement: the cursor is frozen
+    mouse('pointerup', { button: 0 });
+    expect(pose().q.angleTo(before.q)).toBeLessThan(1e-6);
+  });
+
+  it('clicks land at the crosshair in the centre, modifiers kept', () => {
+    viewer.enterFlying();
+    grant();
+    const seen: Array<[string, number, number, boolean]> = [];
+    const record = (e: MouseEvent): void => {
+      seen.push([e.type, e.clientX, e.clientY, e.ctrlKey]);
+    };
+    canvas.addEventListener('pointerdown', record);
+    canvas.addEventListener('click', record);
+    try {
+      mouse('pointerdown', { button: 0, ctrlKey: true });
+      mouse('click', { button: 0, ctrlKey: true });
+      expect(seen).toEqual([
+        ['pointerdown', 400, 300, true],
+        ['click', 400, 300, true],
+      ]);
+    } finally {
+      canvas.removeEventListener('pointerdown', record);
+      canvas.removeEventListener('click', record);
+    }
+  });
+
+  it('a right-click opens the menu at the crosshair and leaves flying', () => {
+    viewer.enterFlying();
+    grant();
+    let at: [number, number] | null = null;
+    const onMenu = (e: MouseEvent): void => {
+      at = [e.clientX, e.clientY];
+      e.preventDefault();
+    };
+    canvas.addEventListener('contextmenu', onMenu);
+    try {
+      const e = mouse('contextmenu', { button: 2 });
+      expect(at).toEqual([400, 300]);
+      expect(e.defaultPrevented).toBe(true);
+      expect(viewer.isFlying()).toBe(false);
+      expect(exitLock).toHaveBeenCalled();
+    } finally {
+      canvas.removeEventListener('contextmenu', onMenu);
+    }
+  });
+
+  it('losing the lock (Esc, Alt+Tab) leaves flying and hands back to the user', () => {
+    const changes: boolean[] = [];
+    viewer.onFlyingChange((f) => changes.push(f));
+    viewer.enterFlying();
+    grant();
+    const before = pose();
+    lockEl = null;
+    lockChanged();
+    expect(viewer.getControlsMode()).toBe('user');
+    expect(changes).toEqual([true, false]);
+    frames(3);
+    const after = pose();
+    expect(after.p.distanceTo(before.p)).toBeLessThan(1e-9);
+    expect(after.q.angleTo(before.q)).toBeLessThan(1e-6);
+    // Clicks are the page's own again.
+    let x = -1;
+    const onClick = (e: MouseEvent): void => {
+      x = e.clientX;
+    };
+    canvas.addEventListener('click', onClick);
+    mouse('click');
+    canvas.removeEventListener('click', onClick);
+    expect(x).toBe(5);
+  });
+
+  const exits: Array<[string, () => void]> = [
+    ['G / toggleFlying', () => viewer.toggleFlying()],
+    ['exitFlying', () => viewer.exitFlying()],
+    ['fitToBox', () => viewer.fitToBox(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 1, 1)))],
+    ['flyToBox', () => void viewer.flyToBox(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 1, 1)))],
+    ['restoreCameraState', () => viewer.restoreCameraState({ position: { x: 5, y: 5, z: 5 }, target: { x: 0, y: 0, z: 0 } })],
+    ['setControlsMode', () => viewer.setControlsMode('user')],
+    ['dispose', () => viewer.dispose()],
+  ];
+  for (const [name, leave] of exits) {
+    it(`${name} releases the lock`, () => {
+      viewer.enterFlying();
+      grant();
+      leave();
+      expect(exitLock).toHaveBeenCalledTimes(1);
+      expect(lockEl).toBeNull();
+      expect(viewer.isFlying()).toBe(false);
+      expect(viewer.getControlsMode()).not.toBe('flying');
+    });
+  }
+
+  it('when the lock is refused, flying carries on with drag-to-look and a click asks again', async () => {
+    requestLock.mockImplementation(() => Promise.reject(new Error('refused')));
+    const looks: string[] = [];
+    viewer.onFlyLookChange((l) => looks.push(l));
+    viewer.enterFlying();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(viewer.isFlying()).toBe(true);
+    expect(viewer.getFlyLook()).toBe('drag');
+    expect(looks).toEqual(['mouse', 'drag']);
+    // Dragging still looks.
+    const before = pose();
+    mouse('pointerdown', { button: 0, clientX: 100, clientY: 100 });
+    mouse('pointermove', { clientX: 110, clientY: 100 });
+    mouse('pointermove', { clientX: 160, clientY: 100 });
+    mouse('pointerup', { button: 0, clientX: 160, clientY: 100 });
+    expect(pose().q.angleTo(before.q)).toBeGreaterThan(0.1);
+    const calls = requestLock.mock.calls.length;
+    // A drag does not ask again; a click does.
+    expect(requestLock.mock.calls.length).toBe(calls);
+    mouse('pointerdown', { button: 0, clientX: 200, clientY: 200 });
+    mouse('pointerup', { button: 0, clientX: 200, clientY: 200 });
+    expect(requestLock.mock.calls.length).toBe(calls + 1);
+    // Granted later: the mouse looks by itself from then on.
+    grant();
+    expect(viewer.getFlyLook()).toBe('mouse');
+  });
+
+  it('without the Pointer Lock API at all, flying uses drag-to-look', () => {
+    delete (canvas as unknown as { requestPointerLock?: unknown }).requestPointerLock;
+    viewer.enterFlying();
+    expect(viewer.getFlyLook()).toBe('drag');
+  });
+
+  it('the mouse wheel still sets the speed while captured', () => {
+    viewer.enterFlying();
+    grant();
+    canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true, bubbles: true }));
+    expect(viewer.getFlySpeed()).toBe(6);
+  });
+});

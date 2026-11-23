@@ -34,6 +34,22 @@ const WHEEL_STEP_PX = 100;
 /** A single wheel event at least this large is one notch on its own. */
 const WHEEL_NOTCH_PX = 40;
 
+/**
+ * How the mouse looks around while flying: `mouse` when the pointer is
+ * captured (or being captured) and moving it turns the view; `drag` when
+ * the lock was refused and looking is a left-drag, as before.
+ */
+export type FlyLook = 'mouse' | 'drag';
+
+/** Mouse events re-sent at the crosshair while the pointer is captured. */
+const LOCKED_REMAP_TYPES = [
+  'pointerdown', 'pointermove', 'pointerup', 'pointercancel',
+  'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu',
+] as const;
+
+/** Hover feedback at the crosshair is refreshed at most this often while moving. */
+const HOVER_PULSE_MS = 100;
+
 /** Radians of rotation per screen height dragged. Matches OrbitControls' feel. */
 const ROTATE_SPEED = 1;
 
@@ -127,6 +143,15 @@ export class Viewer {
   private wheelAccumulator = 0;
   private readonly flyForward = new THREE.Vector3();
   private flyKeysSuspended: () => boolean = () => false;
+  /** The canvas holds pointer lock for flying. */
+  private flyLocked = false;
+  /** A lock has been asked for and not yet granted or refused. */
+  private flyLockPending = false;
+  private flyLookListeners: Array<(look: FlyLook) => void> = [];
+  private lastFlyLook: FlyLook | null = null;
+  /** The re-sent event being dispatched, so the remap does not catch its own. */
+  private remapClone: Event | null = null;
+  private lastHoverPulse = 0;
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -405,8 +430,188 @@ export class Viewer {
     window.addEventListener('keyup', this.onFlyKeyUp, { capture: true });
     window.addEventListener('blur', this.onFlyBlur);
     document.addEventListener('visibilitychange', this.onFlyBlur);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    document.addEventListener('pointerlockerror', this.onPointerLockError);
     this.needsRender = true;
     for (const cb of this.flyingListeners) cb(true);
+    // G and the fly button are user gestures, which pointer lock needs.
+    this.requestFlyLock();
+  }
+
+  // ── Pointer lock while flying ──────────────────────────────
+  //
+  // Flying captures the mouse so moving it looks around with no button held.
+  // The browser releases the lock on Esc (without delivering that key to the
+  // page), on Alt+Tab and when the window loses focus; losing it leaves
+  // flying, which is how Esc leaves in one press. When the lock is refused —
+  // Chrome refuses a re-lock for about a second after Esc, and some embedded
+  // pages never allow it — flying carries on with drag-to-look, and the next
+  // click in the view asks again. The mouse never ends up doing nothing.
+
+  /** How the mouse looks around right now: captured, or by dragging. */
+  getFlyLook(): FlyLook {
+    return this.flyLocked || this.flyLockPending ? 'mouse' : 'drag';
+  }
+
+  /** Hear when looking switches between captured mouse and drag. */
+  onFlyLookChange(cb: (look: FlyLook) => void): () => void {
+    this.flyLookListeners.push(cb);
+    return () => {
+      this.flyLookListeners = this.flyLookListeners.filter((l) => l !== cb);
+    };
+  }
+
+  private notifyFlyLook(): void {
+    const look = this.getFlyLook();
+    if (look === this.lastFlyLook) return;
+    this.lastFlyLook = look;
+    for (const cb of this.flyLookListeners) cb(look);
+  }
+
+  private requestFlyLock(): void {
+    if (!this.isFlying() || this.flyLocked) return;
+    const canvas = this.canvas;
+    if (typeof canvas.requestPointerLock !== 'function') {
+      this.flyLockPending = false;
+      this.notifyFlyLook();
+      return;
+    }
+    this.flyLockPending = true;
+    this.notifyFlyLook();
+    const attempt = (options?: PointerLockOptions): Promise<void> | undefined => {
+      try {
+        // Older browsers return undefined and report through 'pointerlockerror'.
+        return canvas.requestPointerLock(options) as Promise<void> | undefined;
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    };
+    const refused = (): void => {
+      if (!this.isFlying() || this.flyLocked) return;
+      this.flyLockPending = false;
+      this.notifyFlyLook();
+    };
+    // Raw mouse counts where the platform has them, so the OS pointer
+    // acceleration does not make turning uneven; otherwise a plain lock.
+    const first = attempt({ unadjustedMovement: true });
+    if (first && typeof first.then === 'function') {
+      first.catch(() => {
+        if (!this.isFlying() || this.flyLocked) return;
+        const second = attempt();
+        if (second && typeof second.then === 'function') second.catch(refused);
+      });
+    }
+  }
+
+  private onPointerLockChange = (): void => {
+    const locked = document.pointerLockElement === this.canvas;
+    if (locked) {
+      this.flyLocked = true;
+      this.flyLockPending = false;
+      // A drag-to-look in progress ends: from here the mouse looks by itself.
+      this.endRotateGesture();
+      this.installLockedRemap();
+      this.notifyFlyLook();
+    } else if (this.flyLocked) {
+      // Esc, Alt+Tab or the window losing focus: leave flying.
+      this.flyLocked = false;
+      this.removeLockedRemap();
+      this.exitFlying();
+    }
+  };
+
+  private onPointerLockError = (): void => {
+    if (!this.isFlying() || this.flyLocked) return;
+    this.flyLockPending = false;
+    this.notifyFlyLook();
+  };
+
+  private installLockedRemap(): void {
+    for (const type of LOCKED_REMAP_TYPES) window.addEventListener(type, this.remapLockedEvent, { capture: true });
+  }
+
+  private removeLockedRemap(): void {
+    for (const type of LOCKED_REMAP_TYPES) window.removeEventListener(type, this.remapLockedEvent, { capture: true });
+  }
+
+  /** Centre of the view, in client coordinates: where the crosshair is. */
+  private viewCentre(): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+
+  /**
+   * While the mouse is captured the cursor is frozen wherever it was, so
+   * every mouse event on the view is re-sent as if it happened at the
+   * crosshair in the centre. Selection, hover, snapping, measuring, section
+   * cuts and the parameter picker all read `clientX/Y`, so they all work from
+   * the crosshair without knowing about flying. Modifiers and movement are
+   * kept, so Ctrl/Shift-click keep their meaning and the look still turns.
+   */
+  private remapLockedEvent = (e: Event): void => {
+    if (e === this.remapClone || e.target !== this.canvas || !this.flyLocked) return;
+    e.stopImmediatePropagation();
+    const m = e as MouseEvent;
+    const { x, y } = this.viewCentre();
+    const init: PointerEventInit = {
+      bubbles: m.bubbles,
+      cancelable: m.cancelable,
+      composed: m.composed,
+      clientX: x,
+      clientY: y,
+      screenX: m.screenX,
+      screenY: m.screenY,
+      button: m.button,
+      buttons: m.buttons,
+      ctrlKey: m.ctrlKey,
+      shiftKey: m.shiftKey,
+      altKey: m.altKey,
+      metaKey: m.metaKey,
+      movementX: m.movementX,
+      movementY: m.movementY,
+      detail: m.detail,
+    };
+    let clone: MouseEvent;
+    if (typeof PointerEvent !== 'undefined' && e instanceof PointerEvent) {
+      init.pointerId = e.pointerId;
+      init.pointerType = e.pointerType;
+      init.isPrimary = e.isPrimary;
+      init.width = e.width;
+      init.height = e.height;
+      init.pressure = e.pressure;
+      clone = new PointerEvent(e.type, init);
+    } else {
+      clone = new MouseEvent(e.type, init);
+    }
+    // Some engines drop movement from the init dictionary; carry it over.
+    if (clone.movementX !== m.movementX) Object.defineProperty(clone, 'movementX', { value: m.movementX });
+    if (clone.movementY !== m.movementY) Object.defineProperty(clone, 'movementY', { value: m.movementY });
+    this.remapClone = clone;
+    try {
+      this.canvas.dispatchEvent(clone);
+    } finally {
+      this.remapClone = null;
+    }
+    if (clone.defaultPrevented) e.preventDefault();
+    if (e.type === 'contextmenu') {
+      // A menu needs a cursor: it opens for what is under the crosshair, and
+      // flying ends so the mouse comes back.
+      e.preventDefault();
+      this.exitFlying();
+    }
+  };
+
+  /**
+   * Hover and snapping feedback follow the crosshair as the view moves, not
+   * only when the mouse does: a still pointermove at the centre, at most every
+   * `HOVER_PULSE_MS` while flying moves the camera.
+   */
+  private pulseHover(now: number): void {
+    if (!this.flyLocked || now - this.lastHoverPulse < HOVER_PULSE_MS) return;
+    this.lastHoverPulse = now;
+    if (typeof PointerEvent === 'undefined') return;
+    const { x, y } = this.viewCentre();
+    this.canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: x, clientY: y, pointerType: 'mouse', isPrimary: true }));
   }
 
   /**
@@ -425,6 +630,14 @@ export class Viewer {
     window.removeEventListener('keyup', this.onFlyKeyUp, { capture: true });
     window.removeEventListener('blur', this.onFlyBlur);
     document.removeEventListener('visibilitychange', this.onFlyBlur);
+    // Listeners off first, so releasing the lock below does not call back in.
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    document.removeEventListener('pointerlockerror', this.onPointerLockError);
+    this.removeLockedRemap();
+    this.flyLocked = false;
+    this.flyLockPending = false;
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock?.();
+    this.lastFlyLook = null;
     this.controls.enablePan = this.panBeforeFlying;
 
     const rect = this.canvas.getBoundingClientRect();
@@ -521,7 +734,10 @@ export class Viewer {
     const now = performance.now();
     const dt = this.lastFlyFrame === null ? 1 / 60 : (now - this.lastFlyFrame) / 1000;
     this.lastFlyFrame = now;
-    if (this.fly.tick(this.camera, dt)) this.syncFlyAnchor();
+    if (this.fly.tick(this.camera, dt)) {
+      this.syncFlyAnchor();
+      this.pulseHover(now);
+    }
   }
 
   /** Keep the view anchor on the forward axis while the fly controls turn the camera. */
@@ -795,7 +1011,11 @@ export class Viewer {
     if (!this.canNavigate()) return;
 
     if (this.isFlying()) {
-      // Looking turns in place; there is no pivot to find, so no raycast.
+      // With the mouse captured, moving it looks; a press is a click at the
+      // crosshair for selection and the tools, never a gesture of ours.
+      if (this.flyLocked) return;
+      // Drag-to-look (the lock was refused). Looking turns in place; there
+      // is no pivot to find, so no raycast.
       this.rotateGesture = {
         pointerId: e.pointerId,
         startX: e.clientX,
@@ -825,6 +1045,17 @@ export class Viewer {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
+    if (this.flyLocked && this.isFlying()) {
+      // Captured mouse: its movement turns the view, no button needed. The
+      // position is the crosshair's and never changes, so it is not recorded.
+      const dx = e.movementX || 0;
+      const dy = e.movementY || 0;
+      if (dx === 0 && dy === 0) return;
+      const height = this.canvas.clientHeight || this.canvas.height || 1;
+      this.fly.look(this.camera, dx, dy, height);
+      this.syncFlyAnchor();
+      return;
+    }
     this.lastPointer = { x: e.clientX, y: e.clientY };
 
     if (e.pointerType === 'touch') {
@@ -893,8 +1124,15 @@ export class Viewer {
       if (this.touchPointers.size < 2) this.pinchDistance = null;
     }
     if (this.rotateGesture && e.pointerId === this.rotateGesture.pointerId) {
+      const wasClick = !this.rotateGesture.active;
+      const wasLook = this.rotateGesture.look;
       this.canvas.releasePointerCapture?.(e.pointerId);
       this.endRotateGesture();
+      // Drag-to-look fallback: a click in the view (a user gesture) asks for
+      // the mouse again — Chrome refuses a re-lock for a second after Esc.
+      if (wasLook && wasClick && e.pointerType !== 'touch' && this.isFlying() && !this.flyLocked) {
+        this.requestFlyLock();
+      }
     }
   };
 
