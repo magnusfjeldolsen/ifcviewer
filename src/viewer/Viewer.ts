@@ -47,8 +47,14 @@ const LOCKED_REMAP_TYPES = [
   'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu',
 ] as const;
 
-/** Hover feedback at the crosshair is refreshed at most this often while moving. */
-const HOVER_PULSE_MS = 100;
+/** What is under the centre is looked at no more often than this while flying, ms. */
+const PROBE_INTERVAL_MS = 100;
+/** ...and not on a frame that has already taken this long, ms. */
+const PROBE_FRAME_BUDGET_MS = 12;
+/** Faster than this the view counts as moving fast (name tags wait), m/s. */
+const FAST_MOVE_MPS = 10;
+/** Turning faster than this counts as moving fast, rad/s. */
+const FAST_TURN_RADPS = 1;
 
 /** Radians of rotation per screen height dragged. Matches OrbitControls' feel. */
 const ROTATE_SPEED = 1;
@@ -151,7 +157,12 @@ export class Viewer {
   private lastFlyLook: FlyLook | null = null;
   /** The re-sent event being dispatched, so the remap does not catch its own. */
   private remapClone: Event | null = null;
-  private lastHoverPulse = 0;
+  /** The camera moved while flying since the centre was last looked at. */
+  private flyViewDirty = false;
+  private lastProbe = 0;
+  private readonly probePosition = new THREE.Vector3();
+  private readonly probeQuaternion = new THREE.Quaternion();
+  private flyProbeListeners: Array<(fast: boolean) => void> = [];
   /** OrbitControls' `enabled` before the lock switched it off. */
   private controlsEnabledBeforeLock = true;
   private mouse = new THREE.Vector2();
@@ -518,6 +529,9 @@ export class Viewer {
       this.controlsEnabledBeforeLock = this.controls.enabled;
       this.controls.enabled = false;
       this.installLockedRemap();
+      // Look at what is under the centre straight away.
+      this.lastProbe = -Infinity;
+      this.flyViewDirty = true;
       this.notifyFlyLook();
     } else if (this.flyLocked) {
       // Esc, Alt+Tab or the window losing focus: leave flying.
@@ -635,16 +649,50 @@ export class Viewer {
   };
 
   /**
-   * Hover and snapping feedback follow the crosshair as the view moves, not
-   * only when the mouse does: a still pointermove at the centre, at most every
-   * `HOVER_PULSE_MS` while flying moves the camera.
+   * Hear when it is time to look at what is under the centre of the view
+   * while flying with the mouse captured. `fast` is true while the view is
+   * turning or moving quickly. Called only after the camera has moved, at
+   * most every `PROBE_INTERVAL_MS`, and never on a frame already over
+   * `PROBE_FRAME_BUDGET_MS`; never outside flying.
    */
-  private pulseHover(now: number): void {
-    if (!this.flyLocked || now - this.lastHoverPulse < HOVER_PULSE_MS) return;
-    this.lastHoverPulse = now;
-    if (typeof PointerEvent === 'undefined') return;
-    const { x, y } = this.viewCentre();
-    this.canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: x, clientY: y, pointerType: 'mouse', isPrimary: true }));
+  onFlyProbe(cb: (fast: boolean) => void): () => void {
+    this.flyProbeListeners.push(cb);
+    return () => {
+      this.flyProbeListeners = this.flyProbeListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Centre of the view in client coordinates, where clicks land while captured. */
+  getViewCentre(): { x: number; y: number } {
+    return this.viewCentre();
+  }
+
+  private maybeProbeCentre(frameStart: number): void {
+    if (!this.flyLocked) return;
+    const now = performance.now();
+    if (now - this.lastProbe < PROBE_INTERVAL_MS) return;
+    // This frame has used its budget already; the next one will do.
+    if (now - frameStart > PROBE_FRAME_BUDGET_MS) return;
+    const elapsed = Math.min(Math.max((now - this.lastProbe) / 1000, 1e-3), 1);
+    const speed = this.camera.position.distanceTo(this.probePosition) / elapsed;
+    const turn = this.camera.quaternion.angleTo(this.probeQuaternion) / elapsed;
+    const fast = Number.isFinite(this.lastProbe) && (speed > FAST_MOVE_MPS || turn > FAST_TURN_RADPS);
+    this.lastProbe = now;
+    // After a fast look, look once more when the next interval is up: if the
+    // view has come to rest by then, that is what lets the name tag appear.
+    this.flyViewDirty = fast;
+    this.probePosition.copy(this.camera.position);
+    this.probeQuaternion.copy(this.camera.quaternion);
+    // Hover and snapping feedback follow the centre as the view moves, not
+    // only when the mouse does: a still pointermove there (re-sent by the
+    // remap like any other).
+    if (typeof PointerEvent !== 'undefined') {
+      const { x, y } = this.viewCentre();
+      this.canvas.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, clientX: x, clientY: y, pointerType: 'mouse', isPrimary: true }),
+      );
+    }
+    for (const cb of this.flyProbeListeners) cb(fast);
   }
 
   /**
@@ -766,16 +814,14 @@ export class Viewer {
     const now = performance.now();
     const dt = this.lastFlyFrame === null ? 1 / 60 : (now - this.lastFlyFrame) / 1000;
     this.lastFlyFrame = now;
-    if (this.fly.tick(this.camera, dt)) {
-      this.syncFlyAnchor();
-      this.pulseHover(now);
-    }
+    if (this.fly.tick(this.camera, dt)) this.syncFlyAnchor();
   }
 
   /** Keep the view anchor on the forward axis while the fly controls turn the camera. */
   private syncFlyAnchor(): void {
     this.camera.getWorldDirection(this.flyForward);
     this.controls.target.copy(this.camera.position).addScaledVector(this.flyForward, this.flyAnchorDistance);
+    this.flyViewDirty = true;
     this.needsRender = true;
   }
 
@@ -809,12 +855,21 @@ export class Viewer {
     // when the camera moves (including inertia/damping if ever enabled).
     // The 'change' listener flips needsRender on, so we render only on
     // frames where something visible actually changed.
+    const flying = this._controlsMode === 'flying';
+    // Read only while flying: the probe below must not start on a frame that
+    // has already used its budget.
+    const probing = flying && this.flyLocked && this.flyViewDirty;
+    const frameStart = probing ? performance.now() : 0;
     if (this._controlsMode === 'user') {
       this.controls.update();
-    } else if (this._controlsMode === 'flying') {
+    } else if (flying) {
       this.tickFlying();
     }
-    if (!this.needsRender) return;
+    if (this.needsRender) this.drawFrame();
+    if (probing) this.maybeProbeCentre(frameStart);
+  };
+
+  private drawFrame(): void {
     this.needsRender = false;
     for (const cb of this.updateCallbacks) cb();
     // One place, so no camera path can forget: orbit, dolly, pan, fit, a
@@ -829,7 +884,7 @@ export class Viewer {
     this.renderer.render(this.scene, this.camera);
     const end = performance.now();
     for (const cb of this.renderedCallbacks) cb(end, end - start);
-  };
+  }
 
   /**
    * Hear about every frame actually drawn, with the CPU time spent inside

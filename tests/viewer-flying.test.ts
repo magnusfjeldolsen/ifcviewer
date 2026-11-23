@@ -734,3 +734,112 @@ describe('flying — pointer lock and OrbitControls', () => {
     }
   });
 });
+
+describe('flying — looking at what is under the centre', () => {
+  let lockEl: Element | null;
+  let probes: boolean[];
+
+  beforeEach(() => {
+    lockEl = null;
+    probes = [];
+    Object.defineProperty(document, 'pointerLockElement', { get: () => lockEl, configurable: true });
+    (canvas as unknown as { requestPointerLock: unknown }).requestPointerLock = () => Promise.resolve();
+    (document as unknown as { exitPointerLock: unknown }).exitPointerLock = () => {
+      lockEl = null;
+      document.dispatchEvent(new Event('pointerlockchange'));
+    };
+    Object.defineProperty(canvas, 'clientHeight', { value: 600, configurable: true });
+    viewer.onFlyProbe((fast) => probes.push(fast));
+  });
+
+  afterEach(() => {
+    delete (document as unknown as { pointerLockElement?: unknown }).pointerLockElement;
+  });
+
+  const lock = (): void => {
+    viewer.enterFlying();
+    lockEl = canvas;
+    document.dispatchEvent(new Event('pointerlockchange'));
+  };
+  const look = (dx: number): void => {
+    const e = new PointerEvent('pointermove', { bubbles: true, pointerId: 1 });
+    Object.defineProperty(e, 'movementX', { value: dx });
+    Object.defineProperty(e, 'movementY', { value: 0 });
+    canvas.dispatchEvent(e);
+  };
+
+  it('never looks outside flying', () => {
+    frames(60);
+    expect(probes).toEqual([]);
+  });
+
+  it('never looks in the drag-to-look fallback (no lock)', () => {
+    viewer.enterFlying();
+    key('keydown', 'KeyW');
+    frames(60);
+    expect(probes).toEqual([]);
+  });
+
+  it('looks once on capture, then only when the view moves', () => {
+    lock();
+    frames(30);
+    expect(probes.length).toBe(1);
+    frames(30);
+    expect(probes.length).toBe(1);
+    look(5);
+    frames(10);
+    expect(probes.length).toBe(2);
+  });
+
+  it('looks at most ten times a second while the view keeps moving', () => {
+    lock();
+    frame();
+    probes.length = 0;
+    for (let i = 0; i < 60; i++) {
+      look(2);
+      frame();
+    }
+    expect(probes.length).toBeGreaterThanOrEqual(9);
+    expect(probes.length).toBeLessThanOrEqual(11);
+  });
+
+  it('skips frames that are already over budget', () => {
+    lock();
+    frame();
+    probes.length = 0;
+    // Every draw takes 20 ms.
+    vi.spyOn(viewer.getRenderer(), 'render').mockImplementation(() => {
+      now += 20;
+    });
+    for (let i = 0; i < 60; i++) {
+      look(2);
+      frame();
+    }
+    expect(probes).toEqual([]);
+  });
+
+  it('says when the view is turning fast, and not once it is still', () => {
+    lock();
+    frame();
+    probes.length = 0;
+    for (let i = 0; i < 12; i++) {
+      look(40); // ~12 rad/s
+      frame();
+    }
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.every((f) => f)).toBe(true);
+    probes.length = 0;
+    look(1);
+    frames(10);
+    expect(probes[probes.length - 1]).toBe(false);
+  });
+
+  it('nothing is looked at after leaving', () => {
+    lock();
+    frame();
+    viewer.exitFlying();
+    probes.length = 0;
+    frames(30);
+    expect(probes).toEqual([]);
+  });
+});

@@ -22,7 +22,7 @@ export function flyTips(look: FlyTipsLook): ReadonlyArray<readonly [string, stri
     look === 'mouse'
       ? ['Mouse', 'Move it to look']
       : ['Drag', 'Drag to look (click the view to capture the mouse)'],
-    look === 'mouse' ? ['Click', 'Selects what is under the +'] : ['Click', 'Selects what you click'],
+    look === 'mouse' ? ['Click', 'Selects what is under the ring'] : ['Click', 'Selects what you click'],
     ['Right-click', 'Menu (leaves flying)'],
     ['Scroll, X / Z', 'Faster / slower'],
     ['Shift', 'Hold to go 4× faster'],
@@ -55,8 +55,6 @@ export class FlyTips {
   private toggleBtn: HTMLButtonElement;
   private collapsed: boolean;
   private look: FlyTipsLook = 'mouse';
-  /** The + at the centre of the view: where clicks land while the mouse is captured. */
-  private crosshair: HTMLElement;
 
   constructor(parent: HTMLElement, initialSpeed: number) {
     this.collapsed = readCollapsed();
@@ -93,40 +91,27 @@ export class FlyTips {
     this.el.append(head, this.listEl);
     parent.appendChild(this.el);
 
-    this.crosshair = document.createElement('div');
-    this.crosshair.className = 'fly-crosshair';
-    this.crosshair.hidden = true;
-    this.crosshair.setAttribute('aria-hidden', 'true');
-    parent.appendChild(this.crosshair);
-
     this.setSpeed(initialSpeed);
     this.applyCollapsed();
   }
 
   show(): void {
     this.el.hidden = false;
-    this.crosshair.hidden = this.look !== 'mouse';
   }
 
   hide(): void {
     this.el.hidden = true;
-    this.crosshair.hidden = true;
   }
 
-  /** Switch the tips (and the crosshair) between captured mouse and drag-to-look. */
+  /** Switch the tips between captured mouse and drag-to-look. */
   setLook(look: FlyTipsLook): void {
     if (look === this.look) return;
     this.look = look;
     this.renderList();
-    if (this.isShown()) this.crosshair.hidden = look !== 'mouse';
   }
 
   getLook(): FlyTipsLook {
     return this.look;
-  }
-
-  isCrosshairShown(): boolean {
-    return !this.crosshair.hidden;
   }
 
   /** Fold to the speed or unfold the keys (the H key). */
@@ -167,7 +152,6 @@ export class FlyTips {
 
   dispose(): void {
     this.el.remove();
-    this.crosshair.remove();
   }
 
   private applyCollapsed(): void {

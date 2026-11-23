@@ -3077,23 +3077,82 @@ html, body {
   }
 }
 
-/* The + at the centre of the view while the mouse is captured for flying:
-   clicks, hover and the tools all land here. */
-.fly-crosshair {
+
+/* The centre mark (CentreMark.ts): a dot in a ring at the centre of the 3D
+   view, where clicks land while the mouse is captured. Positioned by script
+   on the canvas centre; the ring turns blue over an element. */
+.centre-mark {
   position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 18px;
-  height: 18px;
-  margin: -9px 0 0 -9px;
+  width: 0;
+  height: 0;
   pointer-events: none;
   z-index: 9;
-  background:
-    linear-gradient(#111827, #111827) center / 2px 100% no-repeat,
-    linear-gradient(#111827, #111827) center / 100% 2px no-repeat;
-  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
 }
 
-.fly-crosshair[hidden] {
+.centre-mark[hidden] {
   display: none;
+}
+
+.centre-mark-svg {
+  position: absolute;
+  left: -12px;
+  top: -12px;
+  overflow: visible;
+}
+
+.centre-mark-ring-edge {
+  fill: none;
+  stroke: rgba(17, 24, 39, 0.55);
+  stroke-width: 3;
+  transition: stroke-width 120ms ease-out;
+}
+
+.centre-mark-ring {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  transition: stroke 120ms ease-out, stroke-width 120ms ease-out;
+}
+
+.centre-mark-dot {
+  fill: #fff;
+  stroke: rgba(17, 24, 39, 0.55);
+  stroke-width: 1;
+}
+
+.centre-mark.on-target .centre-mark-ring {
+  stroke: #3b82f6;
+  stroke-width: 2.5;
+}
+
+.centre-mark.on-target .centre-mark-ring-edge {
+  stroke-width: 4;
+}
+
+.centre-mark-tag {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  transform: translateX(-50%);
+  max-width: 320px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(17, 24, 39, 0.8);
+  color: #f9fafb;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.centre-mark-tag[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .centre-mark-ring,
+  .centre-mark-ring-edge {
+    transition: none;
+  }
 }
