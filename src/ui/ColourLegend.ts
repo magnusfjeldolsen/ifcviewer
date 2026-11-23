@@ -5,7 +5,8 @@
  * every colour in use with its value (and unit) and how many elements have
  * it. Each entry can be ticked off — its elements go back to their own
  * colours — with All / None above the list. Clicking an entry's text
- * selects its elements. Clear ends the colouring.
+ * selects its elements; its eye shows only them (#70). Clear ends the
+ * colouring.
  *
  * Below the list: Refresh, which works the colours out again over what is
  * visible now (marked when what can be seen has changed), and Clear. For
@@ -22,6 +23,8 @@
 import { DEFAULT_MAX_VALUES, type ColourByController, type ColourByState, type ColourScope } from '../inspector/ColourByController';
 import { GRADIENTS, gradientCss, rgbToHex } from '../viewer/colourPalettes';
 import { formatNumber } from '../inspector/format';
+import { showOnlyTitle } from '../inspector/showOnly';
+import { showOnlyButton } from './showOnlyButton';
 
 export interface ColourLegendDeps {
   controller: ColourByController;
@@ -380,6 +383,13 @@ export class ColourLegend {
       count.className = 'colour-legend-count';
       count.textContent = counts.format(entry.count);
       li.append(box, swatch, text, count);
+      if (controller.canShowOnly()) {
+        const eye = showOnlyButton(`Show only ${entry.label}`, showOnlyTitle(`the elements of ${entry.label}`), (additive) =>
+          controller.showOnlyEntry(i, additive),
+        );
+        eye.dataset.focus = `eye-${i}`;
+        li.appendChild(eye);
+      }
       list.appendChild(li);
     }
     this.body.appendChild(list);

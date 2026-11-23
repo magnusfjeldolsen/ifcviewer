@@ -5,6 +5,8 @@ import type { AppearanceManagerDeps } from '../src/viewer/AppearanceManager';
 import type { ModelManager } from '../src/viewer/ModelManager';
 import type { ElementIdentity, Scope } from '../src/inspector/types';
 import { boxModel, makeModelManager } from './helpers/models';
+import { HistoryManager } from '../src/core/history/HistoryManager';
+import * as THREE from 'three';
 
 /**
  * AppearanceManager engine tests (D, the appearance system).
@@ -342,5 +344,144 @@ describe('AppearanceManager — predicates (T11)', () => {
 
     manager.opaque(scope(['A', 2]));
     expect(manager.hasTransparent()).toBe(false);
+  });
+});
+
+describe('AppearanceManager — show only (#70)', () => {
+  function setup() {
+    const env = makeDeps();
+    env.load('A', [1, 2, 3, 4]);
+    env.load('B', [10, 20]);
+    const history = new HistoryManager();
+    let plane: THREE.Plane | null = null;
+    const manager = new AppearanceManager({ ...env.deps, history, clipPlane: () => plane });
+    return { env, manager, history, setPlane: (p: THREE.Plane | null) => (plane = p) };
+  }
+  const shown = (m: AppearanceManager) =>
+    [['A', 1], ['A', 2], ['A', 3], ['A', 4], ['B', 10], ['B', 20]]
+      .filter(([id, e]) => m.getStateFor(id as string, e as number) !== 'hidden')
+      .map(([id, e]) => `${id}${e}`);
+  const ok = (shown: number, fresh = false) => ({ shown, fresh, switchedOff: 0, cutAway: 0 });
+
+  it('shows only the given elements, across models, as one undo step', () => {
+    const { manager, history } = setup();
+    expect(manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow')).toEqual(ok(2));
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+    history.undo();
+    expect(manager.hasHidden()).toBe(false);
+    history.redo();
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+  });
+
+  it('a second show-only narrows the first (AND)', () => {
+    const { manager, history } = setup();
+    manager.showOnly(scope(['A', 1], ['A', 2], ['B', 10]), 'narrow');
+    expect(manager.showOnly(scope(['A', 2], ['A', 3], ['B', 10], ['B', 20]), 'narrow')).toEqual(ok(2));
+    expect(shown(manager)).toEqual(['A2', 'B10']);
+    history.undo();
+    expect(shown(manager)).toEqual(['A1', 'A2', 'B10']);
+  });
+
+  it('starts over with all of them when none of them is visible now, and undoes that in one step', () => {
+    const { manager, history } = setup();
+    manager.showOnly(scope(['A', 1]), 'narrow');
+    expect(manager.showOnly(scope(['A', 3], ['B', 20]), 'narrow')).toEqual(ok(2, true));
+    expect(shown(manager)).toEqual(['A3', 'B20']);
+    history.undo();
+    expect(shown(manager)).toEqual(['A1']);
+  });
+
+  it('add shows them as well, hiding nothing (OR)', () => {
+    const { manager, history } = setup();
+    manager.showOnly(scope(['A', 1]), 'narrow');
+    manager.showOnly(scope(['A', 3], ['B', 20]), 'add');
+    expect(shown(manager)).toEqual(['A1', 'A3', 'B20']);
+    history.undo();
+    expect(shown(manager)).toEqual(['A1']);
+  });
+
+  it('does nothing, and records nothing, when nothing changes', () => {
+    const { manager, history } = setup();
+    expect(manager.showOnly([], 'narrow')).toEqual(ok(0));
+    expect(manager.hasHidden()).toBe(false);
+    // Add while nothing is hidden.
+    expect(manager.showOnly(scope(['A', 1]), 'add')).toEqual(ok(1));
+    expect(history.canUndo()).toBe(false);
+    // The same narrow twice: one step, not two.
+    manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow');
+    manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow');
+    history.undo();
+    expect(history.canUndo()).toBe(false);
+    expect(manager.hasHidden()).toBe(false);
+  });
+
+  it('ignores elements of models that are not loaded', () => {
+    const { manager } = setup();
+    expect(manager.showOnly(scope(['Gone', 1]), 'narrow')).toEqual(ok(0));
+    expect(manager.hasHidden()).toBe(false);
+    expect(manager.showOnly(scope(['Gone', 1], ['A', 2]), 'narrow')).toEqual(ok(1));
+    // Nor are elements without geometry (a select-similar class query finds those too).
+    expect(manager.showOnly(scope(['A', 2], ['A', 99]), 'narrow')).toEqual(ok(1));
+  });
+
+  it('a match only in a model switched off is not visible: falls back, keeps the model off, and says so', () => {
+    const { env, manager } = setup();
+    env.modelManager.setVisible('B', false);
+    const r = manager.showOnly(scope(['B', 10]), 'narrow');
+    expect(r).toEqual({ shown: 0, fresh: true, switchedOff: 1, cutAway: 0 });
+    // All of A hidden, B10 not hidden, and B still off.
+    expect(shown(manager)).toEqual(['B10']);
+    expect(env.modelManager.isVisible('B')).toBe(false);
+  });
+
+  it('a match in a model switched off is kept but not counted as shown, so switching the model on shows it', () => {
+    const { env, manager } = setup();
+    env.modelManager.setVisible('B', false);
+    expect(manager.showOnly(scope(['A', 1], ['B', 10]), 'narrow')).toEqual({ shown: 1, fresh: false, switchedOff: 1, cutAway: 0 });
+    expect(shown(manager)).toEqual(['A1', 'B10']);
+    expect(env.modelManager.isVisible('B')).toBe(false);
+  });
+
+  it('matches wholly behind the section cut are not visible: falls back, and says so', () => {
+    const { manager, setPlane } = setup();
+    // Keeps x ≤ 1: only the first box of each model (A1, B10) is in front.
+    setPlane(new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1));
+    const r = manager.showOnly(scope(['A', 3], ['A', 4]), 'narrow');
+    expect(r).toEqual({ shown: 0, fresh: true, switchedOff: 0, cutAway: 2 });
+    expect(shown(manager)).toEqual(['A3', 'A4']);
+    // With one match in front, it narrows to that one.
+    expect(manager.showOnly(scope(['A', 1], ['A', 3]), 'narrow')).toMatchObject({ shown: 1, fresh: true, cutAway: 1 });
+  });
+
+  it('keeps the transparency of the elements it keeps; Isolate still resets it', () => {
+    const { manager, history } = setup();
+    manager.transparent(scope(['A', 1], ['A', 2]));
+    manager.showOnly(scope(['A', 1], ['A', 3]), 'narrow');
+    expect(manager.getStateFor('A', 1)).toBe('transparent');
+    expect(manager.getStateFor('A', 2)).toBe('hidden');
+    expect(manager.getStateFor('A', 3)).toBe('normal');
+    history.undo();
+    expect(manager.getStateFor('A', 2)).toBe('transparent');
+    manager.isolate(scope(['A', 1]));
+    expect(manager.getStateFor('A', 1)).toBe('normal');
+  });
+
+  it('tells the renderer once per model', () => {
+    const { env, manager } = setup();
+    const spy = vi.spyOn(env.modelManager, 'setHidden');
+    manager.showOnly(scope(['A', 1], ['A', 2]), 'narrow');
+    // A: A3 and A4 hidden in one call; B: both hidden in one call. Nothing shown, so no "show" calls.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls.map((c) => [c[0], [...c[1]].sort(), c[2]])).toEqual([
+      ['A', [3, 4], true],
+      ['B', [10, 20], true],
+    ]);
+  });
+
+  it('isolate still works as before', () => {
+    const { manager } = setup();
+    manager.hide(scope(['A', 1]));
+    manager.isolate(scope(['A', 1], ['A', 2]));
+    expect(shown(manager)).toEqual(['A1', 'A2']);
   });
 });

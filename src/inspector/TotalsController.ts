@@ -64,6 +64,8 @@ export interface TotalsDeps {
   visibleCount?(models: readonly string[]): number;
   /** Select exactly these elements. */
   select?(elements: { modelId: string; expressId: number }[]): void;
+  /** Show only these elements, hiding the rest (#70); `additive`: show them as well. */
+  showOnly?(elements: { modelId: string; expressId: number }[], label: string, additive: boolean): void;
   /** Where the rows are remembered; `localStorage` when left out. */
   storage?: SettingsStorage | null;
   /** How long to wait after a selection change before counting again (ms). */
@@ -258,6 +260,23 @@ export class TotalsController {
     if (!inputs || !this.deps.select) return 0;
     const elements = lineElements(inputs, line);
     if (elements.length > 0) this.deps.select(elements);
+    return elements.length;
+  }
+
+  /** Whether a line can show only its elements. */
+  canShowOnly(): boolean {
+    return !!this.deps.showOnly;
+  }
+
+  /**
+   * Show only the elements behind one line (#70): the same elements
+   * `selectLine` selects. Returns how many there are.
+   */
+  showOnlyLine(key: string, line: { unitKey?: string; groupKey?: string }, label: string, additive: boolean): number {
+    const inputs = this.inputs.get(key);
+    if (!inputs || !this.deps.showOnly) return 0;
+    const elements = lineElements(inputs, line);
+    if (elements.length > 0) this.deps.showOnly(elements, label, additive);
     return elements.length;
   }
 

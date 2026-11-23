@@ -31,6 +31,8 @@ import type { TotalsChoice, TotalsController, TotalsRow, TotalsState } from '../
 import { sumVerdictText, unitLabel } from '../inspector/units';
 import { CATEGORY_COLOURS, OTHER_COLOUR } from '../viewer/colourPalettes';
 import type { PickerRow } from './ParameterPicker';
+import { showOnlyTitle } from '../inspector/showOnly';
+import { showOnlyButton } from './showOnlyButton';
 
 /** A table with more lines than this gets a find box. */
 export const TOTALS_FILTER_FROM = 20;
@@ -538,6 +540,7 @@ export class TotalsView {
               mean(line.stats),
               '',
             ]),
+            this.deps.controller.canShowOnly() ? (line, additive) => this.showOnly(row.key, u.key, line, additive) : undefined,
           ),
         );
       }
@@ -556,6 +559,7 @@ export class TotalsView {
       body.appendChild(
         this.tableEl(`${row.key}|`, lines, TEXT_COLUMNS, 'count', row.chart === 'pie', (l) => this.select(row.key, undefined, l), (l) =>
           this.copyRows.push([row.key, l.label, '', l.stats.count, '', '', '', '', l.distinct ?? '']),
+          this.deps.controller.canShowOnly() ? (l, additive) => this.showOnly(row.key, undefined, l, additive) : undefined,
         ),
       );
     }
@@ -563,6 +567,15 @@ export class TotalsView {
 
   private select(rowKey: string, unitKey: string | undefined, line: GroupLine): void {
     const n = this.deps.controller.selectLine(rowKey, { ...(unitKey !== undefined ? { unitKey } : {}), groupKey: line.key });
+    if (n === 0) this.setStatus(`No element of ${line.label} has a value`);
+  }
+
+  /** A line's eye (#70): show only the elements the line would select. */
+  private showOnly(rowKey: string, unitKey: string | undefined, line: GroupLine, additive: boolean): void {
+    const controller = this.deps.controller;
+    const groupBy = controller.getState().groupBy;
+    const label = groupBy ? `${shortKey(groupBy).name}: ${line.label}` : line.label;
+    const n = controller.showOnlyLine(rowKey, { ...(unitKey !== undefined ? { unitKey } : {}), groupKey: line.key }, label, additive);
     if (n === 0) this.setStatus(`No element of ${line.label} has a value`);
   }
 
@@ -579,6 +592,7 @@ export class TotalsView {
     compact: boolean,
     onPick: (line: GroupLine) => void,
     onCopy: (line: GroupLine) => void,
+    onShowOnly?: (line: GroupLine, additive: boolean) => void,
   ): HTMLElement {
     const wrap = el('div', compact ? 'totals-table compact' : 'totals-table');
     wrap.style.setProperty(
@@ -606,7 +620,7 @@ export class TotalsView {
     }
     for (const l of shown) onCopy(l);
 
-    const header = el('div', 'totals-line totals-line-head');
+    const header = el('div', onShowOnly ? 'totals-line totals-line-head with-eye' : 'totals-line totals-line-head');
     const groupName = this.deps.controller.getState().groupBy;
     const cols: { by: SortBy; label: string; title: string }[] = [
       { by: 'label', label: groupName ? shortKey(groupName).name : 'Group', title: 'Sort by name' },
@@ -659,7 +673,17 @@ export class TotalsView {
           onPick(line);
         }
       });
-      wrap.appendChild(lineEl);
+      if (onShowOnly) {
+        // Beside the line, not inside it: a button inside a button-like line
+        // would be a nested control.
+        const row = el('div', 'totals-line-wrap');
+        const eye = showOnlyButton(`Show only ${line.label}`, showOnlyTitle(`the elements of ${line.label}`), (additive) =>
+          onShowOnly(line, additive),
+        );
+        eye.dataset.focus = `eye:${tableKey}:${line.key}`;
+        row.append(lineEl, eye);
+        wrap.appendChild(row);
+      } else wrap.appendChild(lineEl);
     });
     if (shown.length > drawn.length) {
       wrap.appendChild(

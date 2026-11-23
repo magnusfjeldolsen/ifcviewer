@@ -42,6 +42,14 @@ export interface ParametersPanelDeps {
     additive: boolean,
     unit?: UnitRef,
   ): void;
+  /** Show only the elements with `value` at this parameter, in every loaded model (#70). */
+  showOnlyValue?(
+    modelId: string,
+    parameter: ParameterSummary,
+    value: ParameterValue,
+    additive: boolean,
+    unit?: UnitRef,
+  ): void;
   /**
    * A parameter was opened: get ready to list and select its values (the
    * viewer builds its value column in the background).
@@ -188,6 +196,11 @@ export class ParametersPanel {
       onPickValue: deps.selectValue
         ? (parameter, value, additive, unit) => {
             if (this.modelId !== null) deps.selectValue!(this.modelId, parameter, value, additive, unit);
+          }
+        : undefined,
+      onShowOnly: deps.showOnlyValue
+        ? (parameter, value, additive, unit) => {
+            if (this.modelId !== null) deps.showOnlyValue!(this.modelId, parameter, value, additive, unit);
           }
         : undefined,
       onOpen: deps.prepare

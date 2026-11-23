@@ -2023,6 +2023,61 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+/* "Show only" (#70): an eye beside a value, legend entry or totals line. */
+.param-value-item,
+.totals-line-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.param-value-item > .param-value,
+.totals-line-wrap > .totals-line {
+  flex: 1;
+  min-width: 0;
+}
+
+.show-only-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: #6b7280;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.show-only-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.show-only-btn:hover,
+.show-only-btn:focus-visible {
+  opacity: 1;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.show-only-btn:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+
+/* The totals header lines up with lines that have an eye at their end. */
+.totals-line-head.with-eye {
+  margin-right: 22px;
+}
+
 .param-group {
   color: #9ca3af;
 }

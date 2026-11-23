@@ -1,3 +1,4 @@
+import type * as THREE from 'three';
 import type { ModelManager } from './ModelManager';
 import type { HistoryManager } from '../core/history/HistoryManager';
 import { mementoCommand } from '../core/history/mementoCommand';
@@ -57,6 +58,22 @@ export interface AppearanceManagerDeps {
    * behaviour is identical minus the recording — preserving simple usage.
    */
   history?: HistoryManager;
+  /**
+   * The section plane, if any: show-only judges "visible now" as colouring
+   * does, and an element wholly behind the plane cannot be seen.
+   */
+  clipPlane?: () => Readonly<THREE.Plane> | null;
+}
+
+/** What a show-only did: how many of the elements kept can be seen, and why the rest cannot. */
+export interface ShowOnlyResult {
+  shown: number;
+  /** None of the elements was visible, so all of them were shown instead of narrowing. */
+  fresh: boolean;
+  /** Kept, but in a model that is switched off. */
+  switchedOff: number;
+  /** Kept, but wholly behind the section plane. */
+  cutAway: number;
 }
 
 /** Internal key: "<modelId>:<expressId>" (same scheme as SelectionManager). */
@@ -118,8 +135,101 @@ export class AppearanceManager {
    * v1: scope = selection only (A5).
    */
   isolate(scope: Scope): void {
+    this.isolateKeys(new Set(scope.map((id) => makeKey(id.modelId, id.expressId))), 'Isolate elements');
+  }
+
+  /**
+   * "Show only" (#70): hide everything but the elements with a value, as
+   * one undoable step. Unlike `isolate` it changes only what is hidden: an
+   * element it keeps keeps its transparency.
+   *
+   * "Visible now" is the rule colouring uses: not hidden, its model switched
+   * on, and not wholly behind the section plane.
+   *
+   * - `narrow`: of `elements`, those not hidden now are kept, so a second
+   *   show-only narrows the first (AND). When none of them can be seen now,
+   *   all of them are kept and unhidden instead (`fresh`): two values of one
+   *   parameter never share an element, and an empty view helps nobody. A
+   *   model switched off stays off; its matches are kept, not shown, and
+   *   counted apart, as are those behind the section plane.
+   * - `add`: `elements` are unhidden as well as what is shown now (OR);
+   *   nothing is hidden.
+   *
+   * Elements of models that are not loaded are ignored. `shown` counts the
+   * kept elements that can be seen afterwards; `switchedOff` and `cutAway`
+   * the kept ones that cannot, and why.
+   */
+  showOnly(
+    elements: readonly { modelId: string; expressId: number }[],
+    mode: 'narrow' | 'add',
+  ): ShowOnlyResult {
+    const mm = this.deps.modelManager;
+    const plane = this.deps.clipPlane?.() ?? null;
+    const matches = new Map<AppearanceKey, { modelId: string; expressId: number }>();
+    for (const e of elements) {
+      if (mm.hasElement(e.modelId, e.expressId)) matches.set(makeKey(e.modelId, e.expressId), e);
+    }
+    // Nothing has the value: hiding everything would only leave an empty view.
+    if (matches.size === 0) return { shown: 0, fresh: false, switchedOff: 0, cutAway: 0 };
+
     const before = this.serialize();
-    const keep = new Set(scope.map((id) => makeKey(id.modelId, id.expressId)));
+    let mutated = false;
+    const unhide = (key: AppearanceKey): void => {
+      if (this.states.get(key) === 'hidden') {
+        this.clearState(key);
+        mutated = true;
+      }
+    };
+    let keep: ReadonlyMap<AppearanceKey, { modelId: string; expressId: number }> = matches;
+    let fresh = false;
+    if (mode === 'add') {
+      for (const key of matches.keys()) unhide(key);
+    } else {
+      // Narrowing keeps the matches not hidden themselves, including those in
+      // a model switched off or behind the cut: switching the model on or
+      // moving the cut shows them. It starts over only when no match at all
+      // can be seen now.
+      const visibleNow = this.visibility(plane);
+      fresh = ![...matches.values()].some((e) => visibleNow(e.modelId, e.expressId));
+      if (!fresh) keep = new Map([...matches].filter(([key]) => this.states.get(key) !== 'hidden'));
+      for (const modelId of mm.getModelIds()) {
+        for (const expressId of mm.elementIds(modelId)) {
+          const key = makeKey(modelId, expressId);
+          if (keep.has(key)) unhide(key);
+          else if (this.states.get(key) !== 'hidden') {
+            this.setState(key, 'hidden');
+            mutated = true;
+          }
+        }
+      }
+    }
+    this.flush();
+    this.finishOp(mutated, before, mode === 'add' ? 'Show elements' : 'Show only');
+
+    // What can be seen now that it is done.
+    const visibleAfter = this.visibility(plane);
+    const result: ShowOnlyResult = { shown: 0, fresh, switchedOff: 0, cutAway: 0 };
+    for (const e of keep.values()) {
+      if (visibleAfter(e.modelId, e.expressId)) result.shown++;
+      else if (!mm.isVisible(e.modelId)) result.switchedOff++;
+      else if (this.states.get(makeKey(e.modelId, e.expressId)) !== 'hidden') result.cutAway++;
+    }
+    return result;
+  }
+
+  /** "Can be seen" per element, as colouring decides it; predicates cached per model. */
+  private visibility(plane: Readonly<THREE.Plane> | null): (modelId: string, expressId: number) => boolean {
+    const perModel = new Map<string, ((expressId: number) => boolean) | null>();
+    return (modelId, expressId) => {
+      let p = perModel.get(modelId);
+      if (p === undefined) perModel.set(modelId, (p = this.deps.modelManager.visibleElements(modelId, plane)));
+      return p !== null && p(expressId);
+    };
+  }
+
+  /** Every element not in `keep` hidden, every one in it back to normal: one command. */
+  private isolateKeys(keep: ReadonlySet<AppearanceKey>, label: string): void {
+    const before = this.serialize();
     let mutated = false;
 
     for (const modelId of this.deps.modelManager.getModelIds()) {
@@ -140,7 +250,7 @@ export class AppearanceManager {
     }
 
     this.flush();
-    this.finishOp(mutated, before, 'Isolate elements');
+    this.finishOp(mutated, before, label);
   }
 
   /** Clear all hidden state (restore visibility). Leaves transparency intact. */
