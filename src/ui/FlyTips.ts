@@ -9,18 +9,28 @@
 
 const COLLAPSED_KEY = 'ifcviewer:fly-tips-collapsed';
 
-const TIPS: ReadonlyArray<readonly [string, string]> = [
-  ['W A S D', 'Forward, left, back, right'],
-  ['E / Q', 'Up / down'],
-  ['← →', 'Turn left / right'],
-  ['↑ ↓', 'Look up / down'],
-  ['Drag', 'Look around'],
-  ['Scroll, X / Z', 'Faster / slower'],
-  ['Shift', 'Hold to go 4× faster'],
-  ['Space', 'Hold for slow and precise'],
-  ['Esc or G', 'Back to orbit'],
-];
+/** How the mouse looks around: captured (`mouse`) or by dragging (`drag`). */
+export type FlyTipsLook = 'mouse' | 'drag';
 
+/** The key list. Only the mouse rows change with how looking works. */
+export function flyTips(look: FlyTipsLook): ReadonlyArray<readonly [string, string]> {
+  return [
+    ['W A S D', 'Forward, left, back, right'],
+    ['E / Q', 'Up / down'],
+    ['← →', 'Turn left / right'],
+    ['↑ ↓', 'Look up / down'],
+    look === 'mouse'
+      ? ['Mouse', 'Move it to look']
+      : ['Drag', 'Drag to look (click the view to capture the mouse)'],
+    look === 'mouse' ? ['Click', 'Selects what is under the +'] : ['Click', 'Selects what you click'],
+    ['Right-click', 'Menu (leaves flying)'],
+    ['Scroll, X / Z', 'Faster / slower'],
+    ['Shift', 'Hold to go 4× faster'],
+    ['Space', 'Hold for slow and precise'],
+    ['H', 'Hide or show these keys'],
+    ['Esc', 'Leaves flying (G too)'],
+  ];
+}
 /** Cruising speed for display: tidy steps stay tidy (0.75 m/s, 5 m/s). */
 export function formatFlySpeed(speed: number): string {
   const text = speed < 1 ? speed.toFixed(2).replace(/0$/, '') : String(Math.round(speed * 100) / 100);
@@ -44,6 +54,9 @@ export class FlyTips {
   private listEl: HTMLElement;
   private toggleBtn: HTMLButtonElement;
   private collapsed: boolean;
+  private look: FlyTipsLook = 'mouse';
+  /** The + at the centre of the view: where clicks land while the mouse is captured. */
+  private crosshair: HTMLElement;
 
   constructor(parent: HTMLElement, initialSpeed: number) {
     this.collapsed = readCollapsed();
@@ -75,7 +88,55 @@ export class FlyTips {
 
     this.listEl = document.createElement('dl');
     this.listEl.className = 'fly-tips-list';
-    for (const [keys, action] of TIPS) {
+    this.renderList();
+
+    this.el.append(head, this.listEl);
+    parent.appendChild(this.el);
+
+    this.crosshair = document.createElement('div');
+    this.crosshair.className = 'fly-crosshair';
+    this.crosshair.hidden = true;
+    this.crosshair.setAttribute('aria-hidden', 'true');
+    parent.appendChild(this.crosshair);
+
+    this.setSpeed(initialSpeed);
+    this.applyCollapsed();
+  }
+
+  show(): void {
+    this.el.hidden = false;
+    this.crosshair.hidden = this.look !== 'mouse';
+  }
+
+  hide(): void {
+    this.el.hidden = true;
+    this.crosshair.hidden = true;
+  }
+
+  /** Switch the tips (and the crosshair) between captured mouse and drag-to-look. */
+  setLook(look: FlyTipsLook): void {
+    if (look === this.look) return;
+    this.look = look;
+    this.renderList();
+    if (this.isShown()) this.crosshair.hidden = look !== 'mouse';
+  }
+
+  getLook(): FlyTipsLook {
+    return this.look;
+  }
+
+  isCrosshairShown(): boolean {
+    return !this.crosshair.hidden;
+  }
+
+  /** Fold to the speed or unfold the keys (the H key). */
+  toggleCollapsed(): void {
+    this.setCollapsed(!this.collapsed);
+  }
+
+  private renderList(): void {
+    this.listEl.replaceChildren();
+    for (const [keys, action] of flyTips(this.look)) {
       const dt = document.createElement('dt');
       const kbd = document.createElement('kbd');
       kbd.textContent = keys;
@@ -84,20 +145,6 @@ export class FlyTips {
       dd.textContent = action;
       this.listEl.append(dt, dd);
     }
-
-    this.el.append(head, this.listEl);
-    parent.appendChild(this.el);
-
-    this.setSpeed(initialSpeed);
-    this.applyCollapsed();
-  }
-
-  show(): void {
-    this.el.hidden = false;
-  }
-
-  hide(): void {
-    this.el.hidden = true;
   }
 
   isShown(): boolean {
@@ -120,13 +167,14 @@ export class FlyTips {
 
   dispose(): void {
     this.el.remove();
+    this.crosshair.remove();
   }
 
   private applyCollapsed(): void {
     this.el.classList.toggle('collapsed', this.collapsed);
     this.listEl.hidden = this.collapsed;
     this.toggleBtn.textContent = this.collapsed ? 'Keys' : 'Hide';
-    this.toggleBtn.title = this.collapsed ? 'Show the flying keys' : 'Hide the flying keys, keep the speed';
+    this.toggleBtn.title = this.collapsed ? 'Show the flying keys (H)' : 'Hide the flying keys, keep the speed (H)';
     this.toggleBtn.setAttribute('aria-expanded', String(!this.collapsed));
   }
 }

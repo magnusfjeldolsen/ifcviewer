@@ -3076,3 +3076,24 @@ html, body {
     display: none !important;
   }
 }
+
+/* The + at the centre of the view while the mouse is captured for flying:
+   clicks, hover and the tools all land here. */
+.fly-crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  pointer-events: none;
+  z-index: 9;
+  background:
+    linear-gradient(#111827, #111827) center / 2px 100% no-repeat,
+    linear-gradient(#111827, #111827) center / 100% 2px no-repeat;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
+}
+
+.fly-crosshair[hidden] {
+  display: none;
+}

@@ -29,7 +29,7 @@ describe('FlyTips', () => {
     tips.show();
     expect(tips.isShown()).toBe(true);
     const text = parent.textContent ?? '';
-    for (const k of ['W A S D', 'E / Q', '← →', '↑ ↓', 'Drag', 'X / Z', 'Shift', 'Space', 'Esc or G']) {
+    for (const k of ['W A S D', 'E / Q', '← →', '↑ ↓', 'Move it to look', 'Selects what is under the +', 'Menu (leaves flying)', 'X / Z', 'Shift', 'Space', 'Hide or show these keys', 'Leaves flying']) {
       expect(text).toContain(k);
     }
     expect(text).toContain('5 m/s');
@@ -148,5 +148,43 @@ describe('Toolbar — hiding a button', () => {
     btn.click();
     expect(action).toHaveBeenCalledOnce();
     expect(document.activeElement).not.toBe(btn);
+  });
+});
+
+describe('FlyTips — captured mouse or drag-to-look', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = '';
+  });
+
+  it('shows the crosshair only while shown with the mouse captured', () => {
+    const tips = new FlyTips(document.body, 5);
+    expect(tips.isCrosshairShown()).toBe(false);
+    tips.show();
+    expect(tips.isCrosshairShown()).toBe(true);
+    tips.setLook('drag');
+    expect(tips.isCrosshairShown()).toBe(false); // the cursor is there; clicks land under it
+    tips.setLook('mouse');
+    expect(tips.isCrosshairShown()).toBe(true);
+    tips.hide();
+    expect(tips.isCrosshairShown()).toBe(false);
+  });
+
+  it('says how to look in each case', () => {
+    const tips = new FlyTips(document.body, 5);
+    tips.setLook('drag');
+    expect(document.body.textContent).toContain('Drag to look (click the view to capture the mouse)');
+    expect(document.body.textContent).not.toContain('under the +');
+    tips.setLook('mouse');
+    expect(document.body.textContent).toContain('Move it to look');
+    expect(document.body.textContent).toContain('Selects what is under the +');
+  });
+
+  it('H folds and unfolds without the mouse', () => {
+    const tips = new FlyTips(document.body, 5);
+    tips.toggleCollapsed();
+    expect(tips.isCollapsed()).toBe(true);
+    tips.toggleCollapsed();
+    expect(tips.isCollapsed()).toBe(false);
   });
 });

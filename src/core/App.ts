@@ -415,6 +415,9 @@ ${key}`. */
       else this.flyTips.hide();
     });
     this.viewer.onFlySpeedChange((speed) => this.flyTips.setSpeed(speed));
+    // Captured mouse or drag-to-look (the lock was refused): the tips and the
+    // crosshair say which.
+    this.viewer.onFlyLookChange((look) => this.flyTips.setLook(look));
     // A touch-only device has no way to fly, so it is not offered — until a
     // key press shows a keyboard is there after all.
     if (looksTouchOnly()) {
@@ -621,6 +624,17 @@ ${key}`. */
       label: 'Fly through the model',
       plainOnly: true,
       action: () => this.viewer.toggleFlying(),
+    });
+
+    // While flying the mouse is captured, so the tips' Hide button cannot be
+    // clicked: H does the same. Outside flying the key does nothing.
+    this.keyboardShortcuts.register({
+      key: 'h',
+      label: 'Show / hide the flying keys',
+      plainOnly: true,
+      action: () => {
+        if (this.viewer.isFlying()) this.flyTips.toggleCollapsed();
+      },
     });
 
     this.keyboardShortcuts.register({
