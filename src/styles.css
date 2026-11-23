@@ -2023,6 +2023,17 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Counts that follow what can be seen (#115): a value nobody can see now stays listed, dimmed. */
+.param-value-item.none .param-value,
+.param-value-item.none .show-only-btn,
+.param-row.none > .param-head {
+  opacity: 0.5;
+}
+
+.param-count.partial {
+  color: #b45309;
+}
+
 /* "Show only" (#70): an eye beside a value, legend entry or totals line. */
 .param-value-item,
 .totals-line-wrap {

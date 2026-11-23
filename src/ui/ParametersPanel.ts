@@ -66,6 +66,12 @@ export interface ParametersPanelDeps {
   totals?: { getElement(): HTMLElement; setShown(on: boolean): void };
   /** Add a parameter as a row of the Totals tab (the list's Σ button). */
   addToTotals?(parameter: ParameterSummary): void;
+  /**
+   * The model whose list is on screen (the Parameters tab of an open panel),
+   * or null when none is: the counts of what can be seen (#115) are worked
+   * out only while there is one. Also asked again once a model is described.
+   */
+  watchVisibility?(modelId: string | null): void;
 }
 
 export type ParametersTab = 'parameters' | 'totals';
@@ -271,6 +277,12 @@ export class ParametersPanel {
     // The model's name and picker belong to the Parameters tab.
     this.modelArea(!totals);
     this.deps.totals?.setShown(totals && this.isOpen());
+    this.watchVisibility();
+  }
+
+  /** Tell `watchVisibility` which model's list is on screen, if any. */
+  private watchVisibility(): void {
+    this.deps.watchVisibility?.(this.isOpen() && this.tab === 'parameters' ? this.modelId : null);
   }
 
   private modelArea(on: boolean): void {
@@ -295,6 +307,7 @@ export class ParametersPanel {
     }
     this.refreshModels();
     this.list.setData(null);
+    this.watchVisibility();
     this.markColoured();
     this.setProgress(null);
     this.statusEl.classList.remove('error');
@@ -324,6 +337,7 @@ export class ParametersPanel {
         if (result.unreadable) status += ` · ${counts.format(result.unreadable)} could not be read`;
         this.statusEl.textContent = status;
         this.list.setData(result);
+        this.watchVisibility();
       },
       (err: unknown) => {
         if (gen !== this.generation) return;
@@ -342,6 +356,7 @@ export class ParametersPanel {
     this.container.classList.add('hidden');
     // Totals stop counting and give up their builds while the panel is closed.
     this.deps.totals?.setShown(false);
+    this.watchVisibility();
   }
 
   isOpen(): boolean {

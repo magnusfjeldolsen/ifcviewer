@@ -27,6 +27,7 @@ import { shownNumber, type ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 import { showOnlyTitle } from '../inspector/showOnly';
 import { showOnlyButton } from './showOnlyButton';
+import { visibleValueKey, type VisibleView } from '../inspector/visibleCounts';
 
 export type ParameterSort = 'name' | 'count';
 
@@ -88,6 +89,24 @@ function colourButtonTitle(on: boolean): string {
 /** "412 of 1,235". */
 export function countText(p: ParameterSummary, scopeSize: number): string {
   return `${counts.format(p.count)} of ${counts.format(scopeSize)}`;
+}
+
+/**
+ * A row's count while part of the model cannot be seen (#115): "12 of 40"
+ * visible elements. A parameter whose values were never read says its count
+ * is the whole model's, so no one mistakes it for a visible count.
+ */
+export function visibleCountText(p: ParameterSummary, scopeSize: number, view: VisibleView | null): string {
+  if (!view) return countText(p, scopeSize);
+  const seen = view.parameters.get(p.key);
+  return seen
+    ? `${counts.format(seen.count)} of ${counts.format(view.elements)}`
+    : `${countText(p, scopeSize)} in model`;
+}
+
+/** A value's count: all of them, or "12 of 40" when only some can be seen. */
+export function visibleValueCountText(total: number, seen: number | null): string {
+  return seen === null || seen === total ? counts.format(total) : `${counts.format(seen)} of ${counts.format(total)}`;
 }
 
 const KIND_TEXT: Record<ParameterSummary['kind'], string> = {
@@ -190,6 +209,8 @@ export class ParameterList {
   private refreshOpen: (() => void) | null = null;
   /** The parameter the model is coloured by, if it is this list's model. */
   private colouredKey: string | null = null;
+  /** What can be seen, when some of the model cannot (null: everything, or not counted yet). */
+  private view: VisibleView | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -257,6 +278,56 @@ export class ParameterList {
     }
     this.data = data;
     this.render();
+  }
+
+  /**
+   * Count what can be seen (#115), or null when everything can. Updates the
+   * numbers where they stand: an open row, its filter and the scroll stay.
+   */
+  setVisible(view: VisibleView | null): void {
+    this.view = view;
+    const data = this.data;
+    if (!data) return;
+    const active = this.activeView();
+    this.summaryEl.textContent = this.summaryText(data);
+    for (const p of data.parameters) {
+      const li = this.rowEls.get(p.key);
+      if (li) this.paintCount(li, p, data.scopeSize, active);
+    }
+    this.refreshOpen?.();
+  }
+
+  /** The view, if it is of the model shown. */
+  private activeView(): VisibleView | null {
+    return this.view && this.data && this.view.modelId === this.data.modelId ? this.view : null;
+  }
+
+  private summaryText(data: ModelParameters): string {
+    const shown = this.listEl.children.length;
+    const total = data.parameters.length;
+    let text =
+      shown === total ? `${counts.format(total)} parameters` : `${counts.format(shown)} of ${counts.format(total)} parameters`;
+    const active = this.activeView();
+    if (active) {
+      text += ` · counts cover the ${counts.format(active.elements)} of ${counts.format(active.total)} elements that can be seen`;
+    }
+    return text;
+  }
+
+  /** The count on one row's header, and whether the row has nothing visible. */
+  private paintCount(li: HTMLElement, p: ParameterSummary, scopeSize: number, active: VisibleView | null): void {
+    const span = li.querySelector<HTMLElement>('.param-count');
+    if (!span) return;
+    const text = visibleCountText(p, scopeSize, active);
+    span.textContent = text;
+    const seen = active?.parameters.get(p.key);
+    span.classList.toggle('partial', !!seen);
+    span.title = seen
+      ? `${text} elements that can be seen have a value. In the whole model: ${countText(p, scopeSize)}`
+      : active
+        ? `${text}: not counted for what can be seen until the parameter has been opened`
+        : text;
+    li.classList.toggle('none', !!seen && seen.count === 0);
   }
 
   setSort(sort: ParameterSort): void {
@@ -334,11 +405,6 @@ export class ParameterList {
       return;
     }
     const shown = visibleParameters(data.parameters, this.filterInput.value, this.sort);
-    const total = data.parameters.length;
-    this.summaryEl.textContent =
-      shown.length === total
-        ? `${counts.format(total)} parameters`
-        : `${counts.format(shown.length)} of ${counts.format(total)} parameters`;
 
     const frag = document.createDocumentFragment();
     for (const p of shown) {
@@ -347,6 +413,7 @@ export class ParameterList {
       frag.appendChild(li);
     }
     this.listEl.appendChild(frag);
+    this.summaryEl.textContent = this.summaryText(data);
   }
 
   /** Replace one rendered row in place (when it opens or closes). */
@@ -409,6 +476,7 @@ export class ParameterList {
     head.appendChild(key);
     head.appendChild(meta);
     li.appendChild(head);
+    this.paintCount(li, p, scopeSize, this.activeView());
 
     const onColourBy = this.options.onColourBy;
     if (onColourBy) {
@@ -498,15 +566,19 @@ export class ParameterList {
     body.appendChild(status);
     body.appendChild(list);
 
-    const missing = scopeSize - p.count;
-    if (missing > 0) {
-      const without = document.createElement('div');
-      without.className = 'param-values-without';
-      without.textContent = `${counts.format(missing)} without this parameter`;
-      body.appendChild(without);
-    }
+    const without = document.createElement('div');
+    without.className = 'param-values-without';
 
     const draw = (): void => {
+      const active = this.activeView();
+      const seenParam = active?.parameters.get(p.key);
+      const missing = seenParam && active ? active.elements - seenParam.count : scopeSize - p.count;
+      if (missing > 0) {
+        without.textContent = `${counts.format(missing)} without this parameter`;
+        body.appendChild(without);
+      } else {
+        without.remove();
+      }
       list.replaceChildren();
       status.textContent = '';
       if (state.error) {
@@ -546,7 +618,10 @@ export class ParameterList {
         label.textContent = text;
         const count = document.createElement('span');
         count.className = 'param-value-count';
-        count.textContent = counts.format(v.count);
+        // With part of the model out of sight: how many of them can be seen.
+        const seen = seenParam ? (seenParam.values.get(visibleValueKey(v.value, v.unit?.key)) ?? 0) : null;
+        count.textContent = visibleValueCountText(v.count, seen);
+        if (seen !== null && seen !== v.count) count.title = `${counts.format(seen)} of ${counts.format(v.count)} can be seen`;
         b.appendChild(label);
         b.appendChild(count);
         if (this.options.onPickValue) {
@@ -558,8 +633,9 @@ export class ParameterList {
         }
         li.appendChild(b);
         const onShowOnly = this.options.onShowOnly;
+        if (seen === 0) li.classList.add('none');
         if (onShowOnly) {
-          li.className = 'param-value-item';
+          li.classList.add('param-value-item');
           li.appendChild(
             showOnlyButton(`Show only ${text}`, showOnlyTitle(`the elements with ${text}`), (additive) =>
               onShowOnly(p, v.value, additive, v.unit),

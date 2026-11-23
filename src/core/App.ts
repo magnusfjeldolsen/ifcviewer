@@ -50,6 +50,7 @@ import { ColourByController, colourScopeFor, isColouringBy, staleWhenVisibilityC
 import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
 import { ParameterPicker, type PickerRow } from '../ui/ParameterPicker';
 import { TotalsController, type TotalsScope } from '../inspector/TotalsController';
+import { VisibleCountsController } from '../inspector/VisibleCountsController';
 import { TotalsView } from '../ui/TotalsView';
 import type { ParameterSummary, ParameterValue } from '../inspector/types';
 import type { UnitRef } from '../inspector/units';
@@ -205,6 +206,8 @@ ${key}`. */
   private colourLegend!: ColourLegend;
   private parameterPicker!: ParameterPicker;
   private totals!: TotalsController;
+  /** Counts in the Parameters list that follow what can be seen (#115). */
+  private visibleCounts!: VisibleCountsController;
   private totalsView!: TotalsView;
   // Told when a model load finishes or fails. Only the `?stats` debug
   // surface listens; see `onLoadSettled`.
@@ -456,6 +459,7 @@ ${key}`. */
         this.positionTool.setModelVisible(id, visible);
         this.colourBy?.markStale();
         this.totals?.invalidate();
+        this.visibleCounts?.invalidate();
       },
       onRemoveModel: (id) => {
         // Undo history may hold expressIds of the model we're about to remove;
@@ -775,12 +779,33 @@ ${key}`. */
       modelName: (id) => this.modelRecords.get(id)?.name ?? 'Model',
     });
     // The totals follow the selection and what can be seen (debounced).
+    // The Parameters list's counts follow the same visibility (#115): they
+    // read the columns already built, and run only while the list is shown.
+    this.visibleCounts = new VisibleCountsController({
+      scopeIds: (modelId) => this.propertyRepository.scopeOf(modelId),
+      visibility: (modelId) => this.modelManager.visibleElements(modelId, this.clippingTool.getClipPlane()),
+      builtColumns: (modelId) => this.propertyRepository.builtColumns(modelId),
+      onView: (view) => this.parametersPanel.getList().setVisible(view),
+    });
     const recount = (): void => this.totals.invalidate();
+    const recountVisible = (): void => this.visibleCounts.invalidate();
     this.selectionManager.onChange(recount);
-    this.appearanceManager.onChange(recount);
-    this.clippingTool.onStateChange(recount);
-    this.clippingTool.onPlaneMoved(recount);
-    this.loadGate.onIdle(recount);
+    this.appearanceManager.onChange(() => {
+      recount();
+      recountVisible();
+    });
+    this.clippingTool.onStateChange(() => {
+      recount();
+      recountVisible();
+    });
+    this.clippingTool.onPlaneMoved(() => {
+      recount();
+      recountVisible();
+    });
+    this.loadGate.onIdle(() => {
+      recount();
+      recountVisible();
+    });
 
     // Parameters panel (#67): which parameters a model has, opened from the
     // model's row in the Models panel. Discovery runs in the worker, never
@@ -789,6 +814,7 @@ ${key}`. */
     this.parametersPanel = new ParametersPanel(appEl, {
       totals: this.totalsView,
       addToTotals: (parameter) => this.totals.addRow(parameter.key),
+      watchVisibility: (modelId) => this.visibleCounts.watch(modelId),
       getModels: () => [...this.modelRecords.values()]
         .filter((r) => this.modelManager.getModel(r.id))
         .map((r) => ({ id: r.id, name: r.name })),
@@ -827,6 +853,8 @@ ${parameter.key}`;
             if (!this.preparedColumns.has(wanted)) return;
             return this.propertyRepository.getColumn(modelId, parameter.key);
           })
+          // The column is there now: the opened row can say what is visible.
+          .then(() => this.visibleCounts.invalidate())
           // Given up, or failed: picking a value asks again and reports a failure then.
           .catch(() => {});
       },
@@ -2290,6 +2318,7 @@ ${parameter.key}`);
     if (this.colourLegend) this.colourLegend.dispose();
     if (this.parameterPicker) this.parameterPicker.dispose();
     if (this.totals) this.totals.dispose();
+    this.visibleCounts?.dispose();
     if (this.totalsView) this.totalsView.dispose();
     this.marqueeSelector.dispose();
     // Before toolManager.dispose (which disposes the measurement tool), so the

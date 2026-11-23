@@ -1,0 +1,93 @@
+/**
+ * Keeps the Parameters list's counts in step with what can be seen (#115).
+ *
+ * Uses the rule the Totals tab uses (`visibility` in `TotalsController`: the
+ * model switched on, the element not hidden, not cut away). Counts come from
+ * the value columns that are already built, so a recount is a few passes over
+ * typed arrays; it never asks for a column. Changes are debounced like the
+ * Totals', and nothing runs while the list is not on screen: a change only
+ * marks the counts out of date.
+ */
+
+import type { ParameterColumn } from './parameterColumn';
+import { countVisible, visibleRows, type VisibleParameter, type VisibleView } from './visibleCounts';
+
+export const VISIBLE_COUNTS_DEBOUNCE_MS = 80;
+
+export interface VisibleCountsDeps {
+  /** The elements a model's columns are rows of; undefined before it is described. */
+  scopeIds(modelId: string): Int32Array | undefined;
+  /** Which of a model's elements can be seen now (the Totals tab's rule). */
+  visibility(modelId: string): ((expressId: number) => boolean) | null;
+  /** The columns of a model that are built now. */
+  builtColumns(modelId: string): readonly ParameterColumn[];
+  /** The counts changed: a view, or null when everything can be seen. */
+  onView(view: VisibleView | null): void;
+  debounceMs?: number;
+}
+
+export class VisibleCountsController {
+  private modelId: string | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  /** How long the last recount took, ms (for the benchmark). */
+  lastMs = 0;
+
+  constructor(private readonly deps: VisibleCountsDeps) {}
+
+  /**
+   * The model whose list is on screen; null when none is (nothing is
+   * counted). Counts at once, so asking again after the model was described
+   * picks up its scope.
+   */
+  watch(modelId: string | null): void {
+    this.modelId = modelId;
+    this.cancelTimer();
+    if (modelId !== null) this.refresh();
+  }
+
+  /** What can be seen changed, or a column was built: recount shortly. */
+  invalidate(): void {
+    if (this.modelId === null) return;
+    this.cancelTimer();
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.refresh();
+    }, this.deps.debounceMs ?? VISIBLE_COUNTS_DEBOUNCE_MS);
+  }
+
+  refresh(): void {
+    this.cancelTimer();
+    const modelId = this.modelId;
+    if (modelId === null) return;
+    const t0 = performance.now();
+    const view = this.compute(modelId);
+    this.lastMs = performance.now() - t0;
+    try {
+      performance.measure('parameters: visible recount', { start: t0, end: t0 + this.lastMs });
+    } catch {
+      // Older engines: the time is still in `lastMs`.
+    }
+    this.deps.onView(view);
+  }
+
+  dispose(): void {
+    this.cancelTimer();
+    this.modelId = null;
+  }
+
+  private compute(modelId: string): VisibleView | null {
+    const ids = this.deps.scopeIds(modelId);
+    const visible = this.deps.visibility(modelId);
+    if (!ids || !visible) return null;
+    const rows = visibleRows(ids, visible);
+    if (!rows) return null;
+    const parameters = new Map<string, VisibleParameter>();
+    for (const c of this.deps.builtColumns(modelId)) parameters.set(c.key, countVisible(c, rows));
+    return { modelId, elements: rows.length, total: ids.length, parameters };
+  }
+
+  private cancelTimer(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
