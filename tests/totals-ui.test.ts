@@ -509,6 +509,28 @@ describe('Parameters panel with a Totals tab', () => {
   });
 });
 
+describe('the model picker follows the loaded models (#113)', () => {
+  it('lists a model loaded, and drops one removed, while the panel is open', () => {
+    const models = [{ id: 'm', name: 'A.ifc' }];
+    const data: ModelParameters = { modelId: 'm', scopeSize: 1, parameters: [] };
+    const parent = document.createElement('div');
+    const p = new ParametersPanel(parent, { getModels: () => models, describe: async () => data });
+    p.open('m');
+    const select = parent.querySelector<HTMLSelectElement>('.params-panel-select')!;
+    expect(select.options).toHaveLength(1);
+    expect(select.classList.contains('hidden')).toBe(true);
+    models.push({ id: 'n', name: 'B.ifc' });
+    p.refreshModels();
+    expect([...select.options].map((o) => o.value)).toEqual(['m', 'n']);
+    expect(select.classList.contains('hidden')).toBe(false);
+    expect(select.value).toBe('m');
+    models.shift();
+    p.onModelRemoved('m');
+    expect([...select.options].map((o) => o.value)).toEqual(['n']);
+    expect(p.currentModel()).toBe('n');
+  });
+});
+
 describe('the right-click menu', () => {
   const actions = (): ContextMenuActions => ({
     hide: () => {},

@@ -510,6 +510,8 @@ ${key}`. */
         if (url) this.loadFromUrl(url);
       },
       onShowParameters: (id) => this.parametersPanel?.open(id),
+      // Deferred: the model's record is set just after its row is added.
+      onModelAdded: () => queueMicrotask(() => this.parametersPanel?.refreshModels()),
     });
 
     // Session persistence
