@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as THREE from 'three';
 import { ClippingTool } from '../src/tools/ClippingTool';
+import { fovSizeFactor } from '../src/tools/labelScale';
 
 /**
  * These tests cover the observer surface that the contextual-action tray
@@ -360,8 +361,9 @@ describe('ClippingTool — handle drag follow-ups', () => {
   it('reports the handle, as drawn, for the view to keep between its planes', () => {
     const box = new THREE.Box3();
     tool.expandViewBounds(box);
-    // update() scales the handle to the camera distance (5) times 0.03.
-    const reach = 5 * 0.03 * 2;
+    // update() scales the handle to the camera distance (5) times 0.03,
+    // corrected from the 45° it was tuned at to this camera's 50°.
+    const reach = 5 * 0.03 * fovSizeFactor(50) * 2;
     expect(box.containsPoint(new THREE.Vector3(0, 0, 0))).toBe(true);
     expect(box.max.x).toBeCloseTo(reach);
     expect(box.min.y).toBeCloseTo(-reach);

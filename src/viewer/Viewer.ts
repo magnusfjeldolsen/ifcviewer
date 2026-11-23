@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { clippingPlanesForView, computeFitPosition, maxViewDistance } from './cameraUtils';
+import { clippingPlanesForView, computeFitPosition, maxViewDistance, type Lens } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -15,6 +15,10 @@ import {
 import { FlyController } from './FlyController';
 import { exitAnchorDistance } from './flyMath';
 import { FovEase, FLY_FOV_DEG, ORBIT_FOV_DEG } from './flyFov';
+import { markerScale } from '../tools/labelScale';
+
+/** Pivot and transient markers: scene size per metre of distance at 45 degrees. */
+const PIVOT_MARKER_SCREEN_SIZE = 0.008;
 
 /**
  * Who drives the camera. Exactly one at a time — see "Camera Ownership" in
@@ -993,7 +997,9 @@ export class Viewer {
     // pose wants that pose, not a flight that carries on from it.
     this.exitFlying();
     this._controlsMode = 'user';
-    // A saved view was taken in orbit, at the orbit field of view.
+    // A restored pose always lands in orbit, so at the orbit field of view —
+    // even one autosaved while flying, since a saved state holds only the
+    // position and the anchor, never the field of view.
     this.snapFov(ORBIT_FOV_DEG);
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
     this.controls.target.set(state.target.x, state.target.y, state.target.z);
@@ -1050,8 +1056,13 @@ export class Viewer {
     };
   }
 
+  /** The lens a fit ends with: always the orbit field of view, whatever it is now. */
+  private orbitLens(): Lens {
+    return { verticalFovDeg: ORBIT_FOV_DEG, aspect: this.camera.aspect };
+  }
+
   fitToBox(box: THREE.Box3): void {
-    const fit = computeFitPosition(box);
+    const fit = computeFitPosition(box, this.orbitLens());
     if (!fit) return;
 
     this.exitFlying();
@@ -1069,7 +1080,7 @@ export class Viewer {
   }
 
   flyToBox(box: THREE.Box3): Promise<void> {
-    const fit = computeFitPosition(box);
+    const fit = computeFitPosition(box, this.orbitLens());
     if (!fit) return Promise.resolve();
 
     // Fit View while flying means "show me the whole thing": leave flying and
@@ -1545,6 +1556,7 @@ export class Viewer {
       hitDistance: this.lastHitDistance,
       scene: this.viewBox,
       clearOf: [this.gridBox],
+      lens: { verticalFovDeg: this.camera.fov, aspect: this.camera.aspect },
     });
     if (near === this.camera.near && far === this.camera.far) return;
     this.camera.near = near;
@@ -1631,7 +1643,7 @@ export class Viewer {
     for (const marker of [this.pivotMarker, this.transientMarker]) {
       if (!marker) continue;
       const dist = this.camera.position.distanceTo(marker.position);
-      marker.scale.setScalar(dist * 0.008);
+      marker.scale.setScalar(markerScale(dist, PIVOT_MARKER_SCREEN_SIZE, this.camera.fov));
     }
   };
 

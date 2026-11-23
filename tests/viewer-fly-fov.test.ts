@@ -218,4 +218,79 @@ describe('fly field of view — leaving', () => {
     flyWide();
     expect(Object.keys(viewer.getCameraState()).sort()).toEqual(['position', 'target']);
   });
+
+  it('one huge frame step (tab hidden during the ease) lands exactly on the target', () => {
+    viewer.enterFlying();
+    frame();
+    expect(fov()).toBeGreaterThan(ORBIT_FOV_DEG);
+    frame(5000);
+    expect(fov()).toBe(FLY_FOV_DEG);
+    expect(projectionMatchesFov()).toBe(true);
+    const render = vi.spyOn(viewer.getRenderer(), 'render');
+    run(300);
+    expect(render).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Fly-to tweens run on their own requestAnimationFrame callbacks. Here those
+ * are queued and run once per frame, after the viewer's own loop step, the
+ * way the browser interleaves them.
+ */
+describe('fly field of view — with a fly-to tween', () => {
+  let queue: FrameRequestCallback[] = [];
+
+  beforeEach(() => {
+    queue = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      // The viewer's own loop is stepped by hand in `frame`.
+      if (cb !== (viewer as unknown as { animate: unknown }).animate) queue.push(cb);
+      return queue.length;
+    });
+  });
+
+  function tweenFrame(ms = 1000 / 60): void {
+    frame(ms);
+    const due = queue;
+    queue = [];
+    for (const cb of due) cb(now);
+  }
+
+  function tweenRun(ms: number): void {
+    const end = now + ms;
+    while (now < end) tweenFrame();
+  }
+
+  it('entering flying while a fly-to is running stops it and eases wider', () => {
+    void viewer.flyToBox(new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 1, 1)));
+    tweenRun(100);
+    expect(viewer.getControlsMode()).toBe('animating');
+    viewer.enterFlying();
+    expect(viewer.getControlsMode()).toBe('flying');
+    const p = viewer.getCamera().position.clone();
+    tweenRun(FOV_EASE_MS + 100);
+    expect(viewer.getControlsMode()).toBe('flying');
+    // The tween no longer moves the camera.
+    expect(viewer.getCamera().position.distanceTo(p)).toBe(0);
+    expect(fov()).toBe(FLY_FOV_DEG);
+    expect(projectionMatchesFov()).toBe(true);
+  });
+
+  it('a fly-to started from flying ends with the field of view at exactly 45', async () => {
+    viewer.enterFlying();
+    tweenRun(FOV_EASE_MS + 20);
+    expect(fov()).toBe(FLY_FOV_DEG);
+    const done = viewer.flyToBox(box());
+    expect(viewer.getControlsMode()).toBe('animating');
+    // Read the field of view on the very frame the tween hands back.
+    let frames = 0;
+    while (viewer.getControlsMode() === 'animating' && frames++ < 200) tweenFrame();
+    const fovAtComplete = fov();
+    await done;
+    expect(viewer.getControlsMode()).toBe('user');
+    // The tween lasts 400 ms; the ease 250 ms.
+    expect(frames).toBeGreaterThan(FOV_EASE_MS / (1000 / 60));
+    expect(fovAtComplete).toBe(ORBIT_FOV_DEG);
+    expect(projectionMatchesFov()).toBe(true);
+  });
 });
