@@ -588,6 +588,36 @@ describe('flying — pointer lock', () => {
     }
   });
 
+  it('Chrome sends no contextmenu while locked: releasing the right button opens the menu at the crosshair', () => {
+    viewer.enterFlying();
+    grant();
+    let at: [number, number] | null = null;
+    const onMenu = (e: MouseEvent): void => {
+      at = [e.clientX, e.clientY];
+    };
+    canvas.addEventListener('contextmenu', onMenu);
+    try {
+      mouse('pointerdown', { button: 2 });
+      mouse('pointerup', { button: 2 });
+      expect(at).toEqual([400, 300]);
+      expect(viewer.isFlying()).toBe(false);
+      expect(lockEl).toBeNull();
+    } finally {
+      canvas.removeEventListener('contextmenu', onMenu);
+    }
+  });
+
+  it('a mouse move arriving after the browser let go (Esc) does not turn the view', () => {
+    viewer.enterFlying();
+    grant();
+    const before = pose();
+    lockEl = null; // released; 'pointerlockchange' not yet delivered
+    mouse('pointermove', { movementX: 200, movementY: 50 });
+    expect(pose().q.angleTo(before.q)).toBeLessThan(1e-6);
+    lockChanged();
+    expect(viewer.isFlying()).toBe(false);
+  });
+
   it('losing the lock (Esc, Alt+Tab) leaves flying and hands back to the user', () => {
     const changes: boolean[] = [];
     viewer.onFlyingChange((f) => changes.push(f));
@@ -672,5 +702,35 @@ describe('flying — pointer lock', () => {
     grant();
     canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true, bubbles: true }));
     expect(viewer.getFlySpeed()).toBe(6);
+  });
+});
+
+describe('flying — pointer lock and OrbitControls', () => {
+  it('OrbitControls sits out while the pointer is captured, and comes back', () => {
+    let lockEl: Element | null = null;
+    Object.defineProperty(document, 'pointerLockElement', { get: () => lockEl, configurable: true });
+    (canvas as unknown as { requestPointerLock: unknown }).requestPointerLock = () => Promise.resolve();
+    (document as unknown as { exitPointerLock: unknown }).exitPointerLock = () => {
+      lockEl = null;
+      document.dispatchEvent(new Event('pointerlockchange'));
+    };
+    try {
+      const controls = internals(viewer).controls;
+      viewer.enterFlying();
+      lockEl = canvas;
+      document.dispatchEvent(new Event('pointerlockchange'));
+      // A locked pointer refuses pointer capture, which OrbitControls asks for.
+      expect(controls.enabled).toBe(false);
+      viewer.exitFlying();
+      expect(controls.enabled).toBe(true);
+      viewer.enterFlying();
+      lockEl = canvas;
+      document.dispatchEvent(new Event('pointerlockchange'));
+      lockEl = null;
+      document.dispatchEvent(new Event('pointerlockchange')); // Esc
+      expect(controls.enabled).toBe(true);
+    } finally {
+      delete (document as unknown as { pointerLockElement?: unknown }).pointerLockElement;
+    }
   });
 });

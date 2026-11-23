@@ -152,6 +152,8 @@ export class Viewer {
   /** The re-sent event being dispatched, so the remap does not catch its own. */
   private remapClone: Event | null = null;
   private lastHoverPulse = 0;
+  /** OrbitControls' `enabled` before the lock switched it off. */
+  private controlsEnabledBeforeLock = true;
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -510,15 +512,26 @@ export class Viewer {
       this.flyLockPending = false;
       // A drag-to-look in progress ends: from here the mouse looks by itself.
       this.endRotateGesture();
+      // OrbitControls asks for pointer capture on every pointerdown, which a
+      // locked pointer refuses with an exception. It has nothing to do while
+      // the mouse is captured, so it sits out until the lock goes.
+      this.controlsEnabledBeforeLock = this.controls.enabled;
+      this.controls.enabled = false;
       this.installLockedRemap();
       this.notifyFlyLook();
     } else if (this.flyLocked) {
       // Esc, Alt+Tab or the window losing focus: leave flying.
-      this.flyLocked = false;
-      this.removeLockedRemap();
+      this.releaseLockState();
       this.exitFlying();
     }
   };
+
+  /** Undo what holding the lock changed. Safe to call when not locked. */
+  private releaseLockState(): void {
+    this.removeLockedRemap();
+    if (this.flyLocked) this.controls.enabled = this.controlsEnabledBeforeLock;
+    this.flyLocked = false;
+  }
 
   private onPointerLockError = (): void => {
     if (!this.isFlying() || this.flyLocked) return;
@@ -550,6 +563,13 @@ export class Viewer {
    */
   private remapLockedEvent = (e: Event): void => {
     if (e === this.remapClone || e.target !== this.canvas || !this.flyLocked) return;
+    // The browser has already let go (Esc) and 'pointerlockchange' is on its
+    // way: this event is an ordinary one, and its movement is the cursor
+    // reappearing, which must not turn the view on the way out.
+    if (document.pointerLockElement !== this.canvas) {
+      if (e.type === 'pointermove' || e.type === 'mousemove') e.stopImmediatePropagation();
+      return;
+    }
     e.stopImmediatePropagation();
     const m = e as MouseEvent;
     const { x, y } = this.viewCentre();
@@ -593,6 +613,19 @@ export class Viewer {
       this.remapClone = null;
     }
     if (clone.defaultPrevented) e.preventDefault();
+    // Chrome sends no 'contextmenu' while the pointer is locked, so a right
+    // button released is the menu: send one at the crosshair ourselves.
+    if (e.type === 'pointerup' && m.button === 2) {
+      const menu = new MouseEvent('contextmenu', { ...init, button: 2, buttons: 0 });
+      this.remapClone = menu;
+      try {
+        this.canvas.dispatchEvent(menu);
+      } finally {
+        this.remapClone = null;
+      }
+      this.exitFlying();
+      return;
+    }
     if (e.type === 'contextmenu') {
       // A menu needs a cursor: it opens for what is under the crosshair, and
       // flying ends so the mouse comes back.
@@ -633,8 +666,7 @@ export class Viewer {
     // Listeners off first, so releasing the lock below does not call back in.
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('pointerlockerror', this.onPointerLockError);
-    this.removeLockedRemap();
-    this.flyLocked = false;
+    this.releaseLockState();
     this.flyLockPending = false;
     if (document.pointerLockElement === this.canvas) document.exitPointerLock?.();
     this.lastFlyLook = null;
@@ -1142,6 +1174,15 @@ export class Viewer {
   }
 
   private onWheel = (e: WheelEvent): void => {
+    // While the mouse is captured the wheel is the gas pedal, whatever else
+    // has the controls switched off (the lock itself does).
+    if (this.flyLocked && this.isFlying()) {
+      if (e.deltaY !== 0) {
+        e.preventDefault();
+        this.wheelSpeedStep(e);
+      }
+      return;
+    }
     if (!this.canNavigate()) return;
     if (e.deltaY === 0) return;
     e.preventDefault();
