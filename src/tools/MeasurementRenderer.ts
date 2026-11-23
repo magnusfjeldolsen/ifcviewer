@@ -433,6 +433,11 @@ export class MeasurementRenderer {
       // A ring is only legible face-on, so it is turned to the camera every
       // frame by `scaleMarkers`.
       markerGroup.userData.billboard = true;
+    } else if (target === 'centre') {
+      mesh = centreGlyph(mat);
+      // The same face-on treatment as the corner ring, which it must not be
+      // mistaken for: the cross through it is what says "centre".
+      markerGroup.userData.billboard = true;
     } else {
       mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 10), mat);
     }
@@ -568,6 +573,26 @@ function roundRect(
   ctx.lineTo(x, y + r);
   ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
+}
+
+/**
+ * The centre glyph: a thin ring with a cross through it, the drafting mark for
+ * a centre point. Larger than the corner ring so the two read differently even
+ * at a glance.
+ */
+function centreGlyph(mat: THREE.MeshBasicMaterial): THREE.Group {
+  const glyph = new THREE.Group();
+  const parts: THREE.Mesh[] = [
+    new THREE.Mesh(new THREE.RingGeometry(1.35, 1.65, GLYPH_SEGMENTS * 2), mat),
+    new THREE.Mesh(new THREE.PlaneGeometry(4.2, 0.28), mat),
+    new THREE.Mesh(new THREE.PlaneGeometry(0.28, 4.2), mat),
+  ];
+  for (const part of parts) {
+    part.renderOrder = 1000;
+    part.userData.isMeasurement = true;
+    glyph.add(part);
+  }
+  return glyph;
 }
 
 /** Identifies which glyph an end needs, so the hover marker rebuilds only on a change. */

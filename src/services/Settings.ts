@@ -45,6 +45,8 @@ export interface SettingsShape {
   snapToVertices: boolean;
   snapToEdges: boolean;
   snapToSurfaces: boolean;
+  /** The centre of round columns, pipes, bars and holes (issue #63). `4`. */
+  snapToCentres: boolean;
 }
 
 export const SETTINGS_DEFAULTS: Readonly<SettingsShape> = {
@@ -53,6 +55,7 @@ export const SETTINGS_DEFAULTS: Readonly<SettingsShape> = {
   snapToVertices: true,
   snapToEdges: true,
   snapToSurfaces: true,
+  snapToCentres: true,
 };
 
 type SettingsKey = keyof SettingsShape;

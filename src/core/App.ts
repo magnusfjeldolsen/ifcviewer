@@ -244,17 +244,19 @@ ${key}`. */
         if (this.settings.get('snapToVertices')) allowed.add('vertex');
         if (this.settings.get('snapToEdges')) allowed.add('edge');
         if (this.settings.get('snapToSurfaces')) allowed.add('face');
+        if (this.settings.get('snapToCentres')) allowed.add('centre');
         return allowed;
       },
       onToggleSnapTarget: (target: SnapTarget) => {
-        const key =
-          target === 'vertex'
-            ? 'snapToVertices'
-            : target === 'edge'
-              ? 'snapToEdges'
-              : 'snapToSurfaces';
+        const toggles = {
+          vertex: { key: 'snapToVertices', name: 'Corners' },
+          edge: { key: 'snapToEdges', name: 'Edges' },
+          face: { key: 'snapToSurfaces', name: 'Surfaces' },
+          centre: { key: 'snapToCentres', name: 'Round centres' },
+        } as const;
+        if (target === 'point') return;
+        const { key, name } = toggles[target];
         const on = this.settings.toggle(key);
-        const name = target === 'vertex' ? 'Corners' : target === 'edge' ? 'Edges' : 'Surfaces';
         this.setStatus(`${name} ${on ? 'on' : 'off'}`);
         this.clearStatusAfter(STATUS_CLEAR_MS);
       },
@@ -283,7 +285,7 @@ ${key}`. */
     this.toolManager.register(this.measurementTool);
 
     // Setting out a coordinate. Snaps through the same `SnapCursor` and reads
-    // the same snap settings as measuring, so `S` and `1` `2` `3` are one
+    // the same snap settings as measuring, so `S` and `1` `2` `3` `4` are one
     // switch for both tools rather than two that disagree.
     this.positionTool = new PositionMarkerTool({
       renderer: this.viewer.getRenderer(),

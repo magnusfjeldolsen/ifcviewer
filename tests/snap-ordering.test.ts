@@ -110,4 +110,26 @@ describe('orderSnapCandidates', () => {
     expect(ranked).toHaveLength(300_001);
     expect(ranked[ranked.length - 1].id).toBe('face:0');
   });
+
+  // Issue #63. A round column is striped with facet edges; the one down its
+  // middle is always about as near the cursor as the centre is.
+  it('prefers a round centre to a facet edge in the same place', () => {
+    expect(order(candidate('edge', 0), candidate('centre', 3), candidate('face', 0))[0]).toBe('centre');
+  });
+
+  it('still prefers an edge the cursor is on to a centre well away from it', () => {
+    expect(order(candidate('edge', 0), candidate('centre', 10), candidate('face', 0))[0]).toBe('edge');
+  });
+
+  it('prefers a corner to a centre that coincides with it', () => {
+    expect(order(candidate('centre', 0), candidate('vertex', 1))[0]).toBe('vertex');
+  });
+
+  it('keeps the surface and raw point after a centre', () => {
+    expect(order(candidate('point', 0), candidate('face', 0), candidate('centre', 8))).toEqual([
+      'centre',
+      'face',
+      'point',
+    ]);
+  });
 });
