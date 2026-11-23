@@ -401,6 +401,10 @@ export class ClippingTool implements Tool {
 
   private onPointerDown(e: PointerEvent): void {
     if (!this.handleGroup || !this.clipPlane) return;
+    // With the mouse captured (flying) there is no cursor to drag the handle
+    // with, and a locked pointer refuses pointer capture with an exception.
+    // Leave the press alone, before any drag state is set.
+    if (typeof document !== 'undefined' && document.pointerLockElement === this.deps.canvas) return;
     if (this.dragPointerId !== null) {
       // Another finger while the handle is held: keep it away from the plane
       // and from navigation alike, or it would orbit the view under the drag.
