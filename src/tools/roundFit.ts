@@ -108,13 +108,23 @@ const MAX_LINE_STEPS = 100_000;
 const DEFECT_TOLERANCE = 1e-3;
 
 /**
+ * The largest piece, in triangles plus corners, that gets an index for
+ * stepping across defects. About 15 ms to build once on a desktop. Larger
+ * pieces are never indexed, whichever hover asks first.
+ */
+const INDEX_MAX_SIZE = 300_000;
+
+/** The smallest grid cell the defect index uses, in metres: wider than any seam worth bridging. */
+const INDEX_MIN_CELL = 1e-4;
+
+/**
  * The widest single gap a ring may have from a local defect (an opening, a
  * notch, a dent), in degrees. See `judgeRing` for the conditions.
  */
 const DEFECT_GAP_DEG = 90;
 
-/** Most points `judgeRing` sets aside, one refit each, before giving up. */
-const JUDGE_ROUNDS = 12;
+/** How many times `judgeRing` refits after setting an arc aside, before giving up. */
+const JUDGE_ROUNDS = 4;
 
 /**
  * The shortest straight run round a ring, as a fraction of the longest,
@@ -238,8 +248,8 @@ interface RoundCaches {
   side: Map<number, RoundFit | null>;
   /** The round outlines of the flat face each triangle belongs to. */
   outline: Map<number, RoundFit[]>;
-  /** Corner and triangle lookups for stepping across mesh defects; built on first need. */
-  index?: MeshIndex;
+  /** Corner and triangle lookups for stepping across mesh defects; built on first need, null if the piece is too big. */
+  index?: MeshIndex | null;
 }
 
 const caches = new WeakMap<SnapGeometry, RoundCaches>();
@@ -275,44 +285,55 @@ export function roundFitsAt(
 ): RoundFit[] {
   if (triangle < 0 || triangle >= geo.triangles.length / 3) return [];
   const cache = cachesFor(geo);
-  const spending = { left: STEP_BUDGET, used: 0 };
-  spend = spending;
-  try {
-    let side = cache.side.get(triangle);
-    if (side === undefined) {
-      side = overBudgetIsNull(() => fitCurvedSide(geo, triangle).fit);
-      cache.side.set(triangle, side);
+  let used = 0;
+  // The curved side and the flat outline each get a budget of their own, so
+  // neither's answer depends on how much the other spent.
+  const within = <T>(work: () => T): T | null => {
+    const spending = { left: STEP_BUDGET, used: 0 };
+    spend = spending;
+    try {
+      return overBudgetIsNull(work);
+    } finally {
+      spend = null;
+      used += spending.used;
     }
+  };
 
-    let outline = cache.outline.get(triangle);
-    if (outline === undefined) {
-      const found = overBudgetIsNull(() => fitFlatOutlines(geo, triangle));
-      if (found?.complete) for (const t of found.triangles) cache.outline.set(t, found.fits);
-      outline = found?.fits ?? [];
-      cache.outline.set(triangle, outline);
-    }
-
-    return side ? [side, ...outline] : outline;
-  } finally {
-    spend = null;
-    if (cost) cost.steps = spending.used;
+  let side = cache.side.get(triangle);
+  if (side === undefined) {
+    side = within(() => fitCurvedSide(geo, triangle).fit);
+    cache.side.set(triangle, side);
   }
+
+  let outline = cache.outline.get(triangle);
+  if (outline === undefined) {
+    const found = within(() => fitFlatOutlines(geo, triangle));
+    if (found?.complete) for (const t of found.triangles) cache.outline.set(t, found.fits);
+    outline = found?.fits ?? [];
+    cache.outline.set(triangle, outline);
+  }
+
+  if (cost) cost.steps = used;
+  return side ? [side, ...outline] : outline;
 }
 
 /**
- * The most work one `roundFitsAt` call may do, in steps: a triangle crossed
- * by a cut, a candidate looked at when stepping across a defect, a point
- * fitted, a step along a line, a triangle of a flat face grown, a triangle
- * or corner indexed.
+ * The most work one `roundFitsAt` call may do on the curved side, and again
+ * on the flat outline, in steps: a triangle crossed by a cut, a corner or
+ * triangle scanned when stepping across a defect, a point fitted, a triangle
+ * looked at following a line, a triangle of a flat face grown. Building a
+ * piece's defect index is not counted against any one call (see
+ * `meshIndex`), so no answer depends on what was hovered before.
  *
- * 30 000 steps covers the largest round thing the cut handles — a ring of
- * 4096 segments, which takes about 21 000 to walk, fit and measure — and a
- * column 4000 rows tall (about 17 000). On a desktop a step is a few tenths
- * of a microsecond, so the budget is under 10 ms in the worst case and most
- * calls use a few hundred. It is counted rather than timed so the answer for
- * a triangle is the same on every machine and at every hover speed: a call
- * that runs out finds nothing, and that nothing is remembered for the
- * triangle like any other answer.
+ * 30 000 steps covers the largest round things the cut handles — a ring of
+ * 4096 segments, a column 4000 rows tall, a column of 512 segments with a
+ * T-junction on every other edge — each in about 9 000–25 000. A call that
+ * uses the whole budget took 9–15 ms on a desktop (about 25 ms the first
+ * time a piece's defect index is built), and most calls use a few hundred
+ * steps. It is counted rather than timed so the answer for a triangle is the
+ * same on every machine and at every hover speed: a call that runs out finds
+ * nothing, and that nothing is remembered for the triangle like any other
+ * answer.
  */
 export const STEP_BUDGET = 30_000;
 
@@ -329,10 +350,6 @@ function charge(steps: number): void {
   if (spend.left < 0) throw new OverBudget();
 }
 
-/** Whether `steps` more would still fit in the current call's budget. */
-function affordable(steps: number): boolean {
-  return !spend || spend.left >= steps;
-}
 
 function overBudgetIsNull<T>(work: () => T): T | null {
   try {
@@ -588,7 +605,6 @@ function cutRing(
     readNormal(geo, t, n);
     let best: { next: number; entry: number; flat: number } | null = null;
     const near = index.trianglesNear(geo, [ia, ib], gapTolerance);
-    charge(near.length);
     for (const candidate of near) {
       if (candidate === t || sameCorners(geo, candidate, t)) continue;
       // Not back across an edge the mesh already pairs up.
@@ -686,7 +702,9 @@ function cutRing(
 
   // How far the snap may slide: the straight run this ring is on, measured
   // along the axis-parallel lines the cut crossed (see `runOfRing`).
-  const [from, to] = runOfRing(geo, edges, kept, xs, ys, circle, axis, u, v, origin, slack);
+  // Every recorded line, not only those the fit kept: a ring through an
+  // opening or past a dent then picks the same lines as one beside it.
+  const [from, to] = runOfRing(geo, edges, xs.map((_, i) => i), xs, ys, circle, axis, u, v, origin, slack);
   const centre = origin
     .clone()
     .addScaledVector(u, circle.cx)
@@ -732,7 +750,7 @@ function runOfRing(
   const flip = canonicalSign(axis);
   const fu = new THREE.Vector3();
   const fv = new THREE.Vector3();
-  basisAround(axis.clone().multiplyScalar(flip), fu, fv);
+  canonicalBasis(axis.clone().multiplyScalar(flip), fu, fv);
   const angleOf = (i: number) => {
     // Back from the cut's own (u, v) to 3D, then into the fixed frame.
     const d = u.clone().multiplyScalar(xs[i] - circle.cx).addScaledVector(v, ys[i] - circle.cy);
@@ -774,11 +792,14 @@ function runOfRing(
 }
 
 /**
- * Most steps spent following lines to measure one run. Enough to follow two
- * lines of 6000 rows each; on a cylinder cut finer than that along its
- * length the run is measured from the lines that fitted, and may be short.
+ * Most triangles looked at following lines to measure one run. A step along
+ * a line looks at the few triangles round a corner — three or four on a
+ * plain grid — so this follows about two lines of 2500–3000 rows in full;
+ * on a cylinder cut finer than that along its length the run is measured
+ * from what was followed, the longest line first reaching furthest, and may
+ * be short.
  */
-const RUN_STEPS = 12_000;
+const RUN_STEPS = 20_000;
 
 /** The 4-bit reversal of `k`, for spreading 16 directions round a circle. */
 function bitReverse(k: number): number {
@@ -789,74 +810,99 @@ function bitReverse(k: number): number {
  * Whether the points a cut collected lie on a circle, allowing for one local
  * defect. Returns the circle and which points it kept.
  *
- * A clean ring passes `isRound` as it is. Otherwise the defect rule: up to
- * one point in six may be set aside — always the one furthest off the circle,
- * refitting after each — and the ring may have one gap of up to
- * `DEFECT_GAP_DEG`, provided
+ * A clean ring passes `isRound` as it is. Otherwise the defect rule: one
+ * contiguous arc of points may be set aside — the run, in order round the
+ * circle, of points off it that contains the worst one — and refitted
+ * without, a few times over (`JUDGE_ROUNDS`) as the fit settles. What may be
+ * set aside is an angle, not a number of points, so a flat planed across 60°
+ * of a column is the same defect whether the column is cut 24 ways or 256.
+ * The ring passes if, after that,
  *
+ * - every remaining point is on the circle,
+ * - the set-aside arc and the gap it leaves span at most `DEFECT_GAP_DEG`,
  * - every other gap is still no wider than one facet (`MAX_FACET_DEG`),
- * - every set-aside point lies inside that one gap, so the defect is local
- *   and the rest of the ring is untouched,
- * - at least `360 / MAX_FACET_DEG` points remain, all on the circle.
+ * - at least `360 / MAX_FACET_DEG` points remain.
  *
- * That admits a column with an opening, a notch or a dented corner on one
- * side, and keeps out what the rule was written against: an open arc (its
- * gap is the rest of the circle), a hexagon (several 60° gaps), a rounded
- * rectangle (its error is spread round the whole outline, not in one place)
- * and an I-section's fillet (a quarter circle).
+ * That admits a column with an opening, a notch, a flat or a dented corner on
+ * one side, and keeps out what the rule was written against: an open arc (its
+ * gap is the rest of the circle), a hexagon (several 60° gaps), an ellipse or
+ * a rounded rectangle (its error is spread round the whole outline, not in
+ * one place) and an I-section's fillet (a quarter circle). Each round is one
+ * fit and one sort, so the cost is a small multiple of the ring's size.
  */
 export function judgeRing(
   xs: readonly number[],
   ys: readonly number[],
   slack = 0,
 ): { circle: Circle2D; kept: number[] } | null {
+  const n = xs.length;
   const minPoints = Math.ceil(360 / MAX_FACET_DEG);
-  if (xs.length < minPoints) return null;
+  if (n < minPoints) return null;
   const all = xs.map((_, i) => i);
+  charge(n);
   const whole = fitCircle2D(xs, ys);
   if (isRound(whole, MAX_FACET_DEG, slack)) return { circle: whole, kept: all };
 
-  // A defect is one gap or a handful of stray points, never hundreds: the
-  // set-aside work is capped at JUDGE_ROUNDS refits whatever the ring's size,
-  // so a large ring that is not round (an elliptic tank) is turned away in a
-  // bounded number of passes.
-  const maxDrop = Math.min(Math.floor(xs.length / 6), JUDGE_ROUNDS);
-  // More points off the whole fit than may be set aside: no ring with one
-  // local defect looks like that. An ellipse or a rounded rectangle has most
-  // of its points off; turned away after one fit.
+  const facet = ((MAX_FACET_DEG + FACET_SLACK_DEG) * Math.PI) / 180;
+  const defectGap = ((DEFECT_GAP_DEG + FACET_SLACK_DEG) * Math.PI) / 180;
+  // One look before any refit: a single local defect, even with the fit it
+  // is pulling, puts the points that are well off the circle on one side of
+  // it. An ellipse or a rounded rectangle has them all the way round, and is
+  // turned away here at the cost of one pass.
   const first = whole as Circle2D | null;
   if (first) {
     const tolerance = ROUND_TOLERANCE * first.r + slack;
-    let off = 0;
-    for (let i = 0; i < xs.length; i++) {
-      if (Math.abs(Math.hypot(xs[i] - first.cx, ys[i] - first.cy) - first.r) > 2 * tolerance) off++;
+    const angles: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (Math.abs(Math.hypot(xs[i] - first.cx, ys[i] - first.cy) - first.r) > 2 * tolerance) {
+        angles.push(Math.atan2(ys[i] - first.cy, xs[i] - first.cx));
+      }
     }
-    if (off > maxDrop) return null;
+    if (angles.length > 1) {
+      angles.sort((p, q) => p - q);
+      let gap = angles[0] + 2 * Math.PI - angles[angles.length - 1];
+      for (let k = 1; k < angles.length; k++) gap = Math.max(gap, angles[k] - angles[k - 1]);
+      // The smallest arc holding them all is the circle less its widest gap.
+      if (2 * Math.PI - gap > Math.PI) return null;
+    }
   }
-  let kept = all;
-  const dropped: number[] = [];
-  for (let round = 0; round <= maxDrop && kept.length >= minPoints; round++) {
-    charge(kept.length);
-    const circle = fitCircle2D(kept.map((i) => xs[i]), kept.map((i) => ys[i]));
+  let circle = whole as Circle2D | null;
+  let aside = new Set<number>();
+  for (let round = 0; round < JUDGE_ROUNDS; round++) {
     if (!circle) return null;
-    const offOf = (i: number) => Math.abs(Math.hypot(xs[i] - circle.cx, ys[i] - circle.cy) - circle.r);
-    if (circle.residual * circle.r <= ROUND_TOLERANCE * circle.r + slack) {
-      // On the circle at last: now the gaps decide, once. Setting aside more
-      // points could only widen them.
-      const angleOf = (i: number) => Math.atan2(ys[i] - circle.cy, xs[i] - circle.cx);
-      const angles = kept.map(angleOf).sort((p, q) => p - q);
-      let widestFrom = 0;
-      let widest = -1;
+    const c = circle;
+    charge(2 * n);
+    const tolerance = ROUND_TOLERANCE * c.r + slack;
+    const angleOf = (i: number) => Math.atan2(ys[i] - c.cy, xs[i] - c.cx);
+    const order = [...all].sort((p, q) => angleOf(p) - angleOf(q));
+    const kept = order.filter((i) => !aside.has(i));
+
+    // The worst point still counted, if any is off.
+    let worst = -1;
+    let worstOff = tolerance;
+    for (const i of kept) {
+      const d = Math.abs(Math.hypot(xs[i] - c.cx, ys[i] - c.cy) - c.r);
+      if (d > worstOff) {
+        worstOff = d;
+        worst = i;
+      }
+    }
+
+    if (worst < 0) {
+      // Everything counted is on the circle: the gaps decide, once.
+      let widest = 0;
       let second = 0;
-      for (let k = 0; k < angles.length; k++) {
-        const next = k + 1 < angles.length ? angles[k + 1] : angles[0] + 2 * Math.PI;
-        const size = next - angles[k];
+      let widestFrom = 0;
+      for (let k = 0; k < kept.length; k++) {
+        const a = angleOf(kept[k]);
+        const b = k + 1 < kept.length ? angleOf(kept[k + 1]) : angleOf(kept[0]) + 2 * Math.PI;
+        const size = b - a;
         if (size > widest) {
-          second = Math.max(second, widest);
+          second = widest;
           widest = size;
-          widestFrom = angles[k];
-        } else {
-          second = Math.max(second, size);
+          widestFrom = a;
+        } else if (size > second) {
+          second = size;
         }
       }
       const inWidest = (i: number) => {
@@ -865,23 +911,41 @@ export function judgeRing(
         while (d >= 2 * Math.PI) d -= 2 * Math.PI;
         return d < widest;
       };
-      const facet = ((MAX_FACET_DEG + FACET_SLACK_DEG) * Math.PI) / 180;
-      const ok =
-        widest <= ((DEFECT_GAP_DEG + FACET_SLACK_DEG) * Math.PI) / 180 && second <= facet && dropped.every(inWidest);
-      return ok ? { circle, kept } : null;
+      const ok = widest <= defectGap && second <= facet && [...aside].every(inWidest);
+      return ok ? { circle: c, kept } : null;
     }
-    // Set aside the point furthest off this circle and try again.
-    let worst = -1;
-    let worstOff = -1;
-    for (const i of kept) {
-      const off = offOf(i);
-      if (off > worstOff) {
-        worstOff = off;
-        worst = i;
-      }
+
+    // The arc to set aside: from the worst point, out both ways round the
+    // circle through points that are off it or already set aside.
+    const at = order.indexOf(worst);
+    const arc = new Set<number>([worst]);
+    // Grown through points off by more than a quarter of the tolerance, so
+    // the flank of a flat — just inside the circle, but not far enough to
+    // fail it — goes with the flat instead of pulling the centre off.
+    const isBad = (i: number) =>
+      aside.has(i) || Math.abs(Math.hypot(xs[i] - c.cx, ys[i] - c.cy) - c.r) > tolerance / 4;
+    let ahead = 0;
+    while (ahead + 1 < n && isBad(order[(at + ahead + 1) % n])) {
+      ahead++;
+      arc.add(order[(at + ahead) % n]);
     }
-    dropped.push(worst);
-    kept = kept.filter((i) => i !== worst);
+    let behind = 0;
+    while (behind + ahead + 1 < n && isBad(order[(at - behind - 1 + n) % n])) {
+      behind++;
+      arc.add(order[(at - behind + n) % n]);
+    }
+    // Its span, from the first point beyond it on one side to the first on
+    // the other: the gap it would leave.
+    const before = order[(at - behind - 1 + n) % n];
+    const after = order[(at + ahead + 1) % n];
+    let span = angleOf(after) - angleOf(before);
+    while (span <= 0) span += 2 * Math.PI;
+    // Too wide against a fit that the defect itself is still pulling: set
+    // aside just the worst point this round, and let the refit settle.
+    aside = span > defectGap || n - arc.size < minPoints ? new Set([...aside, worst]) : arc;
+    if (n - aside.size < minPoints) return null;
+    const keep = all.filter((i) => !aside.has(i));
+    circle = fitCircle2D(keep.map((i) => xs[i]), keep.map((i) => ys[i]));
   }
   return null;
 }
@@ -942,10 +1006,30 @@ function runsStraight(
  * float noise can flip.
  */
 function canonicalSign(axis: THREE.Vector3): number {
-  const ax = Math.abs(axis.x), ay = Math.abs(axis.y), az = Math.abs(axis.z);
-  const largest = ax >= ay && ax >= az ? axis.x : ay >= az ? axis.y : axis.z;
-  return largest < 0 ? -1 : 1;
+  return axis.dot(SIGN_REFERENCE) < 0 ? -1 : 1;
 }
+
+/**
+ * A reference direction no building axis is likely to be square to, so the
+ * sign it picks does not flip on float noise for the axes that matter —
+ * unlike "the largest component", which ties for any 45° axis.
+ */
+const SIGN_REFERENCE = new THREE.Vector3(0.5477, 0.639, 0.5399).normalize();
+
+/**
+ * Two unit vectors square to `axis`, chosen the same way for every axis
+ * near it. Like `basisAround`, but switching helper only near two oblique
+ * directions rather than at 0.9 of the x axis, where a horizontal beam can
+ * sit.
+ */
+function canonicalBasis(axis: THREE.Vector3, u: THREE.Vector3, v: THREE.Vector3): void {
+  const helper = Math.abs(axis.dot(BASIS_HELPER)) < 0.95 ? BASIS_HELPER : BASIS_HELPER_ALT;
+  u.crossVectors(axis, helper).normalize();
+  v.crossVectors(axis, u).normalize();
+}
+
+const BASIS_HELPER = new THREE.Vector3(0.2673, 0.5345, 0.8018).normalize();
+const BASIS_HELPER_ALT = new THREE.Vector3(0.8018, -0.2673, 0.5345).normalize();
 
 /**
  * Lookups for stepping across defects: which triangles use each corner, and
@@ -958,18 +1042,20 @@ interface MeshIndex {
 
 function meshIndex(geo: SnapGeometry): MeshIndex | null {
   const cache = cachesFor(geo);
-  if (cache.index) return cache.index;
+  if (cache.index !== undefined) return cache.index;
 
   const P = geo.positions;
   const T = geo.triangles;
   const cornerCount = P.length / 3;
-  // Built once per piece, and counted against the call that builds it. A
-  // piece too large to index within what is left of one call's budget is
-  // not indexed then: the cut treats the edge as the end of the surface, as
-  // it would an open edge, and the call carries on.
-  const buildCost = T.length / 3 + cornerCount;
-  if (!affordable(buildCost)) return null;
-  charge(buildCost);
+  // Built once per piece and not counted against any one hover: it is shared,
+  // and charging it to whichever hover built it made that hover's answer
+  // depend on what had been hovered before. Bounded on its own terms instead
+  // — a piece above INDEX_MAX_SIZE is never indexed, whoever asks, so its
+  // defects are never stepped across and every hover on it agrees.
+  if (T.length / 3 + cornerCount > INDEX_MAX_SIZE) {
+    cache.index = null;
+    return null;
+  }
 
   // Triangles per corner, as offsets into one flat list.
   const start = new Uint32Array(cornerCount + 1);
@@ -979,18 +1065,28 @@ function meshIndex(geo: SnapGeometry): MeshIndex | null {
   const list = new Uint32Array(T.length);
   for (let k = 0; k < T.length; k++) list[fill[T[k]]++] = Math.floor(k / 3);
 
-  // Corners bucketed on a grid a little coarser than any gap worth bridging.
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (let k = 0; k < P.length; k++) {
-    lo = Math.min(lo, P[k]);
-    hi = Math.max(hi, P[k]);
+  // Corners bucketed on a grid sized by the piece's own shortest edges, not
+  // its overall size: on a big or offset piece a cell a thousandth of the
+  // whole swallowed a column's corners by the hundred, and a piece mixing a
+  // fine column with coarse parts must be sized for the column. The 1st
+  // percentile of a sample of edges, and never under INDEX_MIN_CELL, so
+  // slivers do not shrink it below the gaps it must bridge.
+  const lengths: number[] = [];
+  const sampleStride = Math.max(1, Math.floor(T.length / 3 / 6000));
+  for (let t = 0; t < T.length / 3; t += sampleStride) {
+    for (let e = 0; e < 3; e++) {
+      const i = T[t * 3 + e];
+      const j = T[t * 3 + ((e + 1) % 3)];
+      const d = Math.hypot(P[j * 3] - P[i * 3], P[j * 3 + 1] - P[i * 3 + 1], P[j * 3 + 2] - P[i * 3 + 2]);
+      if (d > 0) lengths.push(d);
+    }
   }
-  const cell = Math.max((hi - lo) * 1e-3, 1e-6);
-  const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
-  const grid = new Map<string, number[]>();
+  lengths.sort((p, q) => p - q);
+  const cell = Math.max(lengths[Math.floor(lengths.length * 0.01)] ?? 1, INDEX_MIN_CELL);
+  const hash = (x: number, y: number, z: number) => ((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) | 0;
+  const grid = new Map<number, number[]>();
   for (let i = 0; i < cornerCount; i++) {
-    const k = key(Math.floor(P[i * 3] / cell), Math.floor(P[i * 3 + 1] / cell), Math.floor(P[i * 3 + 2] / cell));
+    const k = hash(Math.floor(P[i * 3] / cell), Math.floor(P[i * 3 + 1] / cell), Math.floor(P[i * 3 + 2] / cell));
     const bucket = grid.get(k);
     if (bucket) bucket.push(i);
     else grid.set(k, [i]);
@@ -998,15 +1094,22 @@ function meshIndex(geo: SnapGeometry): MeshIndex | null {
 
   const index: MeshIndex = {
     trianglesNear(_geo, corners, tolerance) {
+      // Within one cell of a corner — the reach is held to a cell, so the 27
+      // cells round it are all that need looking at.
       const reach = Math.min(tolerance, cell);
       const found = new Set<number>();
       for (const c of corners) {
         const x = P[c * 3], y = P[c * 3 + 1], z = P[c * 3 + 2];
         const gx = Math.floor(x / cell), gy = Math.floor(y / cell), gz = Math.floor(z / cell);
         for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
-          for (const other of grid.get(key(gx + dx, gy + dy, gz + dz)) ?? []) {
+          const bucket = grid.get(hash(gx + dx, gy + dy, gz + dz));
+          if (!bucket) continue;
+          // Every corner looked at is a step, near or not.
+          charge(bucket.length);
+          for (const other of bucket) {
             const ox = P[other * 3] - x, oy = P[other * 3 + 1] - y, oz = P[other * 3 + 2] - z;
             if (ox * ox + oy * oy + oz * oz > reach * reach) continue;
+            charge(start[other + 1] - start[other]);
             for (let k = start[other]; k < start[other + 1]; k++) found.add(list[k]);
           }
         }
@@ -1035,8 +1138,8 @@ function distanceToSegment(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3)
 /**
  * Where an axis-parallel line through edge `ia`–`ib` of triangle `tri` ends,
  * in both directions: the edge is extended through each end while the next
- * edge carries on in the same direction. Also returns how many steps that
- * took, so a caller can bound the total.
+ * edge carries on in the same direction. Also returns how many triangles
+ * that looked at, so a caller can bound the total.
  */
 function extentOfLine(
   geo: SnapGeometry,
@@ -1060,9 +1163,10 @@ function extentOfLine(
     let current = to;
     let triangle = tri;
     const direction = Math.sign(along(to) - along(from));
-    for (; used < budget; used++) {
-      charge(1);
-      const next = continueLine(geo, triangle, previous, current, axis, direction, slack);
+    while (used < budget) {
+      const visits = { count: 0 };
+      const next = continueLine(geo, triangle, previous, current, axis, direction, slack, visits);
+      used += visits.count;
       if (!next) break;
       previous = current;
       current = next.vertex;
@@ -1085,6 +1189,7 @@ function continueLine(
   axis: THREE.Vector3,
   direction: number,
   slack: number,
+  visits: { count: number } = { count: 0 },
 ): { vertex: number; triangle: number } | null {
   const c = new THREE.Vector3();
   const d = new THREE.Vector3();
@@ -1092,6 +1197,8 @@ function continueLine(
   const seen = new Set<number>([start]);
   const queue = [start];
   for (let head = 0; head < queue.length && head < 64; head++) {
+    charge(1);
+    visits.count++;
     const t = queue[head];
     const corner = cornerIndex(geo, t, current);
     if (corner < 0) continue;

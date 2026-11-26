@@ -155,15 +155,15 @@ describe('round centres survive mesh defects', () => {
   });
 
   it('fits a tall, finely rowed column without walking every row of every line', () => {
-    // 4000 rows of 12 facets: following all 12 lines to the ends would be
-    // 48 000 steps. The run is measured from two lines in full and part of
-    // the rest, inside the run budget.
+    // 4000 rows of 12 facets: following all 12 lines to the ends would look
+    // at well over 100 000 triangles. The run is measured from the first line
+    // in full and part of the rest, inside the run budget.
     const geo = buildSnapGeometry(tube(column(0.3, Array.from({ length: 4001 }, (_, k) => k * 0.01)), 12));
     const cost = { steps: 0 };
     const fit = roundFitsAt(geo, 48_000, cost).find((f) => f.slides);
     expect(fit).toBeDefined();
     expect(fit!.halfLength).toBeCloseTo(20, 3);
-    expect(cost.steps).toBeLessThan(20_000);
+    expect(cost.steps).toBeLessThan(26_000);
   });
 });
 

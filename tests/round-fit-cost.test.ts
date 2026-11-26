@@ -88,7 +88,7 @@ describe('the cost of one hover is bounded', () => {
     // Once an 82 ms scan of every edge of the piece on first hover.
     const cylinder = costOf(buildSnapGeometry(new THREE.CylinderGeometry(2, 2, 40, 512, 400, true)), 12);
     expect(cylinder.found).toBeGreaterThan(0);
-    expect(cylinder.most).toBeLessThan(12_000);
+    expect(cylinder.most).toBeLessThan(26_000);
   });
 
   it('never spends more than the budget, and remembers running out as nothing found', () => {
@@ -167,5 +167,141 @@ describe('the slide range belongs to the cylinder under the cursor', () => {
       ranges.add(`${(along - fit.halfLength).toFixed(4)}..${(along + fit.halfLength).toFixed(4)}`);
     }
     expect([...ranges].sort()).toEqual(['0.0000..1.0000', '3.0000..4.0000']);
+  });
+});
+
+/**
+ * A cylinder of `segments` facets, every other facet split at mid-height
+ * with nothing on the other side to pair its edges with — a T-junction on
+ * every axial edge — plus `filler` small loose triangles `far` metres off,
+ * which make the piece bigger without making the column any different.
+ */
+function tJunctionColumn(segments: number, filler = 0, far = 0, at = new THREE.Vector3()) {
+  const r = 0.3;
+  const h = 3;
+  const positions: number[] = [];
+  const corner = (i: number, y: number) => [
+    at.x + r * Math.cos((i / segments) * 2 * Math.PI),
+    at.y + y,
+    at.z + r * Math.sin((i / segments) * 2 * Math.PI),
+  ];
+  const triangle = (a: number[], b: number[], c: number[]) => positions.push(...a, ...b, ...c);
+  for (let i = 0; i < segments; i++) {
+    const b0 = corner(i, 0), b1 = corner(i + 1, 0), t0 = corner(i, h), t1 = corner(i + 1, h);
+    if (i % 2 === 0) {
+      triangle(b0, t0, t1);
+      triangle(b0, t1, b1);
+    } else {
+      const m0 = corner(i, h / 2), m1 = corner(i + 1, h / 2);
+      triangle(b0, m0, m1);
+      triangle(b0, m1, b1);
+      triangle(m0, t0, t1);
+      triangle(m0, t1, m1);
+    }
+  }
+  for (let k = 0; k < filler; k++) {
+    const x = at.x + far + (k % 100) * 0.5;
+    const z = at.z + Math.floor(k / 100) * 0.5;
+    triangle([x, 0, z], [x + 0.1, 0, z], [x, 0, z + 0.1]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  return buildSnapGeometry(g);
+}
+
+describe('stepping across defects is the same in any hover order, and paid for', () => {
+  it('gives each triangle the same answer whichever is hovered first, with the defect index involved', () => {
+    // Once: whichever hover built the index paid for it, ran out, and cached
+    // nothing; the other then fitted. Now neither depends on the other.
+    const answers = (order: number[]) => {
+      const geo = tJunctionColumn(256, 7000, 50);
+      const out = new Map<number, string>();
+      for (const t of order) {
+        const fit = roundFitsAt(geo, t).find((f) => f.slides);
+        out.set(t, fit ? `${fit.radius.toFixed(6)} ${fit.halfLength.toFixed(6)}` : 'none');
+      }
+      return out;
+    };
+    const forwards = answers([0, 6]);
+    const backwards = answers([6, 0]);
+    expect(forwards.get(0)).toBe(backwards.get(0));
+    expect(forwards.get(6)).toBe(backwards.get(6));
+    expect(forwards.get(0)).toBe('0.300000 1.500000');
+    expect(forwards.get(6)).toBe('0.300000 1.500000');
+  });
+
+  it('fits a T-junction column within the budget, near the origin and 400 m from it', () => {
+    const cases: Array<[number, THREE.Vector3]> = [
+      [256, new THREE.Vector3()],
+      [512, new THREE.Vector3()],
+      [256, new THREE.Vector3(400, 0, 300)],
+    ];
+    for (const [segments, at] of cases) {
+      const geo = tJunctionColumn(segments, 1, 40, at);
+      for (const t of [0, 6, 12]) {
+        const cost = { steps: 0 };
+        const fit = roundFitsAt(geo, t, cost).find((f) => f.slides);
+        expect(fit, `${segments} segments at ${at.toArray()}, triangle ${t}`).toBeDefined();
+        expect(fit!.radius).toBeCloseTo(0.3, 4);
+        // Every corner the defect lookup scans is counted.
+        expect(cost.steps).toBeLessThan(STEP_BUDGET);
+      }
+    }
+  });
+
+  it('counts the corners the defect lookup scans, and a column past the budget is the same from every triangle', () => {
+    // 2048 facets with a T-junction on every edge: past what the budget
+    // covers. Stated as a limit: no centre — the same from any triangle.
+    const geo = tJunctionColumn(2048, 1, 400);
+    const results = [0, 6, 12].map((t) => {
+      const cost = { steps: 0 };
+      const found = roundFitsAt(geo, t, cost).some((f) => f.slides);
+      // Side and outline each have the budget; a call stops within one step
+      // of overrunning, and a lookup's corners are counted before they are scanned.
+      expect(cost.steps).toBeLessThanOrEqual(2 * STEP_BUDGET + 2048);
+      return found;
+    });
+    expect(new Set(results).size).toBe(1);
+  });
+});
+
+describe('a fine column with a flat planed along it keeps its centre', () => {
+  /** A column of `segments` facets with every corner within `degrees` of +x pushed onto the chord there. */
+  function flatted(segments: number, degrees: number) {
+    const g = new THREE.CylinderGeometry(0.3, 0.3, 3, segments, 1, false);
+    const p = g.getAttribute('position');
+    const chord = 0.3 * Math.cos(((degrees / 2) * Math.PI) / 180);
+    for (let i = 0; i < p.count; i++) {
+      if (Math.hypot(p.getX(i), p.getZ(i)) < 0.29) continue;
+      if (p.getX(i) > chord) p.setX(i, chord);
+    }
+    return buildSnapGeometry(g);
+  }
+
+  it('finds the axis from every round triangle, however finely the column is cut', () => {
+    // What may be set aside is an angle, not a count of points: the same
+    // 60° flat is the same defect at 24 facets or 256.
+    const cases: Array<[number, number]> = [[24, 60], [128, 60], [128, 40], [256, 40], [256, 80]];
+    for (const [segments, degrees] of cases) {
+      const geo = flatted(segments, degrees);
+      let checked = 0;
+      for (let t = 0; t < geo.triangles.length / 3; t++) {
+        if (Math.abs(geo.normals[t * 3 + 1]) > 0.5) continue;
+        // Triangles on the flat itself lie on a plane, not the circle.
+        const onFlat = [0, 1, 2].some((k) => {
+          const i = geo.triangles[t * 3 + k];
+          return Math.hypot(geo.positions[i * 3], geo.positions[i * 3 + 2]) < 0.299;
+        });
+        if (onFlat) continue;
+        const fit = roundFitsAt(geo, t).find((f) => f.slides);
+        expect(fit, `${segments} facets, ${degrees}° flat, triangle ${t}`).toBeDefined();
+        // Within half a millimetre of the axis on a 300 mm radius: the flat's
+        // flanks, inside the circle by less than a quarter of the tolerance,
+        // are kept in the fit and pull it by a fraction of a millimetre.
+        expect(Math.hypot(fit!.centre.x, fit!.centre.z)).toBeLessThan(5e-4);
+        checked++;
+      }
+      expect(checked).toBeGreaterThan(0);
+    }
   });
 });
