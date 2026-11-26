@@ -10,7 +10,7 @@
  */
 
 import type { ParameterColumn } from './parameterColumn';
-import { countVisible, visibleRows, type VisibleParameter, type VisibleView } from './visibleCounts';
+import { countVisibleColumns, visibleRows, type OpenDetail, type VisibleView } from './visibleCounts';
 
 export const VISIBLE_COUNTS_DEBOUNCE_MS = 80;
 
@@ -21,6 +21,10 @@ export interface VisibleCountsDeps {
   visibility(modelId: string): ((expressId: number) => boolean) | null;
   /** The columns of a model that are built now. */
   builtColumns(modelId: string): readonly ParameterColumn[];
+  /** Whether a model is switched on; a model switched off is reported as such. */
+  isShown?(modelId: string): boolean;
+  /** The parameter whose values are listed now: only it is counted per value. */
+  openParameter?(): OpenDetail | null;
   /** The counts changed: a view, or null when everything can be seen. */
   onView(view: VisibleView | null): void;
   debounceMs?: number;
@@ -77,12 +81,16 @@ export class VisibleCountsController {
 
   private compute(modelId: string): VisibleView | null {
     const ids = this.deps.scopeIds(modelId);
+    if (!ids) return null;
+    // A model switched off: say so, and count nothing.
+    if (this.deps.isShown && !this.deps.isShown(modelId)) {
+      return { modelId, off: true, elements: 0, total: ids.length, parameters: new Map() };
+    }
     const visible = this.deps.visibility(modelId);
-    if (!ids || !visible) return null;
+    if (!visible) return null;
     const rows = visibleRows(ids, visible);
     if (!rows) return null;
-    const parameters = new Map<string, VisibleParameter>();
-    for (const c of this.deps.builtColumns(modelId)) parameters.set(c.key, countVisible(c, rows));
+    const parameters = countVisibleColumns(this.deps.builtColumns(modelId), rows, this.deps.openParameter?.() ?? null);
     return { modelId, elements: rows.length, total: ids.length, parameters };
   }
 

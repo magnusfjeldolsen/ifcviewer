@@ -152,7 +152,7 @@ describe('counts in the list', () => {
     expect(visibleCountText(DATA.parameters[1], 5, viewOf(new Map(), 2))).toBe('4 of 5 in model');
     expect(visibleValueCountText(3, null)).toBe('3');
     expect(visibleValueCountText(3, 3)).toBe('3');
-    expect(visibleValueCountText(3, 1)).toBe('1 of 3');
+    expect(visibleValueCountText(3, 1)).toBe('1');
   });
 
   it('shows visible counts, keeps zero-visible values listed and dimmed, and updates in place', () => {
@@ -164,19 +164,19 @@ describe('counts in the list', () => {
     expect(counts()).toEqual(['3', '1']);
 
     list.setVisible(viewOf(new Map([[visibleValueKey('Steel'), 2]]), 2));
-    expect(counts()).toEqual(['2 of 3', '0 of 1']);
+    expect(counts()).toEqual(['2', '0']);
     const items = [...host.querySelectorAll('.param-value-item')];
     expect(items).toHaveLength(2);
     expect(items[0].classList.contains('none')).toBe(false);
     expect(items[1].classList.contains('none')).toBe(true);
     expect(host.querySelector('[data-key="Material"] .param-count')!.textContent).toBe('2 of 2');
     expect(host.querySelector('[data-key="Other"] .param-count')!.textContent).toBe('4 of 5 in model');
-    expect(host.querySelector('.param-list-summary')!.textContent).toContain('2 of 5 elements that can be seen');
+    expect(host.querySelector('.param-list-summary')!.textContent).toContain('2 of 5 elements you can see');
 
     list.setVisible(null);
     expect(counts()).toEqual(['3', '1']);
     expect(host.querySelector('[data-key="Material"] .param-count')!.textContent).toBe('4 of 5');
-    expect(host.querySelector('.param-list-summary')!.textContent).not.toContain('can be seen');
+    expect(host.querySelector('.param-list-summary')!.textContent).not.toContain('you can see');
   });
 
   it('ignores a view of another model', () => {

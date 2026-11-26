@@ -2032,8 +2032,9 @@ html, body {
   color: #5b6472;
 }
 
-.param-count.partial {
-  color: #b45309;
+/* A counted row reads in the normal text colour; one not counted yet stays muted ("in model"). */
+.param-count.counted {
+  color: #1f2937;
 }
 
 /* "Show only" (#70): an eye beside a value, legend entry or totals line. */

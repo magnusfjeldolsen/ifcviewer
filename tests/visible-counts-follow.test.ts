@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
-import { ParameterList, visibleParameters } from '../src/ui/ParameterList';
+import { ParameterList } from '../src/ui/ParameterList';
 import { followVisibility, VisibleCountsController, type VisibilitySources } from '../src/inspector/VisibleCountsController';
-import { countVisible, visibleValueKey, type VisibleView } from '../src/inspector/visibleCounts';
-import { columnValueCounts, type ColumnData } from '../src/inspector/parameterColumn';
+import { countVisible, visibleValueKey, type OpenDetail, type VisibleView } from '../src/inspector/visibleCounts';
+import { columnValueCounts, type ColumnData, type ParameterColumn } from '../src/inspector/parameterColumn';
 import type { ModelParameters, ParameterSummary } from '../src/inspector/types';
 import { boxModel, makeModelManager } from './helpers/models';
 
@@ -51,60 +51,112 @@ describe('focus survives a recount', () => {
     expect(eye.isConnected).toBe(true);
   });
 
-  it('keeps the same eye button focused when the order changes', () => {
-    const { host, list } = listWithOpenRow();
-    list.setVisible(view({ Steel: 4, Wood: 1 }));
-    const names = (): string[] => [...host.querySelectorAll('.param-value-text')].map((e) => e.textContent ?? '');
-    expect(names()).toEqual(['Steel', 'Wood', 'Glass']);
-    const eye = [...host.querySelectorAll<HTMLButtonElement>('.show-only-btn')].find((b) => b.getAttribute('aria-label')!.startsWith('Show only Steel'))!;
-    eye.focus();
-    // Wood now has more visible elements than Steel: the order swaps.
-    list.setVisible(view({ Steel: 1, Wood: 3 }));
-    expect(names()).toEqual(['Wood', 'Steel', 'Glass']);
-    expect(document.activeElement).toBe(eye);
-  });
-
-  it('keeps a focused parameter row control focused when rows reorder by count', () => {
-    const { host, list } = listWithOpenRow();
-    list.setSort('count');
-    const head = host.querySelector<HTMLButtonElement>('[data-key="C"] .param-head')!;
-    head.focus();
-    list.setVisible(
-      view({}, 5, { C: { count: 9, values: new Map() }, B: { count: 1, values: new Map() } }),
-    );
-    expect([...host.querySelectorAll('.param-row')].map((e) => (e as HTMLElement).dataset.key)).toEqual(['C', 'A', 'B']);
-    expect(document.activeElement).toBe(head);
-  });
 });
 
-describe('order follows the numbers shown', () => {
-  it('values: most visible first, ties by the whole model, zero-visible ones last but listed', () => {
-    const { host, list } = listWithOpenRow();
-    list.setVisible(view({ Wood: 1, Glass: 1 }));
-    const rows = [...host.querySelectorAll('.param-value-item')].map(
-      (li) => `${li.querySelector('.param-value-text')!.textContent} ${li.querySelector('.param-value-count')!.textContent}`,
-    );
-    expect(rows).toEqual(['Wood 1 of 3', 'Glass 1', 'Steel 0 of 6']);
-  });
+const keys = (host: HTMLElement): (string | undefined)[] => [...host.querySelectorAll<HTMLElement>('.param-row')].map((e) => e.dataset.key);
+const entries = (host: HTMLElement): string[] =>
+  [...host.querySelectorAll('.param-value-item')].map(
+    (li) => `${li.querySelector('.param-value-text')!.textContent} ${li.querySelector('.param-value-count')!.textContent}`,
+  );
 
-  it('parameter rows: sort by count uses the visible count where counted', () => {
-    const v = view({}, 1, { B: { count: 5, values: new Map() }, C: { count: 2, values: new Map() } });
-    expect(visibleParameters(DATA.parameters, '', 'count', v).map((p) => p.key)).toEqual(['B', 'C', 'A']);
-    expect(visibleParameters(DATA.parameters, '', 'count').map((p) => p.key)).toEqual(['A', 'B', 'C']);
-  });
-
-  it('parameter rows: ties on the visible count fall back to the whole model count', () => {
-    const v: VisibleView = {
+describe('nothing moves because of a recount', () => {
+  it('sorted by Count with something hidden, a row whose column finishes building stays where it is', () => {
+    const host = document.createElement('div');
+    const list = new ParameterList(host, {});
+    list.setData(DATA);
+    list.setSort('count');
+    expect(keys(host)).toEqual(['A', 'B', 'C']);
+    // Only A is counted at first.
+    list.setVisible({ modelId: 'm', elements: 5, total: 10, parameters: new Map([['A', { count: 4, values: null }]]) });
+    list.open('C');
+    const before = [...host.querySelectorAll('.param-row')];
+    // C's column finishes building and it has hardly any visible element; B is counted far below its whole-model count.
+    list.setVisible({
       modelId: 'm',
       elements: 5,
       total: 10,
       parameters: new Map([
-        ['A', { count: 2, values: new Map() }],
-        ['B', { count: 2, values: new Map() }],
-        ['C', { count: 2, values: new Map() }],
+        ['A', { count: 4, values: null }],
+        ['B', { count: 0, values: null }],
+        ['C', { count: 5, values: new Map() }],
       ]),
-    };
-    expect(visibleParameters(DATA.parameters, '', 'count', v).map((p) => p.key)).toEqual(['A', 'B', 'C']);
+    });
+    expect(keys(host)).toEqual(['A', 'B', 'C']);
+    expect([...host.querySelectorAll('.param-row')]).toEqual(before);
+  });
+
+  it('showing only one value leaves the values where they were, so the next click hits what it aimed at', () => {
+    const { host, list } = listWithOpenRow();
+    expect(entries(host)).toEqual(['Steel 6', 'Wood 3', 'Glass 1']);
+    // The eye on Glass (C): only Glass remains.
+    list.setVisible(view({ Glass: 1 }));
+    expect(entries(host)).toEqual(['Steel 0', 'Wood 0', 'Glass 1']);
+    const eyes = [...host.querySelectorAll<HTMLButtonElement>('.show-only-btn')];
+    expect(eyes.map((b) => b.getAttribute('aria-label')!.split(' (')[0])).toEqual(['Show only Steel', 'Show only Wood', 'Show only Glass']);
+    const items = [...host.querySelectorAll('.param-value-item')];
+    expect(items.map((li) => li.classList.contains('none'))).toEqual([true, true, false]);
+  });
+});
+
+describe('wording', () => {
+  it('a value shows only its visible number, with the model total in a tooltip', () => {
+    const { host, list } = listWithOpenRow();
+    list.setVisible(view({ Steel: 2, Wood: 3 }));
+    const first = host.querySelector<HTMLElement>('.param-value-count')!;
+    expect(first.textContent).toBe('2');
+    expect(first.title).toBe('2 of the 6 in the model can be seen');
+    expect(entries(host).some((e) => e.includes(' of '))).toBe(false);
+  });
+
+  it('a counted row reads "N of M visible"; one not counted says "in model"', () => {
+    const { host, list } = listWithOpenRow();
+    list.setVisible(view({}, 4));
+    const count = (k: string): HTMLElement => host.querySelector<HTMLElement>(`[data-key="${k}"] .param-count`)!;
+    expect(count('A').textContent).toBe('4 of 5');
+    expect(count('A').classList.contains('counted')).toBe(true);
+    expect(count('B').textContent).toBe('8 of 10 in model');
+    expect(count('B').classList.contains('counted')).toBe(false);
+    expect(host.querySelector('.param-list-summary')!.textContent).toContain('Counting the 5 of 10 elements you can see');
+  });
+
+  it('a model switched off gets one line, not zeros', () => {
+    const { host, list } = listWithOpenRow();
+    list.setVisible({ modelId: 'm', off: true, elements: 0, total: 10, parameters: new Map() });
+    expect(host.querySelector('.param-list-summary')!.textContent).toContain('Model is switched off');
+    expect(host.querySelector('[data-key="A"] .param-count')!.textContent).toBe('10 of 10');
+    expect(host.querySelector('.param-row.none')).toBeNull();
+    expect(entries(host)).toEqual(['Steel 6', 'Wood 3', 'Glass 1']);
+  });
+
+  it('a parameter unique per element claims nothing per value', () => {
+    const host = document.createElement('div');
+    const list = new ParameterList(host, { loadValues: async () => [{ value: 7, count: 1 }, { value: 8, count: 1 }] });
+    list.setData({ modelId: 'm', scopeSize: 10, parameters: [summary('U', { uniquePerElement: true, values: undefined, count: 10 })] });
+    expect(list.openDetail()).toBeNull();
+    list.open('U');
+    expect(list.openDetail()).toEqual({ key: 'U', perValue: false });
+    list.setVisible({ modelId: 'm', elements: 5, total: 10, parameters: new Map([['U', { count: 5, values: null }]]) });
+    expect(host.querySelector('[data-key="U"] .param-count')!.textContent).toBe('5 of 5');
+  });
+
+  it('entries no longer listed leave the cache: a filtered-out value is built afresh', () => {
+    const host = document.createElement('div');
+    const list = new ParameterList(host, { onShowOnly: () => {} });
+    const values = Array.from({ length: 12 }, (_, i) => ({ value: `v${i}`, count: 12 - i }));
+    list.setData({ modelId: 'm', scopeSize: 100, parameters: [summary('M', { distinct: 12, values, count: 78 })] });
+    list.open('M');
+    const find = (t: string): Element | undefined => [...host.querySelectorAll('.param-value-item')].find((li) => li.querySelector('.param-value-text')!.textContent === t);
+    const v5 = find('v5')!;
+    expect(find('v5')).toBe(v5);
+    const filter = host.querySelector<HTMLInputElement>('.param-value-filter')!;
+    filter.value = 'v1';
+    filter.dispatchEvent(new Event('input'));
+    expect(find('v5')).toBeUndefined();
+    filter.value = '';
+    filter.dispatchEvent(new Event('input'));
+    // Not kept while it was not listed: a new element, not the old one.
+    expect(find('v5')).not.toBe(v5);
+    expect(find('v5')).toBeDefined();
   });
 });
 
@@ -150,6 +202,44 @@ describe('the value join between the list and the visible counts', () => {
       expect(seen.count).toBe(c.count);
     });
   }
+});
+
+describe('how much a recount works out', () => {
+  const ids = Int32Array.from([1, 2, 3, 4]);
+  const text: ColumnData = { type: 'discrete', key: 'T', count: 3, codes: Int32Array.from([0, 1, 0, -1]), dictionary: ['a', 'b'] };
+  const num: ColumnData = { type: 'numeric', key: 'N', count: 3, values: Float64Array.from([1, 2, NaN, 4]), units: [{ key: '', symbol: '' }], unitIndex: null };
+  const make = (open: OpenDetail | null, shown = true) => {
+    const onView = vi.fn();
+    const c = new VisibleCountsController({
+      scopeIds: () => ids,
+      visibility: () => (id) => id !== 1,
+      builtColumns: () => [text, num].map((x) => ({ ...x, modelId: 'm', ids }) as ParameterColumn),
+      isShown: () => shown,
+      openParameter: () => open,
+      onView,
+    });
+    c.watch('m');
+    return onView.mock.calls[0][0] as VisibleView;
+  };
+
+  it('counts only elements with a value per built column, and values for the open one only', () => {
+    const v = make({ key: 'T', perValue: true });
+    expect(v.parameters.get('T')!.count).toBe(2);
+    expect(v.parameters.get('T')!.values!.get(visibleValueKey('b'))).toBe(1);
+    expect(v.parameters.get('N')!.count).toBe(2);
+    expect(v.parameters.get('N')!.values).toBeNull();
+  });
+
+  it('no per-value map at all with nothing open or for a parameter unique per element', () => {
+    expect(make(null).parameters.get('T')!.values).toBeNull();
+    expect(make({ key: 'N', perValue: false }).parameters.get('N')!.values).toBeNull();
+  });
+
+  it('a model switched off is one flag, with nothing counted', () => {
+    const v = make({ key: 'T', perValue: true }, false);
+    expect(v.off).toBe(true);
+    expect(v.parameters.size).toBe(0);
+  });
 });
 
 describe('what reaches the recount', () => {

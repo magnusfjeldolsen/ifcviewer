@@ -784,6 +784,8 @@ ${key}`. */
       scopeIds: (modelId) => this.propertyRepository.scopeOf(modelId),
       visibility: (modelId) => this.modelManager.visibleElements(modelId, this.clippingTool.getClipPlane()),
       builtColumns: (modelId) => this.propertyRepository.builtColumns(modelId),
+      isShown: (modelId) => this.modelManager.isVisible(modelId),
+      openParameter: () => this.parametersPanel.getList().openDetail(),
       onView: (view) => this.parametersPanel.getList().setVisible(view),
     });
     const recount = (): void => this.totals.invalidate();

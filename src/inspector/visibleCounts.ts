@@ -13,17 +13,23 @@
 import type { ColumnData } from './parameterColumn';
 import type { ParameterValue } from './types';
 
-/** How many elements of one parameter can be seen, and per value. */
+/** How many elements of one parameter can be seen, and per value when asked for. */
 export interface VisibleParameter {
   /** Elements that can be seen and have a value. */
   count: number;
-  /** Elements that can be seen, per value: see `visibleValueKey`. */
-  values: Map<string, number>;
+  /**
+   * Elements that can be seen, per value (see `visibleValueKey`); null when
+   * not counted: only the open parameter's values are, and not those of a
+   * parameter that is unique per element.
+   */
+  values: Map<string, number> | null;
 }
 
 /** What the list needs to show counts of what can be seen. */
 export interface VisibleView {
   modelId: string;
+  /** The model is switched off: nothing of it can be seen, and nothing else is counted. */
+  off?: boolean;
   /** Elements of the scope that can be seen. */
   elements: number;
   /** The scope's size. */
@@ -48,8 +54,47 @@ export function visibleRows(ids: Int32Array, visible: (expressId: number) => boo
   return k === ids.length ? null : out.slice(0, k);
 }
 
+/** How many of `rows` have a value in `c`: one pass, no maps, no strings. */
+export function countVisibleHaving(c: ColumnData, rows: Int32Array): number {
+  let n = 0;
+  if (c.type === 'discrete') {
+    const codes = c.codes;
+    for (let r = 0; r < rows.length; r++) if (codes[rows[r]] >= 0) n++;
+  } else {
+    const values = c.values;
+    for (let r = 0; r < rows.length; r++) {
+      const v = values[rows[r]];
+      if (v === v) n++;
+    }
+  }
+  return n;
+}
+
+/** Which parameter's values are listed now, and whether per-value counts are worth working out for it. */
+export interface OpenDetail {
+  key: string;
+  /** False for a parameter that is unique per element: its entries are not counted. */
+  perValue: boolean;
+}
+
+/**
+ * Every built column counted over `rows`: only how many have a value, and
+ * the per-value map just for the open parameter (when `perValue`).
+ */
+export function countVisibleColumns(
+  columns: readonly ColumnData[],
+  rows: Int32Array,
+  open: OpenDetail | null,
+): Map<string, VisibleParameter> {
+  const out = new Map<string, VisibleParameter>();
+  for (const c of columns) {
+    out.set(c.key, open && open.perValue && open.key === c.key ? countVisible(c, rows) : { count: countVisibleHaving(c, rows), values: null });
+  }
+  return out;
+}
+
 /** One column counted over `rows`, with entries keyed as the value list keys them. */
-export function countVisible(c: ColumnData, rows: Int32Array): VisibleParameter {
+export function countVisible(c: ColumnData, rows: Int32Array): { count: number; values: Map<string, number> } {
   const values = new Map<string, number>();
   let count = 0;
   if (c.type === 'discrete') {
