@@ -44,6 +44,7 @@ import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SelectionBasket } from '../inspector/SelectionBasket';
 import { SelectionBasketPanel } from '../ui/SelectionBasketPanel';
 import { ParametersPanel } from '../ui/ParametersPanel';
+import { registerModel } from './registerModel';
 import { valueText } from '../ui/ParameterList';
 import { ColourByController, colourScopeFor, isColouringBy, staleWhenVisibilityChanges, type ColourScope } from '../inspector/ColourByController';
 import { ColourLegend, loadColourValueCount } from '../ui/ColourLegend';
@@ -1170,7 +1171,7 @@ ${parameter.key}`);
             this.modelManager.endStream(id);
             this.modelTreePanel.addModel(id, stored.name, parsed.meshCount);
             this.bufferCache.set(id, stored.buffer);
-            this.modelRecords.set(id, {
+            this.registerModel(id, {
               id,
               name: stored.name,
               source: { type: 'local', fileName: stored.name },
@@ -1239,7 +1240,7 @@ ${parameter.key}`);
                 timeline.time('main.finish', () => this.modelManager.endStream(record.id));
                 this.modelTreePanel.addModel(record.id, record.name, pieces, record.source.type);
                 this.bufferCache.set(record.id, stored.buffer);
-                this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true });
+                this.registerModel(record.id, { ...record, hasCachedBuffer: true });
                 timeline.mark('main.settled');
                 this.emitLoadSettled({
                   name: record.name, source: 'restore', ok: true,
@@ -1277,7 +1278,7 @@ ${parameter.key}`);
               const hashPromise = record.hash ? Promise.resolve(record.hash) : sha256Hex(stored.buffer);
               this.commitCache(cacheKey, hashPromise, parsed.cache);
               const hash = await hashPromise;
-              this.modelRecords.set(record.id, { ...record, hasCachedBuffer: true, hash });
+              this.registerModel(record.id, { ...record, hasCachedBuffer: true, hash });
               timeline.mark('main.settled');
               this.emitLoadSettled({
                 name: record.name, source: 'restore', ok: true,
@@ -1467,7 +1468,7 @@ ${parameter.key}`);
         hash,
       };
 
-      this.modelRecords.set(id, record);
+      this.registerModel(id, record);
       this.bufferCache.set(id, file.buffer);
       // Adding a model invalidates undo history references (U2) — clear it so
       // a pre-existing selection-undo can't restore against the new geometry.
@@ -2186,6 +2187,11 @@ ${parameter.key}`);
    * Clear the status after `ms`, unless another message has replaced it by
    * then: a message's clearing never wipes a newer one early.
    */
+  /** Store a completely loaded model's record and let the Parameters picker see it (#113). */
+  private registerModel(id: string, record: ModelRecord): void {
+    registerModel(this.modelRecords, id, record, () => this.parametersPanel?.refreshModels());
+  }
+
   private clearStatusAfter(ms: number): void {
     this.statusTimer.clearAfter(ms);
   }
