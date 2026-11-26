@@ -42,7 +42,7 @@ export type SnapKeyResult = 'cycled' | 'toggled' | null;
  *
  * Extracted from `MeasurementTool` so every tool that places a point in the
  * model resolves it the same way: the same targets, the same distance-aware
- * ordering, the same Tab cycle and the same `S` / `1` `2` `3` toggles. A
+ * ordering, the same Tab cycle and the same `S` / `1` `2` `3` `4` toggles. A
  * second tool with its own copy would drift, and a corner that snaps when
  * measuring but not when marking a position is a tool nobody trusts.
  *
@@ -123,7 +123,7 @@ export class SnapCursor {
 
   /**
    * The snap keys. Tab steps to the next snap under the cursor: corner, then
-   * edge, then surface, then the raw point. That last one is why snapping
+   * round centre, then edge, then surface, then the raw point. That last one is why snapping
    * needs no suppression modifier — "off" is simply the final alternative.
    *
    * A toggle only resets the cycle; the new set of targets shows on the next
@@ -132,7 +132,7 @@ export class SnapCursor {
   onKeyDown(e: KeyboardEvent): SnapKeyResult {
     if (e.ctrlKey || e.metaKey || e.altKey) return null;
 
-    const byNumber: Record<string, SnapTarget> = { '1': 'vertex', '2': 'edge', '3': 'face' };
+    const byNumber: Record<string, SnapTarget> = { '1': 'vertex', '2': 'edge', '3': 'face', '4': 'centre' };
     const target = byNumber[e.key];
     if (target) {
       this.deps.onToggleSnapTarget?.(target);

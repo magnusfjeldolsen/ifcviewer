@@ -11,6 +11,7 @@ import { ClippingTool } from '../tools/ClippingTool';
 import { MeasurementTool } from '../tools/MeasurementTool';
 import { PositionMarkerTool } from '../tools/PositionMarkerTool';
 import type { SnapTarget } from '../tools/snapCandidates';
+import { allowedSnapTargets, toggleSnapTarget } from '../tools/snapSettings';
 import { Toolbar } from '../ui/Toolbar';
 import { ModelTreePanel } from '../ui/ModelTreePanel';
 import { MemoryToggle } from '../ui/MemoryToggle';
@@ -239,23 +240,11 @@ ${key}`. */
     // One set of snap settings, shared by every tool that places a point.
     const snapSettings = {
       snappingEnabled: () => this.settings.get('measurementSnapping'),
-      allowedSnapTargets: () => {
-        const allowed = new Set<SnapTarget>(['point']);
-        if (this.settings.get('snapToVertices')) allowed.add('vertex');
-        if (this.settings.get('snapToEdges')) allowed.add('edge');
-        if (this.settings.get('snapToSurfaces')) allowed.add('face');
-        return allowed;
-      },
+      allowedSnapTargets: () => allowedSnapTargets(this.settings),
       onToggleSnapTarget: (target: SnapTarget) => {
-        const key =
-          target === 'vertex'
-            ? 'snapToVertices'
-            : target === 'edge'
-              ? 'snapToEdges'
-              : 'snapToSurfaces';
-        const on = this.settings.toggle(key);
-        const name = target === 'vertex' ? 'Corners' : target === 'edge' ? 'Edges' : 'Surfaces';
-        this.setStatus(`${name} ${on ? 'on' : 'off'}`);
+        const message = toggleSnapTarget(this.settings, target);
+        if (!message) return;
+        this.setStatus(message);
         this.clearStatusAfter(STATUS_CLEAR_MS);
       },
       onToggleSnapping: () => {
@@ -283,7 +272,7 @@ ${key}`. */
     this.toolManager.register(this.measurementTool);
 
     // Setting out a coordinate. Snaps through the same `SnapCursor` and reads
-    // the same snap settings as measuring, so `S` and `1` `2` `3` are one
+    // the same snap settings as measuring, so `S` and `1` `2` `3` `4` are one
     // switch for both tools rather than two that disagree.
     this.positionTool = new PositionMarkerTool({
       renderer: this.viewer.getRenderer(),

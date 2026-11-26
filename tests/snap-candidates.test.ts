@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
+  alongAxisUnderCursor,
+  orderSnapCandidates,
   snapCandidatesAt,
   snapPayload,
   SNAP_KIND,
@@ -267,5 +269,154 @@ describe('snapCandidatesAt', () => {
     });
 
     expect(targets(found)).toEqual(['point']);
+  });
+});
+
+/**
+ * Issue #63 — the centre of something round. A 12-segment column, 0.4 m
+ * across, standing on the origin along +y, seen from +z.
+ */
+describe('snapCandidatesAt — round centres', () => {
+  function column() {
+    // Extruded rather than `CylinderGeometry`, whose caps are fans round a hub
+    // vertex: web-ifc's caps have no hub, so the centre is not also a corner.
+    const shape = new THREE.Shape().absarc(0, 0, 0.2, 0, Math.PI * 2, false);
+    const g = new THREE.ExtrudeGeometry(shape, { depth: 3, bevelEnabled: false, curveSegments: 12 });
+    g.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+    mesh.updateMatrixWorld(true);
+    const camera = new THREE.PerspectiveCamera(50, CANVAS.width / CANVAS.height, 0.1, 100);
+    camera.position.set(0, 1, 6);
+    camera.lookAt(0, 1, 0);
+    camera.updateMatrixWorld(true);
+    return { mesh, camera };
+  }
+
+  function screenOf(p: THREE.Vector3, camera: THREE.PerspectiveCamera) {
+    const ndc = p.clone().project(camera);
+    return { x: ((ndc.x + 1) / 2) * CANVAS.width, y: ((1 - ndc.y) / 2) * CANVAS.height };
+  }
+
+  /** Where a ray from the camera through `p`'s screen position meets the column. */
+  function hitOn(mesh: THREE.Mesh, camera: THREE.PerspectiveCamera, cursor: { x: number; y: number }) {
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(
+      new THREE.Vector2((cursor.x / CANVAS.width) * 2 - 1, -(cursor.y / CANVAS.height) * 2 + 1),
+      camera,
+    );
+    const [hit] = raycaster.intersectObject(mesh);
+    return hit;
+  }
+
+  function at(cursor: { x: number; y: number }, extra: Partial<Parameters<typeof snapCandidatesAt>[0]> = {}) {
+    const { mesh, camera } = column();
+    const hit = hitOn(mesh, camera, cursor);
+    expect(hit).toBeDefined();
+    return snapCandidatesAt({
+      mesh,
+      faceIndex: hit.faceIndex!,
+      hitPoint: hit.point,
+      cursor,
+      camera,
+      canvas: CANVAS,
+      ...extra,
+    });
+  }
+
+  it('snaps to the axis, at the cursor’s height, when the cursor is over the middle of the column', () => {
+    const { camera } = column();
+    // Slightly off the centreline, as a hand would be.
+    const cursor = screenOf(new THREE.Vector3(0.03, 1.2, 0.2), camera);
+    const ordered = orderSnapCandidates(at(cursor));
+    const best = snapPayload(ordered[0])!;
+    expect(best.target).toBe('centre');
+    expect(best.position.x).toBeCloseTo(0, 4);
+    expect(best.position.z).toBeCloseTo(0, 4);
+    // Same height as the hit, give or take the perspective of a ray hitting a
+    // curved surface slightly off-centre.
+    expect(best.position.y).toBeGreaterThan(1.1);
+    expect(best.position.y).toBeLessThan(1.3);
+    expect(Math.abs(best.axis!.y)).toBeCloseTo(1, 5);
+  });
+
+  it('still finds the axis when the column is seen from above at an angle', () => {
+    const { mesh } = column();
+    const camera = new THREE.PerspectiveCamera(50, CANVAS.width / CANVAS.height, 0.1, 100);
+    camera.position.set(-1.5, 3.5, 4);
+    camera.lookAt(0, 1.5, 0);
+    camera.updateMatrixWorld(true);
+    // On the column's middle as seen from here.
+    const cursor = screenOf(new THREE.Vector3(0, 1.5, 0), camera);
+    const hit = hitOn(mesh, camera, cursor);
+    const best = snapPayload(
+      orderSnapCandidates(
+        snapCandidatesAt({ mesh, faceIndex: hit.faceIndex!, hitPoint: hit.point, cursor, camera, canvas: CANVAS }),
+      )[0],
+    )!;
+    expect(best.target).toBe('centre');
+    // On the axis, and under the cursor: where the line of sight passes it.
+    expect(Math.hypot(best.position.x, best.position.z)).toBeLessThan(1e-4);
+    expect(best.position.y).toBeCloseTo(1.5, 3);
+  });
+
+  it('does not offer the centre when the cursor is near the column’s edge', () => {
+    const { camera } = column();
+    // Near the silhouette: tens of pixels from the axis at this distance.
+    const cursor = screenOf(new THREE.Vector3(0.19, 1.2, 0.06), camera);
+    expect(at(cursor).some((c) => snapPayload(c)?.target === 'centre')).toBe(false);
+  });
+
+  it('snaps to the centre of the top when the column is seen from above', () => {
+    const { mesh } = column();
+    const camera = new THREE.PerspectiveCamera(50, CANVAS.width / CANVAS.height, 0.1, 100);
+    camera.position.set(0.0, 8, 0.001);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    const cursor = screenOf(new THREE.Vector3(0.04, 3, 0.02), camera);
+    const hit = hitOn(mesh, camera, cursor);
+    const ordered = orderSnapCandidates(
+      snapCandidatesAt({ mesh, faceIndex: hit.faceIndex!, hitPoint: hit.point, cursor, camera, canvas: CANVAS }),
+    );
+    const best = snapPayload(ordered[0])!;
+    expect(best.target).toBe('centre');
+    expect(best.position.distanceTo(new THREE.Vector3(0, 3, 0))).toBeLessThan(1e-4);
+  });
+
+  it('is left out when centres are switched off', () => {
+    const { camera } = column();
+    const cursor = screenOf(new THREE.Vector3(0.0, 1.2, 0.2), camera);
+    const allowed = new Set<SnapTarget>(['vertex', 'edge', 'face', 'point']);
+    expect(at(cursor, { allowed }).some((c) => snapPayload(c)?.target === 'centre')).toBe(false);
+  });
+
+  it('follows the snapping switch: off means only the raw point', () => {
+    const { camera } = column();
+    const cursor = screenOf(new THREE.Vector3(0.0, 1.2, 0.2), camera);
+    expect(targets(at(cursor, { featuresEnabled: false }))).toEqual(['point']);
+  });
+});
+
+describe('alongAxisUnderCursor', () => {
+  const centre = new THREE.Vector3(0, 0, 0);
+  const axis = new THREE.Vector3(0, 1, 0);
+
+  it('is the height where the line of sight passes the axis', () => {
+    // Eye up and in front, looking down through a hit on the near surface.
+    const eye = new THREE.Vector3(0, 4, 4);
+    const hit = new THREE.Vector3(0, 1, 1);
+    expect(alongAxisUnderCursor(centre, axis, 10, eye, hit)).toBeCloseTo(0, 6);
+  });
+
+  it('stays within the shape', () => {
+    const eye = new THREE.Vector3(0, 4, 4);
+    // A level line of sight at y = 4 passes the axis above a shape 4 long.
+    const hit = new THREE.Vector3(0, 4, 1);
+    expect(alongAxisUnderCursor(centre, axis, 2, eye, hit)).toBe(2);
+  });
+
+  it('falls back to the hit’s height when looking straight down the axis', () => {
+    const eye = new THREE.Vector3(0.1, 10, 0);
+    const hit = new THREE.Vector3(0.1, 1.5, 0);
+    expect(alongAxisUnderCursor(centre, axis, 2, eye, hit)).toBeCloseTo(1.5, 6);
   });
 });

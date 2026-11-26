@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Candidate, ScreenPoint } from '../inspector/candidateMath';
 import { distanceToSegment2D } from '../inspector/candidateMath';
 import { snapGeometryFor, growCoplanarPatch } from './snapGeometry';
+import { roundFitsAt } from './roundFit';
 
 /**
  * What the cursor could snap to, as candidates for the shared resolver.
@@ -11,8 +12,12 @@ import { snapGeometryFor, growCoplanarPatch } from './snapGeometry';
  * was written for this and needs no change.
  */
 
-/** What kind of thing a snap caught. Distinct from `Candidate.kind`, which names the provider. */
-export type SnapTarget = 'vertex' | 'edge' | 'face' | 'point';
+/**
+ * What kind of thing a snap caught. Distinct from `Candidate.kind`, which
+ * names the provider. `centre` is the axis of something round — a column, a
+ * pipe, a bar, a hole (issue #63).
+ */
+export type SnapTarget = 'vertex' | 'centre' | 'edge' | 'face' | 'point';
 
 export const SNAP_KIND = 'snap';
 
@@ -26,9 +31,15 @@ export const SNAP_KIND = 'snap';
  */
 export const SNAP_PRIORITY: Record<SnapTarget, number> = {
   vertex: 0,
-  edge: 1,
-  face: 2,
-  point: 3,
+  // Above edges: a tessellated column is striped with facet edges every 30°,
+  // and the one running down the middle is always about as close to the
+  // cursor as the centre is. Nobody pointing at the middle of a round column
+  // means the facet seam. Below corners, which are the more specific target
+  // where the two coincide (the hub of a fan-triangulated disc).
+  centre: 1,
+  edge: 2,
+  face: 3,
+  point: 4,
 };
 
 /** How near the cursor a corner or edge must be, in CSS pixels, to be offered. */
@@ -48,7 +59,7 @@ export const SNAP_RADIUS_PX = 12;
 export const SNAP_TIE_PX = 4;
 
 /** Targets that attract the cursor. The other two are always underfoot. */
-const FEATURE_TARGETS: ReadonlySet<SnapTarget> = new Set<SnapTarget>(['vertex', 'edge']);
+const FEATURE_TARGETS: ReadonlySet<SnapTarget> = new Set<SnapTarget>(['vertex', 'centre', 'edge']);
 
 export interface SnapPayload {
   target: SnapTarget;
@@ -58,6 +69,8 @@ export interface SnapPayload {
   edgeDirection?: THREE.Vector3;
   /** A face patch's world-space normal, which is what makes a measurement orthogonal. */
   planeNormal?: THREE.Vector3;
+  /** A round shape's world-space axis, for a centre snap. Unit length. */
+  axis?: THREE.Vector3;
 }
 
 export interface SnapQuery {
@@ -154,11 +167,45 @@ export function snapCandidatesAt(query: SnapQuery): Candidate[] {
     });
   }
 
-  // The surface itself. Offered whenever the cursor is on one — and snapping
-  // to it is what makes a measurement orthogonal. `faceIndex` counts the
-  // mesh's triangles, not the welded ones, so it is translated first; a hit
-  // on a triangle that welding collapsed has no plane to offer.
+  // `faceIndex` counts the mesh's triangles, not the welded ones, so it is
+  // translated first; a hit on a triangle that welding collapsed has no plane
+  // to offer and belongs to nothing round.
   const triangle = faceIndex >= 0 && faceIndex < geo.triangleOfFace.length ? geo.triangleOfFace[faceIndex] : -1;
+
+  // The centre of something round. Attracts like a corner — offered only when
+  // it lands near the cursor — so a round column snaps to its axis when the
+  // cursor is over its middle and to its surface everywhere else. On the
+  // curved side the point slides along the axis to the cursor; on a round
+  // outline (a column top in plan, a hole) it is the circle's centre.
+  if (allows('centre') && triangle >= 0) {
+    const fits = roundFitsAt(geo, triangle);
+    const linear = new THREE.Matrix3().setFromMatrix4(matrix);
+    for (let k = 0; k < fits.length; k++) {
+      const fit = fits[k];
+      const centre = fit.centre.clone().applyMatrix4(matrix);
+      const axis = fit.axis.clone().applyMatrix3(linear);
+      const halfLength = fit.halfLength * axis.length();
+      axis.normalize();
+      const position = fit.slides
+        ? centre.addScaledVector(axis, alongAxisUnderCursor(centre, axis, halfLength, camera.position, hitPoint))
+        : centre;
+      const screen = project(position, camera, canvas);
+      if (!screen) continue;
+      const distance = Math.hypot(screen.x - cursor.x, screen.y - cursor.y);
+      if (distance > radius) continue;
+      out.push({
+        kind: SNAP_KIND,
+        priority: SNAP_PRIORITY.centre,
+        distance,
+        depth: camera.position.distanceTo(position),
+        id: `snap:centre:${k}`,
+        payload: { target: 'centre', position, axis } satisfies SnapPayload,
+      });
+    }
+  }
+
+  // The surface itself. Offered whenever the cursor is on one — and snapping
+  // to it is what makes a measurement orthogonal.
   if (allows('face') && triangle >= 0) {
   const patch = growCoplanarPatch(geo, triangle);
   const planeNormal = patch.normal
@@ -266,6 +313,42 @@ function project(
     x: ((ndc.x + 1) / 2) * canvas.width,
     y: ((1 - ndc.y) / 2) * canvas.height,
   };
+}
+
+/**
+ * How far along a round shape's axis the snap goes: the point on the axis
+ * nearest the line of sight through the cursor, kept within the shape.
+ *
+ * Not the hit dropped square onto the axis. Seen from above or below, the
+ * axis behind the surface the cursor is on is at a different height, so that
+ * point lands well away from the cursor on screen — out of the snap radius,
+ * and the centre would only ever be offered in a dead-level side view.
+ */
+export function alongAxisUnderCursor(
+  centre: THREE.Vector3,
+  axis: THREE.Vector3,
+  halfLength: number,
+  eye: THREE.Vector3,
+  hitPoint: THREE.Vector3,
+): number {
+  const sight = hitPoint.clone().sub(eye);
+  const sightLength = sight.length();
+  const toHit = hitPoint.clone().sub(centre);
+  if (sightLength === 0) return clamp(toHit.dot(axis), halfLength);
+  sight.divideScalar(sightLength);
+  // Closest points between the axis (centre + s·axis) and the sight line.
+  const b = axis.dot(sight);
+  const denominator = 1 - b * b;
+  // Looking straight down the axis there is no nearest point; the hit's own
+  // height is as good as any.
+  if (denominator < 1e-6) return clamp(toHit.dot(axis), halfLength);
+  const w = centre.clone().sub(eye);
+  const s = (b * w.dot(sight) - w.dot(axis)) / denominator;
+  return clamp(s, halfLength);
+}
+
+function clamp(value: number, limit: number): number {
+  return Math.max(-limit, Math.min(limit, value));
 }
 
 /** Where on segment a–b the given point lies closest, clamped to the segment. */
