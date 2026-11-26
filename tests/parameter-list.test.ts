@@ -42,6 +42,10 @@ describe('parameter row text', () => {
   it('shows a numeric range, a shared value, a distinct count or uniqueness', () => {
     expect(spreadText(DATA.parameters[2])).toBe('250 – 12500.5');
     expect(spreadText(param('A', { kind: 'numeric', numeric: { min: 3, max: 3, sum: 6 } }))).toBe('all 3');
+    // Values a hair apart that print the same are one value (#114).
+    expect(spreadText(param('A', { kind: 'numeric', numeric: { min: 16.7083, max: 16.708300000001, sum: 50 } }))).toBe(
+      'all 16.7083',
+    );
     expect(
       spreadText(
         param('A', {

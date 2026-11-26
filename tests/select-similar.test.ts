@@ -19,7 +19,8 @@ import {
   typeQuery,
   valueQuery,
 } from '../src/inspector/selectSimilar';
-import type { ElementIdentity, PropertyValue } from '../src/inspector/types';
+import { elementMatches } from '../src/inspector/matchValue';
+import type { ElementIdentity, ElementProperties, PropertyValue } from '../src/inspector/types';
 import appSrc from '../src/core/App.ts?raw';
 
 function identity(over: Partial<ElementIdentity> = {}): ElementIdentity {
@@ -252,6 +253,44 @@ describe('identitiesFromIds', () => {
 
   it('maps an empty result to an empty selection', () => {
     expect(identitiesFromIds(categoryQuery(identity()), [])).toEqual([]);
+  });
+});
+
+describe('select similar on a number (#114)', () => {
+  it('matches numbers that show the same, in the same unit only', () => {
+    const q = valueQuery(identity(), {
+      path: 'Pset_BeamCommon.Span',
+      name: 'Span',
+      rawValue: single(16.7083),
+      displayValue: '16.7083',
+      unitKey: 'conv:foot',
+    })!;
+    const el = (value: number, unitKey: string): ElementProperties => ({
+      identity: identity(),
+      direct: [],
+      psets: [],
+      qtos: [],
+      materials: [],
+      flat: [
+        {
+          path: 'Pset_BeamCommon.Span',
+          name: 'Span',
+          rawValue: single(value),
+          displayValue: '',
+          source: 'pset',
+          unitKey,
+        },
+      ],
+      fetchedAt: 0,
+    });
+    expect(q.kind).toBe('value');
+    if (q.kind !== 'value') return;
+    const sel = q.selector;
+    expect(sel.unitKey).toBe('conv:foot');
+    expect(elementMatches(el(16.7083, 'conv:foot'), sel, q.value)).toBe(true);
+    expect(elementMatches(el(16.708300000001, 'conv:foot'), sel, q.value)).toBe(true);
+    expect(elementMatches(el(16.7084, 'conv:foot'), sel, q.value)).toBe(false);
+    expect(elementMatches(el(16.7083, 'si:m'), sel, q.value)).toBe(false);
   });
 });
 

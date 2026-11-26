@@ -23,7 +23,7 @@
 
 import { formatNumber } from '../inspector/format';
 import { canSum, isNotStated, sumVerdictText, unitLabel, type UnitRef } from '../inspector/units';
-import type { ValueCount } from '../inspector/parameterFold';
+import { shownNumber, type ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 import { showOnlyTitle } from '../inspector/showOnly';
 import { showOnlyButton } from './showOnlyButton';
@@ -127,7 +127,9 @@ export function valueText(v: ParameterValue): string {
 export function spreadText(p: ParameterSummary): string {
   if (p.uniquePerElement) return 'unique per element';
   if (p.kind === 'numeric' && p.numeric) {
-    const { min, max } = p.numeric;
+    // Values that show alike are one value: compare as shown.
+    const min = shownNumber(p.numeric.min);
+    const max = shownNumber(p.numeric.max);
     // The same number in different units is not one value.
     if (min === max && p.unitsDiffer) return `${formatNumber(min)} in ${p.units?.length ?? 2} units`;
     return min === max ? `all ${formatNumber(min)}` : `${formatNumber(min)} – ${formatNumber(max)}`;

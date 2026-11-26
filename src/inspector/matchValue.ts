@@ -80,6 +80,11 @@ export function valuesMatch(candidate: PropertyValue, target: PropertyValue): bo
     // Strict equality — no coercion. `propertyNormalizer` has already run
     // on both sides (both came through `fetchElementProperties`), so a
     // numeric measure is a number on both sides and a label is a string.
+    // Numbers by how the Parameters list shows them (6 significant digits),
+    // so a row's "Select similar" finds what the list line counted.
+    if (typeof candidate.value === 'number' && typeof target.value === 'number') {
+      return shownNumber(candidate.value) === shownNumber(target.value);
+    }
     return candidate.value !== null && candidate.value === target.value;
   }
 

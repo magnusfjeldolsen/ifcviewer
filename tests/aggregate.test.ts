@@ -277,10 +277,30 @@ describe('distinctLabels: look-alike groups told apart', () => {
     ]);
   });
 
-  it('quotes text that looks like a yes/no, and shows every digit of numbers that format alike', () => {
+  it('quotes text that looks like a yes/no; numbers that format alike are one group, not look-alikes', () => {
     const t = aggregate([input('a', numeric([1, 2, 3, 4]), 4, undefined, discrete(['true', true, 1.0000001, 1.00000012]))]);
     const labels = distinctLabels(t.numbers[0].groups!, name).map((l) => l.label);
-    expect(labels).toEqual(['"true"', 'true', '1.0000001', '1.00000012']);
+    expect(labels).toEqual(['"true"', 'true', '1']);
+  });
+
+  it('groups numbers that show alike as one, as the Parameters list does (#114)', () => {
+    const span = numeric([16.7083, 16.708300000001, 16.7083, 22.25], [FT3]);
+    const inputs = [input('a', numeric([1, 2, 4, 8]), 4, undefined, span)];
+    const lines = aggregate(inputs).numbers[0].groups!;
+    expect(lines.map((l) => [l.label, l.stats.count, l.stats.sum])).toEqual([
+      ['16.7083 ft³', 3, 7],
+      ['22.25 ft³', 1, 8],
+    ]);
+    // The group's pick covers every merged element, and the chart entry is the same group.
+    expect(lineElements(inputs, { groupKey: lines[0].key }).map((e) => e.expressId)).toEqual([100, 101, 102]);
+    const slices = pieSlices(lines, 'count')!;
+    expect(slices.map((s) => [s.key, s.label])).toEqual([
+      [lines[0].key, '16.7083 ft³'],
+      [lines[1].key, '22.25 ft³'],
+    ]);
+    // Sums, min and max still use the raw numbers.
+    expect(lines[0].stats.min).toBe(1);
+    expect(lines[0].stats.max).toBe(4);
   });
 
   it('leaves labels alone when none look alike', () => {
