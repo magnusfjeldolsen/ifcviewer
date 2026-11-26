@@ -59,6 +59,16 @@ export function parameterValueOf(value: PropertyValue, display: string): Paramet
   }
 }
 
+/**
+ * A number as the lists show it (6 significant digits): values that show the
+ * same (16.7083 ft and 16.70830000001 ft, which unit conversion leaves a hair
+ * apart) are one value. The Parameters list counts and picks by this, as the
+ * colour legend does.
+ */
+export function shownNumber(v: number): number {
+  return Number.isInteger(v) ? v : Number(v.toPrecision(6));
+}
+
 function kindOf(v: ParameterValue): Exclude<ParameterKind, 'mixed'> {
   if (typeof v === 'number') return 'numeric';
   if (typeof v === 'boolean') return 'boolean';
@@ -146,6 +156,7 @@ export class ParameterFold {
       acc.numericCount++;
     }
 
+    if (typeof value === 'number') value = shownNumber(value);
     if (acc.values) {
       const c = acc.values.get(value);
       if (c !== undefined) {

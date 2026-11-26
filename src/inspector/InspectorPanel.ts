@@ -799,6 +799,8 @@ export class InspectorPanel {
           name: row?.name ?? path.split('.').pop() ?? path,
           rawValue: value,
           displayValue: row?.displayValue ?? '',
+          // Without it the query asks for "no unit" and finds no number that has one.
+          unitKey: row?.unitKey,
         },
         scope,
       );

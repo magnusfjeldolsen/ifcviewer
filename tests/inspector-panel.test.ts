@@ -139,6 +139,7 @@ function makeProperties(over: Partial<ElementProperties> = {}): ElementPropertie
         path: 'Pset_WallCommon.Reference',
         name: 'Reference',
         displayValue: 'WallType-A',
+        unitKey: 'si:mm',
         rawValue: {
           kind: 'single',
           value: 'WallType-A',
@@ -1509,6 +1510,18 @@ describe('InspectorPanel', () => {
       if (q.kind === 'value') {
         expect(q.selector.path.length).toBeGreaterThan(0);
       }
+    });
+
+    it("asks for the row's unit, so a number in a unit finds its look-alikes (#114)", async () => {
+      const seen: SimilarQuery[] = [];
+      const { parent } = await mountWithElement((q) => seen.push(q));
+      const btn = [...parent.querySelectorAll<HTMLButtonElement>('.inspector-similar-btn')].find((b) =>
+        /Reference/.test(b.title || b.getAttribute('aria-label') || ''),
+      )!;
+      btn.click();
+      const q = seen[0];
+      if (q.kind !== 'value') throw new Error('expected a value query');
+      expect(q.selector.unitKey).toBe('si:mm');
     });
 
     it('sits at the end of its row in both views, on the same row as the value', async () => {

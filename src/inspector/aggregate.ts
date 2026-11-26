@@ -15,6 +15,7 @@
  */
 
 import { legendValueText } from './colourByPlan';
+import { shownNumber } from './parameterFold';
 import type { ColumnData } from './parameterColumn';
 import type { ParameterValue } from './types';
 import { canSum, isNotStated, type SumVerdict, type UnitRef } from './units';
@@ -144,7 +145,8 @@ class GroupRegistry {
 }
 
 function valueKey(v: ParameterValue): string {
-  return `${typeof v}:${String(v)}`;
+  // Numbers by how they show, as the Parameters list counts them.
+  return `${typeof v}:${String(typeof v === 'number' ? shownNumber(v) : v)}`;
 }
 
 /**
@@ -169,15 +171,16 @@ function groupMapper(modelId: string, group: ColumnData | null, groups: GroupReg
     const v = values[row];
     if (Number.isNaN(v)) return noValue();
     const u = unitIndex ? unitIndex[row] : 0;
-    let g = perUnit[u].get(v);
+    const shown = shownNumber(v);
+    let g = perUnit[u].get(shown);
     if (g === undefined) {
       const unit = group.units[u];
-      const label = legendValueText(v) + (unit.symbol ? ` ${unit.symbol}` : '');
-      g = groups.of(`n:${v}|${mergedUnitKey(modelId, unit.key)}`, label, {
-        value: v,
+      const label = legendValueText(shown) + (unit.symbol ? ` ${unit.symbol}` : '');
+      g = groups.of(`n:${shown}|${mergedUnitKey(modelId, unit.key)}`, label, {
+        value: shown,
         ...(isNotStated(unit.key) ? { modelId } : {}),
       });
-      perUnit[u].set(v, g);
+      perUnit[u].set(shown, g);
     }
     return g;
   };
@@ -226,8 +229,9 @@ class ValueRegistry {
 
   of(v: ParameterValue): number {
     if (typeof v === 'number') {
-      let i = this.numbers.get(v);
-      if (i === undefined) this.numbers.set(v, (i = this.size++));
+      const shown = shownNumber(v);
+      let i = this.numbers.get(shown);
+      if (i === undefined) this.numbers.set(shown, (i = this.size++));
       return i;
     }
     const k = valueKey(v);
@@ -443,9 +447,8 @@ export function lineElements(
 
 /**
  * The lines with labels that tell them apart. Two groups can look alike: a
- * number in a unit two models leave unstated (one group per model), numbers
- * that show the same to six digits, the text "true" and yes/no true. Those
- * get the model's name, every digit, or quotes round text; anything still
+ * number in a unit two models leave unstated (one group per model), or the
+ * text "true" and yes/no true. Those get the model's name, or quotes round text; anything still
  * alike gets a number. Lines that are not alike keep their label.
  */
 export function distinctLabels(lines: readonly GroupLine[], modelName: (modelId: string) => string): GroupLine[] {
@@ -454,11 +457,7 @@ export function distinctLabels(lines: readonly GroupLine[], modelName: (modelId:
   if (lines.every((l) => count.get(l.label) === 1)) return [...lines];
   const better = (l: GroupLine): string => {
     let label = l.label;
-    const v = l.value;
-    if (typeof v === 'number') {
-      const shown = legendValueText(v);
-      if (label.startsWith(shown)) label = String(v) + label.slice(shown.length);
-    } else if (typeof v === 'string') label = `"${v}"`;
+    if (typeof l.value === 'string') label = `"${l.value}"`;
     if (l.modelId) label += ` (${modelName(l.modelId)})`;
     return label;
   };
