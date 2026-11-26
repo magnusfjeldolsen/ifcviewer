@@ -9,22 +9,10 @@ function createPanel(overrides: Partial<ModelTreeCallbacks> = {}) {
     onVisibilityToggle: overrides.onVisibilityToggle ?? vi.fn(),
     onRemoveModel: overrides.onRemoveModel ?? vi.fn(),
     onAddModel: overrides.onAddModel ?? vi.fn(),
-    onModelAdded: overrides.onModelAdded,
   };
   const panel = new ModelTreePanel(parent, callbacks);
   return { parent, panel, callbacks };
 }
-
-describe('ModelTreePanel onModelAdded (#113)', () => {
-  it('tells the app when a row is added, and not for a duplicate', () => {
-    const onModelAdded = vi.fn();
-    const { panel } = createPanel({ onModelAdded });
-    panel.addModel('m1', 'A.ifc', 1);
-    panel.addModel('m1', 'A.ifc', 1);
-    expect(onModelAdded).toHaveBeenCalledTimes(1);
-    expect(onModelAdded).toHaveBeenCalledWith('m1');
-  });
-});
 
 describe('ModelTreePanel', () => {
   it('should create the panel DOM structure', () => {

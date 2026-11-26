@@ -12,6 +12,7 @@ import { TotalsView, choiceText, formatStat, groupChoices, scopeHeading, TOTALS_
 import { ParametersPanel } from '../src/ui/ParametersPanel';
 import { buildContextMenuItems, type ContextMenuActions } from '../src/ui/contextMenuItems';
 import { LoadGate } from '../src/core/LoadGate';
+import { registerModel } from '../src/core/registerModel';
 import type { ColumnData, ParameterColumn } from '../src/inspector/parameterColumn';
 import type { ModelParameters, ParameterSummary } from '../src/inspector/types';
 import type { UnitRef } from '../src/inspector/units';
@@ -528,6 +529,30 @@ describe('the model picker follows the loaded models (#113)', () => {
     p.onModelRemoved('m');
     expect([...select.options].map((o) => o.value)).toEqual(['n']);
     expect(p.currentModel()).toBe('n');
+  });
+});
+
+describe('registering a model that finishes after an await (#113)', () => {
+  it('lists the model in the open panel once its record is stored', async () => {
+    const records = new Map<string, { id: string; name: string }>();
+    records.set('m', { id: 'm', name: 'A.ifc' });
+    const data: ModelParameters = { modelId: 'm', scopeSize: 1, parameters: [] };
+    const parent = document.createElement('div');
+    const p = new ParametersPanel(parent, { getModels: () => [...records.values()], describe: async () => data });
+    p.open('m');
+    const select = parent.querySelector<HTMLSelectElement>('.params-panel-select')!;
+    // Session restore on a cache miss: the record is stored after an await.
+    await Promise.resolve();
+    expect(select.options).toHaveLength(1);
+    registerModel(records, 'n', { id: 'n', name: 'B.ifc' }, () => p.refreshModels());
+    expect([...select.options].map((o) => o.value)).toEqual(['m', 'n']);
+  });
+
+  it('stores the record before it tells anyone', () => {
+    const records = new Map<string, number>();
+    let seen: number | undefined;
+    registerModel(records, 'a', 7, () => { seen = records.get('a'); });
+    expect(seen).toBe(7);
   });
 });
 

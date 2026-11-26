@@ -5,8 +5,6 @@ export interface ModelTreeCallbacks {
   onAddRemoteModel?: () => void;
   /** Open the Parameters list for this model. No button is shown without it. */
   onShowParameters?: (id: string) => void;
-  /** A model row was added (so panels that list the models can re-read them). */
-  onModelAdded?: (id: string) => void;
 }
 
 interface ModelRow {
@@ -180,7 +178,6 @@ export class ModelTreePanel {
 
     // Auto-expand when a model is added
     if (this.collapsed) this.toggleCollapse();
-    this.callbacks.onModelAdded?.(id);
   }
 
   setModelWarning(id: string, message: string): void {
