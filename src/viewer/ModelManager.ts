@@ -137,7 +137,18 @@ export class ModelManager {
     entry.group.visible = visible;
     entry.visible = visible;
     this.requestRender?.();
+    for (const l of this.visibilityListeners) l();
     return true;
+  }
+
+  private visibilityListeners: Array<() => void> = [];
+
+  /** Subscribe to a model being switched on or off (what "visible" in `visibleElements` depends on). */
+  onModelVisibility(cb: () => void): () => void {
+    this.visibilityListeners.push(cb);
+    return () => {
+      this.visibilityListeners = this.visibilityListeners.filter((l) => l !== cb);
+    };
   }
 
   getModel(id: string): ModelEntry | undefined {

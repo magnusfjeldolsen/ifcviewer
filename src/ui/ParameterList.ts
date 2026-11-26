@@ -27,6 +27,7 @@ import { shownNumber, type ValueCount } from '../inspector/parameterFold';
 import type { ModelParameters, ParameterSummary, ParameterValue } from '../inspector/types';
 import { showOnlyTitle } from '../inspector/showOnly';
 import { showOnlyButton } from './showOnlyButton';
+import { visibleValueKey, type OpenDetail, type VisibleView } from '../inspector/visibleCounts';
 
 export type ParameterSort = 'name' | 'count';
 
@@ -88,6 +89,27 @@ function colourButtonTitle(on: boolean): string {
 /** "412 of 1,235". */
 export function countText(p: ParameterSummary, scopeSize: number): string {
   return `${counts.format(p.count)} of ${counts.format(scopeSize)}`;
+}
+
+/**
+ * A row's count while part of the model cannot be seen (#115): "12 of 40"
+ * visible elements. A parameter whose values were never read says its count
+ * is the whole model's, so no one mistakes it for a visible count.
+ */
+export function visibleCountText(p: ParameterSummary, scopeSize: number, view: VisibleView | null): string {
+  if (!view) return countText(p, scopeSize);
+  const seen = view.parameters.get(p.key);
+  return seen
+    ? `${counts.format(seen.count)} of ${counts.format(view.elements)}`
+    : `${countText(p, scopeSize)} in model`;
+}
+
+/**
+ * A value's count: how many can be seen when that is known, else the whole
+ * model's. Never "N of M": that wording is the parameter row's alone.
+ */
+export function visibleValueCountText(total: number, seen: number | null): string {
+  return counts.format(seen ?? total);
 }
 
 const KIND_TEXT: Record<ParameterSummary['kind'], string> = {
@@ -190,6 +212,8 @@ export class ParameterList {
   private refreshOpen: (() => void) | null = null;
   /** The parameter the model is coloured by, if it is this list's model. */
   private colouredKey: string | null = null;
+  /** What can be seen, when some of the model cannot (null: everything, or not counted yet). */
+  private view: VisibleView | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -257,6 +281,68 @@ export class ParameterList {
     }
     this.data = data;
     this.render();
+  }
+
+  /**
+   * Count what can be seen (#115), or null when everything can. Updates the
+   * numbers where they stand: an open row, its filter and the scroll stay.
+   */
+  setVisible(view: VisibleView | null): void {
+    this.view = view;
+    const data = this.data;
+    if (!data) return;
+    const active = this.activeView();
+    this.summaryEl.textContent = this.summaryText(data);
+    for (const p of data.parameters) {
+      const li = this.rowEls.get(p.key);
+      if (li) this.paintCount(li, p, data.scopeSize, active);
+    }
+    // Never re-ordered here: rows move only when the user sorts or filters.
+    this.refreshOpen?.();
+  }
+
+  /** Which parameter's values are listed, and whether counting them one by one is worth it. */
+  openDetail(): OpenDetail | null {
+    const p = this.openKey === null ? undefined : this.data?.parameters.find((x) => x.key === this.openKey);
+    return p ? { key: p.key, perValue: !p.uniquePerElement } : null;
+  }
+
+  /** The view of the model shown, if there is one (also when the model is switched off). */
+  private currentView(): VisibleView | null {
+    return this.view && this.data && this.view.modelId === this.data.modelId ? this.view : null;
+  }
+
+  /** The view to count rows and values by: none when the model is switched off (nothing is claimed then). */
+  private activeView(): VisibleView | null {
+    const v = this.currentView();
+    return v && !v.off ? v : null;
+  }
+
+  private summaryText(data: ModelParameters): string {
+    const shown = this.listEl.children.length;
+    const total = data.parameters.length;
+    let text =
+      shown === total ? `${counts.format(total)} parameters` : `${counts.format(shown)} of ${counts.format(total)} parameters`;
+    const view = this.currentView();
+    if (view?.off) return `${text} · Model is switched off`;
+    if (view) text += ` · Counting the ${counts.format(view.elements)} of ${counts.format(view.total)} elements you can see`;
+    return text;
+  }
+
+  /** The count on one row's header, and whether the row has nothing visible. */
+  private paintCount(li: HTMLElement, p: ParameterSummary, scopeSize: number, active: VisibleView | null): void {
+    const span = li.querySelector<HTMLElement>('.param-count');
+    if (!span) return;
+    const text = visibleCountText(p, scopeSize, active);
+    span.textContent = text;
+    const seen = active?.parameters.get(p.key);
+    span.classList.toggle('counted', !!seen);
+    span.title = seen
+      ? `${text} elements you can see have a value. In the whole model: ${countText(p, scopeSize)}`
+      : active
+        ? `${text}: not counted for what you can see until the parameter has been opened`
+        : text;
+    li.classList.toggle('none', !!seen && seen.count === 0);
   }
 
   setSort(sort: ParameterSort): void {
@@ -334,11 +420,6 @@ export class ParameterList {
       return;
     }
     const shown = visibleParameters(data.parameters, this.filterInput.value, this.sort);
-    const total = data.parameters.length;
-    this.summaryEl.textContent =
-      shown.length === total
-        ? `${counts.format(total)} parameters`
-        : `${counts.format(shown.length)} of ${counts.format(total)} parameters`;
 
     const frag = document.createDocumentFragment();
     for (const p of shown) {
@@ -347,6 +428,7 @@ export class ParameterList {
       frag.appendChild(li);
     }
     this.listEl.appendChild(frag);
+    this.summaryEl.textContent = this.summaryText(data);
   }
 
   /** Replace one rendered row in place (when it opens or closes). */
@@ -409,6 +491,7 @@ export class ParameterList {
     head.appendChild(key);
     head.appendChild(meta);
     li.appendChild(head);
+    this.paintCount(li, p, scopeSize, this.activeView());
 
     const onColourBy = this.options.onColourBy;
     if (onColourBy) {
@@ -498,29 +581,73 @@ export class ParameterList {
     body.appendChild(status);
     body.appendChild(list);
 
-    const missing = scopeSize - p.count;
-    if (missing > 0) {
-      const without = document.createElement('div');
-      without.className = 'param-values-without';
-      without.textContent = `${counts.format(missing)} without this parameter`;
-      body.appendChild(without);
-    }
+    const without = document.createElement('div');
+    without.className = 'param-values-without';
+
+    /** Rendered entries by value, reused so redrawing does not replace a focused button. */
+    const items = new Map<string, HTMLElement>();
+
+    /** The number on an entry, and whether nobody can see any of its elements. */
+    const paintValue = (li: HTMLElement, v: ValueCount, seen: number | null): void => {
+      const count = li.querySelector<HTMLElement>('.param-value-count');
+      if (count) {
+        count.textContent = visibleValueCountText(v.count, seen);
+        count.title = seen !== null ? `${counts.format(seen)} of the ${counts.format(v.count)} in the model can be seen` : '';
+      }
+      li.classList.toggle('none', seen === 0);
+    };
+
+    /**
+     * Make the list these entries. Only touches the DOM when the entries or
+     * their order differ, and gives focus back to what had it: moving a node
+     * drops focus in a browser.
+     */
+    const setItems = (nodes: HTMLElement[]): void => {
+      if (nodes.length === 0) items.clear();
+      const current = list.children;
+      if (current.length === nodes.length && nodes.every((n, i) => current[i] === n)) return;
+      const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement) : null;
+      list.replaceChildren(...nodes);
+      if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+    };
 
     const draw = (): void => {
-      list.replaceChildren();
+      const active = this.activeView();
+      const seenParam = active?.parameters.get(p.key);
+      const missing = seenParam && active ? active.elements - seenParam.count : scopeSize - p.count;
+      if (missing > 0) {
+        // Not counted for what can be seen yet: say it is the whole model's number.
+        without.textContent = `${counts.format(missing)} without this parameter${active && !seenParam ? ' in model' : ''}`;
+        body.appendChild(without);
+      } else {
+        without.remove();
+      }
       status.textContent = '';
       if (state.error) {
         status.textContent = `Could not read the values: ${state.error}`;
+        setItems([]);
         return;
       }
       if (!state.values) {
         status.textContent = state.progress
           ? `Reading values… ${counts.format(state.progress.done)} of ${counts.format(state.progress.total)} elements`
           : 'Reading values…';
+        setItems([]);
         return;
       }
       // A unique-per-element parameter lists nothing until asked for something.
-      if (p.uniquePerElement && !this.valueFilter.trim()) return;
+      if (p.uniquePerElement && !this.valueFilter.trim()) {
+        setItems([]);
+        return;
+      }
+      // How many of an entry can be seen; null when that is not counted (no
+      // recount yet, or a parameter with a value per element): the entry then
+      // shows the whole model's number and claims nothing.
+      const seenValues = seenParam?.values ?? null;
+      const seenOf = (v: ValueCount): number | null =>
+        seenValues ? (seenValues.get(visibleValueKey(v.value, v.unit?.key)) ?? 0) : null;
+      // The order is the whole model's, whatever is hidden: entries never move
+      // under the pointer. A value nobody can see is dimmed where it stands.
       const matching = filterValues(state.values, this.valueFilter);
       const shown = matching.slice(0, VALUES_SHOWN);
       if (matching.length > shown.length) {
@@ -531,8 +658,17 @@ export class ParameterList {
         status.textContent = 'No value matches';
       }
       const unit = p.kind === 'numeric' && p.unit && !p.unitsDiffer ? ` ${p.unit}` : '';
-      const frag = document.createDocumentFragment();
+      const nodes: HTMLElement[] = [];
       for (const v of shown) {
+        const itemKey = visibleValueKey(v.value, v.unit?.key);
+        const seen = seenOf(v);
+        const cached = items.get(itemKey);
+        if (cached) {
+          // The same entry again: only its numbers change, so a focused button stays focused.
+          paintValue(cached, v, seen);
+          nodes.push(cached);
+          continue;
+        }
         const li = document.createElement('li');
         const b = document.createElement('button');
         b.type = 'button';
@@ -546,7 +682,6 @@ export class ParameterList {
         label.textContent = text;
         const count = document.createElement('span');
         count.className = 'param-value-count';
-        count.textContent = counts.format(v.count);
         b.appendChild(label);
         b.appendChild(count);
         if (this.options.onPickValue) {
@@ -559,16 +694,21 @@ export class ParameterList {
         li.appendChild(b);
         const onShowOnly = this.options.onShowOnly;
         if (onShowOnly) {
-          li.className = 'param-value-item';
+          li.classList.add('param-value-item');
           li.appendChild(
             showOnlyButton(`Show only ${text}`, showOnlyTitle(`the elements with ${text}`), (additive) =>
               onShowOnly(p, v.value, additive, v.unit),
             ),
           );
         }
-        frag.appendChild(li);
+        paintValue(li, v, seen);
+        items.set(itemKey, li);
+        nodes.push(li);
       }
-      list.appendChild(frag);
+      setItems(nodes);
+      // Keep only what is listed: the cache must not grow with every filter typed.
+      const listed = new Set(shown.map((v) => visibleValueKey(v.value, v.unit?.key)));
+      for (const k of items.keys()) if (!listed.has(k)) items.delete(k);
     };
     this.refreshOpen = draw;
     draw();

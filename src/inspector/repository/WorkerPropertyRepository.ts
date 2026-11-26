@@ -404,6 +404,16 @@ export class WorkerPropertyRepository implements ElementPropertyRepository {
   }
 
   /**
+   * The columns of a model that are built now (none still being read), for
+   * whoever wants to count over them without causing a build.
+   */
+  builtColumns(modelId: string): ParameterColumn[] {
+    const out: ParameterColumn[] = [];
+    for (const entry of this.columns.get(modelId)?.values() ?? []) if (entry.column) out.push(entry.column);
+    return out;
+  }
+
+  /**
    * The column of `path` is no longer about to be needed (its parameter was
    * closed). A build still running is given up, in the worker too, so it
    * does not hold up the next one; whoever awaited it gets
