@@ -154,11 +154,16 @@ describe('round centres survive mesh defects', () => {
     expectAllOnAxis(buildSnapGeometry(tube(column(0.3, [0, 3]), 12, 0, () => true, false)), 0.3);
   });
 
-  it('fits a tall, finely rowed column without walking its whole height', () => {
+  it('fits a tall, finely rowed column without walking every row of every line', () => {
+    // 4000 rows of 12 facets: following all 12 lines to the ends would be
+    // 48 000 steps. The run is measured from two lines in full and part of
+    // the rest, inside the run budget.
     const geo = buildSnapGeometry(tube(column(0.3, Array.from({ length: 4001 }, (_, k) => k * 0.01)), 12));
-    const fit = roundFitsAt(geo, 48_000).find((f) => f.slides);
+    const cost = { steps: 0 };
+    const fit = roundFitsAt(geo, 48_000, cost).find((f) => f.slides);
     expect(fit).toBeDefined();
     expect(fit!.halfLength).toBeCloseTo(20, 3);
+    expect(cost.steps).toBeLessThan(20_000);
   });
 });
 

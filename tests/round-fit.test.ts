@@ -252,8 +252,10 @@ describe('roundFitsAt — the curved side', () => {
       const found = fitCurvedSide(torus, 0);
       const half = Math.PI / segments;
       expect(found.fit).not.toBeNull();
-      // Twelve facets round, two triangles each: one ring and nothing more.
-      expect(found.ring.length).toBe(24);
+      // Held to its own piece of the bend: the triangle on the far side of
+      // the next ring round the torus gets a different centre.
+      const next = fitCurvedSide(torus, 2).fit!;
+      expect(next.centre.distanceTo(found.fit!.centre)).toBeGreaterThan(1e-3);
       const c = found.fit!.centre;
       expect(Math.abs(Math.hypot(c.x, c.y) - 1)).toBeLessThanOrEqual(1 - Math.cos(half) + 1e-4);
       expect(Math.abs(c.z)).toBeLessThan(1e-4);
