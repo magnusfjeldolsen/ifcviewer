@@ -459,7 +459,8 @@ describe('flying — keys', () => {
 
   it('asks for no frames once still', () => {
     viewer.enterFlying();
-    frame();
+    // The field of view eases wider for its first ~250 ms (#116).
+    frames(20);
     const render = vi.spyOn(viewer.getRenderer(), 'render');
     frames(10);
     expect(render).not.toHaveBeenCalled();

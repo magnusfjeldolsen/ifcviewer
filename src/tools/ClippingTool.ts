@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { Tool } from './Tool';
 import { raycastVisible } from '../utils/raycast';
+import { markerScale } from './labelScale';
 
 export interface ClippingToolDeps {
   renderer: THREE.WebGLRenderer;
@@ -166,8 +167,12 @@ export class ClippingTool implements Tool {
 
     const handleWorldPos = this.handleGroup.getWorldPosition(new THREE.Vector3());
     const distance = this.deps.camera.position.distanceTo(handleWorldPos);
-    const scale = distance * this.HANDLE_SCREEN_SIZE;
-    this.handleGroup.scale.setScalar(scale);
+    this.handleGroup.scale.setScalar(this.handleScale(distance));
+  }
+
+  /** The handle's scale at `distance`: constant on screen at any field of view. */
+  private handleScale(distance: number): number {
+    return markerScale(distance, this.HANDLE_SCREEN_SIZE, this.deps.camera.fov);
   }
 
   /** Remove the clip plane, handle, and all state. Used by Reset View. */
@@ -422,7 +427,7 @@ export class ClippingTool implements Tool {
 
     const handlePos = this.handleGroup.getWorldPosition(new THREE.Vector3());
     const dist = this.deps.camera.position.distanceTo(handlePos);
-    const hitRadius = dist * this.HANDLE_SCREEN_SIZE * 1.5;
+    const hitRadius = this.handleScale(dist) * 1.5;
     const hitSphere = new THREE.Sphere(handlePos, hitRadius);
 
     const ray = this.raycaster.ray;
@@ -481,7 +486,7 @@ export class ClippingTool implements Tool {
 
     const handlePos = this.handleGroup.getWorldPosition(new THREE.Vector3());
     const dist = this.deps.camera.position.distanceTo(handlePos);
-    const hitRadius = dist * this.HANDLE_SCREEN_SIZE * 1.5;
+    const hitRadius = this.handleScale(dist) * 1.5;
     const hoverSphere = new THREE.Sphere(handlePos, hitRadius);
 
     const ray = this.raycaster.ray;

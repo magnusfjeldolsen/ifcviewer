@@ -5,7 +5,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { formatDistance } from './measureMath';
 import type { MeasurementView } from './measurementViews';
 import type { MeasurementEnd } from './MeasurementStore';
-import { labelWorldHeight } from './labelScale';
+import { labelWorldHeight, markerScale } from './labelScale';
 
 /**
  * Everything a measurement looks like, and nothing about what it means.
@@ -244,7 +244,7 @@ export class MeasurementRenderer {
     if (this.pendingStartMarker) this.scaleMarkers(this.pendingStartMarker);
     if (this.hoverMarker) {
       const dist = this.deps.camera.position.distanceTo(this.hoverMarker.position);
-      this.hoverMarker.scale.setScalar(dist * HOVER_MARKER_SCREEN_SIZE);
+      this.hoverMarker.scale.setScalar(markerScale(dist, HOVER_MARKER_SCREEN_SIZE, this.deps.camera.fov));
     }
 
     for (const label of this.labels) this.updateLabel(label);
@@ -525,7 +525,7 @@ export class MeasurementRenderer {
     group.traverse((child) => {
       if (child instanceof THREE.Group && child.userData.isMeasurementMarker) {
         const dist = this.deps.camera.position.distanceTo(child.position);
-        child.scale.setScalar(dist * MARKER_SCREEN_SIZE);
+        child.scale.setScalar(markerScale(dist, MARKER_SCREEN_SIZE, this.deps.camera.fov));
         if (child.userData.billboard) child.quaternion.copy(this.deps.camera.quaternion);
       }
     });

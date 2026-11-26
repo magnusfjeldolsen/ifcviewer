@@ -27,8 +27,44 @@ const NEAR_FRACTION = 0.002;
  * and an on-screen point that far away is at least `clearance * cos(θ)` deep,
  * θ being its angle off the view axis: 0.76 at the corner of a 45° 16:9 view,
  * 0.69 on a 21:9 one. A half leaves room for both.
+ *
+ * Not for every lens, though: flying widens the view to 70° (#116), and there
+ * the corner cosine is 0.57 at 16:9, 0.49 at 21:9 and 0.36 at 32:9 — a near
+ * plane at half the clearance would cut geometry at the corners of a wide
+ * window. When the lens is known, `CORNER_MARGIN` caps the fraction below.
  */
 const CLEARANCE_FRACTION = 0.5;
+
+/**
+ * With the lens known, the near plane may take at most this share of the
+ * shallowest depth anything on screen can have (`clearance * cos(corner)`).
+ * Leaves `CLEARANCE_FRACTION` in charge for 45° up to about 19:9, so orbit on
+ * an ordinary window is unchanged.
+ */
+const CORNER_MARGIN = 0.7;
+
+/**
+ * Cosine of the angle between the view axis and a corner of the view: the
+ * most oblique ray on screen. `aspect` is width over height.
+ */
+export function cornerCosine(verticalFovDeg: number, aspect: number): number {
+  const tanHalfV = Math.tan((verticalFovDeg * Math.PI) / 360);
+  const tanCorner = tanHalfV * Math.sqrt(1 + Math.max(aspect, 0) ** 2);
+  return 1 / Math.sqrt(1 + tanCorner * tanCorner);
+}
+
+/** The share of the clearance the near plane may take for this lens. */
+export function clearanceFraction(lens?: Lens): number {
+  if (!lens) return CLEARANCE_FRACTION;
+  return Math.min(CLEARANCE_FRACTION, CORNER_MARGIN * cornerCosine(lens.verticalFovDeg, lens.aspect));
+}
+
+/** The camera's lens: what decides how oblique the corners of the view are. */
+export interface Lens {
+  verticalFovDeg: number;
+  /** Width over height. */
+  aspect: number;
+}
 
 /**
  * Absolute floor on the near plane, in metres (the scene is in metres). 2 mm,
@@ -108,6 +144,11 @@ export interface ClippingView {
    * plane: the ground grid, which can lie far from a georeferenced model.
    */
   clearOf?: readonly THREE.Box3[];
+  /**
+   * The live lens. Without it the near plane assumes a corner no more oblique
+   * than a 45° 21:9 view's.
+   */
+  lens?: Lens;
 }
 
 /**
@@ -145,7 +186,7 @@ export function clippingPlanesForView(view: ClippingView): ClippingPlanes {
   for (const box of view.clearOf ?? []) {
     if (!box.isEmpty()) clearance = Math.min(clearance, box.distanceToPoint(position));
   }
-  const fromClearance = Number.isFinite(clearance) ? clearance * CLEARANCE_FRACTION : 0;
+  const fromClearance = Number.isFinite(clearance) ? clearance * clearanceFraction(view.lens) : 0;
   const fromHit = view.hitDistance === null ? Infinity : Math.max(view.hitDistance, 0) * NEAR_FRACTION;
 
   return boundedPlanes(Math.min(fromClearance, fromHit), far);
@@ -162,7 +203,7 @@ export function maxViewDistance(sceneRadius: number): number {
  * Compute the camera position and clipping planes needed to frame a bounding box.
  * Pure function — no side effects on camera or controls.
  */
-export function computeFitPosition(box: THREE.Box3): FitResult | null {
+export function computeFitPosition(box: THREE.Box3, lens?: Lens): FitResult | null {
   if (box.isEmpty()) return null;
 
   const center = box.getCenter(new THREE.Vector3());
@@ -178,7 +219,7 @@ export function computeFitPosition(box: THREE.Box3): FitResult | null {
 
   // The same planes the render loop recomputes a frame later, so the fit
   // and the loop never disagree.
-  const { near, far } = clippingPlanesForView({ position, hitDistance: null, scene: box });
+  const { near, far } = clippingPlanesForView({ position, hitDistance: null, scene: box, lens });
 
   return { position, center, near, far };
 }

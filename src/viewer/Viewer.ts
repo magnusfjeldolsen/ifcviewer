@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { raycastVisible } from '../utils/raycast';
-import { clippingPlanesForView, computeFitPosition, maxViewDistance } from './cameraUtils';
+import { clippingPlanesForView, computeFitPosition, maxViewDistance, type Lens } from './cameraUtils';
 import { CameraAnimator } from './CameraAnimator';
 import { PivotState } from './PivotState';
 import {
@@ -14,6 +14,11 @@ import {
 } from './orbitMath';
 import { FlyController } from './FlyController';
 import { exitAnchorDistance } from './flyMath';
+import { FovEase, FLY_FOV_DEG, ORBIT_FOV_DEG } from './flyFov';
+import { markerScale } from '../tools/labelScale';
+
+/** Pivot and transient markers: scene size per metre of distance at 45 degrees. */
+const PIVOT_MARKER_SCREEN_SIZE = 0.008;
 
 /**
  * Who drives the camera. Exactly one at a time — see "Camera Ownership" in
@@ -194,6 +199,12 @@ export class Viewer {
   /** The last captured press turned the view before release: a drag, not a click. */
   private lockPressDragged = false;
   private swallowMenuTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The field of view easing between orbit and flying (#116). Not a camera
+   * owner: it touches only `camera.fov`, which none of the owners drive, so
+   * it can run on into orbit or under a fly-to after flying has ended.
+   */
+  private readonly fovEase = new FovEase();
   private mouse = new THREE.Vector2();
   private pivotMarker: THREE.Mesh | null = null;
   private transientMarker: THREE.Mesh | null = null;
@@ -274,7 +285,7 @@ export class Viewer {
     this.scene.background = new THREE.Color(0xf0f0f0);
 
     this.camera = new THREE.PerspectiveCamera(
-      45,
+      ORBIT_FOV_DEG,
       window.innerWidth / window.innerHeight,
       0.1,
       1000,
@@ -474,6 +485,7 @@ export class Viewer {
     window.addEventListener('keyup', this.onFlyKeyUp, { capture: true });
     window.addEventListener('blur', this.onFlyBlur);
     document.addEventListener('visibilitychange', this.onFlyBlur);
+    this.easeFovTo(FLY_FOV_DEG);
     this.needsRender = true;
     for (const cb of this.flyingListeners) cb(true);
     // G and the fly button are user gestures, which pointer lock needs.
@@ -838,8 +850,41 @@ export class Viewer {
 
     this._controlsMode = 'user';
     this.lastFlyFrame = null;
+    // Back to the orbit view, eased so the picture does not jump. The paths
+    // that also move the camera (fit, restore) snap it after this instead.
+    this.easeFovTo(ORBIT_FOV_DEG);
     this.needsRender = true;
     for (const cb of this.flyingListeners) cb(false);
+  }
+
+  // ── Field of view (#116) ───────────────────────────────────
+
+  /** Start easing the field of view towards `fov`, from wherever it is now. */
+  private easeFovTo(fov: number): void {
+    this.fovEase.start(this.camera.fov, fov, performance.now());
+    if (!this.fovEase.isActive()) this.applyFov(fov);
+  }
+
+  /**
+   * Put the field of view at `fov` at once, ending any ease. For the paths
+   * that move the camera in one step anyway — an instant fit, a restored view
+   * — where an ease would only drag the old view's width into the new one.
+   */
+  private snapFov(fov: number): void {
+    this.fovEase.cancel();
+    this.applyFov(fov);
+  }
+
+  /** One frame of the ease. Runs before the draw so labels read this frame's value. */
+  private tickFov(): void {
+    if (!this.fovEase.isActive()) return;
+    this.applyFov(this.fovEase.sample(performance.now()));
+  }
+
+  private applyFov(fov: number): void {
+    this.camera.fov = fov;
+    this.camera.updateProjectionMatrix();
+    this.needsRender = true;
   }
 
   /** Hear when flying starts or stops. Returns an unsubscribe. */
@@ -952,6 +997,10 @@ export class Viewer {
     // pose wants that pose, not a flight that carries on from it.
     this.exitFlying();
     this._controlsMode = 'user';
+    // A restored pose always lands in orbit, so at the orbit field of view —
+    // even one autosaved while flying, since a saved state holds only the
+    // position and the anchor, never the field of view.
+    this.snapFov(ORBIT_FOV_DEG);
     this.camera.position.set(state.position.x, state.position.y, state.position.z);
     this.controls.target.set(state.target.x, state.target.y, state.target.z);
     this.controls.update();
@@ -973,6 +1022,7 @@ export class Viewer {
     } else if (flying) {
       this.tickFlying();
     }
+    this.tickFov();
     if (this.needsRender) this.drawFrame();
     if (probing) this.maybeProbeCentre(frameStart);
   };
@@ -1006,8 +1056,13 @@ export class Viewer {
     };
   }
 
+  /** The lens a fit ends with: always the orbit field of view, whatever it is now. */
+  private orbitLens(): Lens {
+    return { verticalFovDeg: ORBIT_FOV_DEG, aspect: this.camera.aspect };
+  }
+
   fitToBox(box: THREE.Box3): void {
-    const fit = computeFitPosition(box);
+    const fit = computeFitPosition(box, this.orbitLens());
     if (!fit) return;
 
     this.exitFlying();
@@ -1015,7 +1070,8 @@ export class Viewer {
     this.camera.position.copy(fit.position);
     this.camera.near = fit.near;
     this.camera.far = fit.far;
-    this.camera.updateProjectionMatrix();
+    // Also ends an ease still running from leaving flying a moment ago.
+    this.snapFov(ORBIT_FOV_DEG);
 
     this.controls.target.copy(fit.center);
     this.controls.update();
@@ -1024,11 +1080,13 @@ export class Viewer {
   }
 
   flyToBox(box: THREE.Box3): Promise<void> {
-    const fit = computeFitPosition(box);
+    const fit = computeFitPosition(box, this.orbitLens());
     if (!fit) return Promise.resolve();
 
     // Fit View while flying means "show me the whole thing": leave flying and
     // animate out, rather than tween a camera the fly controls also drive.
+    // The field of view eases back under the tween (the animator never
+    // touches it) and is at the orbit value before the tween ends.
     this.exitFlying();
     this.refreshSceneBounds(box);
 
@@ -1498,6 +1556,7 @@ export class Viewer {
       hitDistance: this.lastHitDistance,
       scene: this.viewBox,
       clearOf: [this.gridBox],
+      lens: { verticalFovDeg: this.camera.fov, aspect: this.camera.aspect },
     });
     if (near === this.camera.near && far === this.camera.far) return;
     this.camera.near = near;
@@ -1584,7 +1643,7 @@ export class Viewer {
     for (const marker of [this.pivotMarker, this.transientMarker]) {
       if (!marker) continue;
       const dist = this.camera.position.distanceTo(marker.position);
-      marker.scale.setScalar(dist * 0.008);
+      marker.scale.setScalar(markerScale(dist, PIVOT_MARKER_SCREEN_SIZE, this.camera.fov));
     }
   };
 

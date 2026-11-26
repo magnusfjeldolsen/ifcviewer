@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Tool } from './Tool';
 import { raycastVisible } from '../utils/raycast';
 import { MeasurementRenderer } from './MeasurementRenderer';
+import { markerScale } from './labelScale';
 import { SnapCursor, endFrom, modelIdOf, type SnapCursorDeps } from './SnapCursor';
 import {
   coordinatesAsText,
@@ -141,7 +142,7 @@ export class PositionMarkerTool implements Tool {
     this.glyphs.updateScales();
     const camera = this.deps.camera;
     for (const marker of this.markers) {
-      marker.object.scale.setScalar(camera.position.distanceTo(marker.position) * MARKER_SCREEN_SIZE);
+      marker.object.scale.setScalar(markerScale(camera.position.distanceTo(marker.position), MARKER_SCREEN_SIZE, camera.fov));
       this.placeLabel(marker.label, marker.position, marker.object.visible);
     }
     if (this.previewPoint) this.placeLabel(this.preview, this.previewPoint, true);
