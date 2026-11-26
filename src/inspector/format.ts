@@ -146,5 +146,6 @@ export function formatNumber(n: number): string {
   // toPrecision can emit scientific notation for very large / small;
   // in that case fall through; otherwise trim trailing zeros after the dot.
   if (fixed.includes('e') || fixed.includes('E')) return fixed;
-  return fixed.replace(/\.?0+$/, '');
+  // Only after a decimal point: "102630" has no point, and its zeros are digits.
+  return fixed.includes('.') ? fixed.replace(/\.?0+$/, '') : fixed;
 }
