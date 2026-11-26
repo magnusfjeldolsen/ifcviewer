@@ -81,6 +81,24 @@ describe('formatNumber', () => {
     expect(formatNumber(NaN)).toBe('NaN');
     expect(formatNumber(Infinity)).toBe('Infinity');
   });
+
+  it('keeps the zeros of a six-digit number that has no decimal point (#117)', () => {
+    expect(formatNumber(102629.9)).toBe('102630');
+    expect(formatNumber(-102629.92)).toBe('-102630');
+    expect(formatNumber(100000.5)).toBe('100001');
+    expect(formatNumber(999999.4)).toBe('999999');
+    expect(formatNumber(200000.4)).toBe('200000');
+  });
+
+  it('leaves values that were already right alone', () => {
+    expect(formatNumber(0.5)).toBe('0.5');
+    expect(formatNumber(12.34)).toBe('12.34');
+    expect(formatNumber(1e-9)).toBe('1.00000e-9');
+    expect(formatNumber(1e21)).toBe('1e+21');
+    expect(formatNumber(1234567.4)).toBe('1.23457e+6');
+    expect(formatNumber(999999.5)).toBe('1.00000e+6');
+    expect(formatNumber(-0)).toBe('0');
+  });
 });
 
 describe('formatRawValue', () => {
