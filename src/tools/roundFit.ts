@@ -109,7 +109,7 @@ const DEFECT_TOLERANCE = 1e-3;
 
 /**
  * The largest piece, in triangles plus corners, that gets an index for
- * stepping across defects. About 15 ms to build once on a desktop. Larger
+ * stepping across defects. About 45 ms to build once on a desktop at this size. Larger
  * pieces are never indexed, whichever hover asks first.
  */
 const INDEX_MAX_SIZE = 300_000;
