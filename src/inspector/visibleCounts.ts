@@ -11,6 +11,7 @@
  */
 
 import type { ColumnData } from './parameterColumn';
+import { shownNumber } from './parameterFold';
 import type { ParameterValue } from './types';
 
 /** How many elements of one parameter can be seen, and per value when asked for. */
@@ -108,7 +109,10 @@ export function countVisible(c: ColumnData, rows: Int32Array): { count: number; 
     }
     for (let code = 0; code < tally.length; code++) {
       if (tally[code] === 0) continue;
-      values.set(visibleValueKey(c.dictionary[code]), tally[code]);
+      // Numbers that show alike are one line in the list, so several codes can share a key.
+      const v = c.dictionary[code];
+      const key = visibleValueKey(typeof v === 'number' ? shownNumber(v) : v);
+      values.set(key, (values.get(key) ?? 0) + tally[code]);
       count += tally[code];
     }
     return { count, values };
@@ -130,7 +134,9 @@ export function countVisible(c: ColumnData, rows: Int32Array): { count: number; 
   for (let u = 0; u < perUnit.length; u++) {
     const unitKey = unitIndex ? c.units[u]?.key : undefined;
     for (const [v, n] of perUnit[u]) {
-      values.set(visibleValueKey(v, unitKey), n);
+      // Keyed by the number as it is printed, as the list's lines are; hair-apart numbers add up.
+      const key = visibleValueKey(shownNumber(v), unitKey);
+      values.set(key, (values.get(key) ?? 0) + n);
       count += n;
     }
   }

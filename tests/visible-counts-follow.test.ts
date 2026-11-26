@@ -204,6 +204,64 @@ describe('the value join between the list and the visible counts', () => {
   }
 });
 
+describe('lines that merge numbers printed alike', () => {
+  // Rows 0-3 are one line (16.7083), 4 is another; the discrete column mixes the same numbers with text.
+  const nums = [16.7083, 16.70830000001, 16.7083, 16.70829999999, 20, NaN];
+  const numeric: ColumnData = {
+    type: 'numeric',
+    key: 'Span',
+    count: 5,
+    values: Float64Array.from(nums),
+    units: [{ key: 'ft', symbol: 'ft' }],
+    unitIndex: null,
+  };
+  const mixedUnits: ColumnData = {
+    ...numeric,
+    key: 'SpanUnits',
+    units: [
+      { key: 'ft', symbol: 'ft' },
+      { key: 'm', symbol: 'm' },
+    ],
+    unitIndex: Uint16Array.from([0, 0, 1, 1, 0, 0]),
+  };
+  const discrete: ColumnData = {
+    type: 'discrete',
+    key: 'Mix',
+    count: 6,
+    codes: Int32Array.from([0, 1, 2, 3, 4, 5]),
+    dictionary: [16.7083, 16.70830000001, 16.70829999999, 'a', 20, 16.7083],
+  };
+  const asKeys = (c: ColumnData, rows: Int32Array): Map<string, number> => countVisible(c, rows).values;
+  const listedKeys = (c: ColumnData): Map<string, number> =>
+    new Map(columnValueCounts(c).map((v) => [visibleValueKey(v.value, v.unit?.key), v.count]));
+  const rowsOf = (c: ColumnData, skip: number[] = []): Int32Array =>
+    Int32Array.from(
+      Array.from({ length: c.type === 'discrete' ? c.codes.length : c.values.length }, (_, i) => i).filter((i) => !skip.includes(i)),
+    );
+
+  for (const c of [numeric, mixedUnits, discrete]) {
+    it(`${c.key}: the list and the visible counts agree key for key when everything is visible`, () => {
+      expect(asKeys(c, rowsOf(c))).toEqual(listedKeys(c));
+    });
+  }
+
+  it('hiding some members of a merged line lowers its count by exactly those', () => {
+    const all = listedKeys(numeric).get(visibleValueKey(16.7083))!;
+    expect(all).toBe(4);
+    const some = asKeys(numeric, rowsOf(numeric, [1, 3])).get(visibleValueKey(16.7083));
+    expect(some).toBe(all - 2);
+    const none = asKeys(numeric, rowsOf(numeric, [0, 1, 2, 3])).get(visibleValueKey(16.7083));
+    expect(none).toBeUndefined();
+  });
+
+  it('a visible count never exceeds its line', () => {
+    for (const c of [numeric, mixedUnits, discrete]) {
+      const listed = listedKeys(c);
+      for (const [k, n] of asKeys(c, rowsOf(c, [0, 4]))) expect(n).toBeLessThanOrEqual(listed.get(k)!);
+    }
+  });
+});
+
 describe('how much a recount works out', () => {
   const ids = Int32Array.from([1, 2, 3, 4]);
   const text: ColumnData = { type: 'discrete', key: 'T', count: 3, codes: Int32Array.from([0, 1, 0, -1]), dictionary: ['a', 'b'] };
